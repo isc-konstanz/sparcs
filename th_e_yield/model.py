@@ -38,28 +38,35 @@ class Model(ModelChain, ModelCore):
 
     def run(self, weather, **_):
         self.run_model(weather)
-        return self.ac
+
+        result = pd.concat([self.ac, self.dc], axis=1)
+        result = result[['p_ac', 'p_dc', 'i_mp', 'v_mp', 'i_sc', 'v_oc']]
+
+        return pd.concat([result, weather], axis=1)
 
     def pvwatts_dc(self):
         self.dc = self.system.pvwatts_dc(self.effective_irradiance,
                                          self.cell_temperature)
-        
+
         self.dc *= self.system.modules_per_string * self.system.strings_per_inverter
-        
+
         return self
 
     def pvwatts_inverter(self):
         # Scale the nameplate power rating to enable compatibility with other models
-        self.system.module_parameters['pdc0'] *= self.system.modules_per_string*self.system.strings_per_inverter
+        self.system.inverter_parameters['pdc0'] *= self.system.modules_per_string*self.system.strings_per_inverter
         
         if isinstance(self.dc, pd.Series):
             pdc = self.dc
         elif 'p_mp' in self.dc:
-            pdc = self.dc['p_mp']
+            self.dc.rename(columns={'p_mp': 'p_dc'}, inplace=True)
+
+            pdc = self.dc['p_dc']
         else:
             raise ValueError('Unknown error while calculating PVWatts AC model')
         
         self.ac = self.system.pvwatts_ac(pdc).fillna(0)
+        self.ac.name = 'p_ac'
         
         return self
 
