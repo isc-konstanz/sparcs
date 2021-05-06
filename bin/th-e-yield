@@ -1,0 +1,140 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+"""
+    th-e-yield
+    ~~~~~~~~~~
+    
+    To learn how to configure the photovoltaic yield calculation, see "th-e-yield --help"
+
+"""
+import os
+import inspect
+import logging
+import sched
+import time
+import datetime as dt
+
+from argparse import ArgumentParser, RawTextHelpFormatter
+from configparser import ConfigParser
+
+
+def main(args):
+    from th_e_yield import System
+    
+    settings_file = os.path.join(args.config_dir, 'settings.cfg')
+    if not os.path.isfile(settings_file):
+        raise ValueError('Unable to open settings: {}'.format(settings_file))
+    
+    settings = ConfigParser()
+    settings.read(settings_file)
+    
+    kwargs = vars(args)
+    kwargs.update(dict(settings.items('General')))
+    
+    systems = System.read(**kwargs)
+    if args.action == 'run':
+        systems.run()
+    
+    elif args.action == 'start':
+        start(systems, **kwargs)
+
+
+def start(systems, interval=1, **kwargs):
+    logger.info('Starting th-e-yield')
+    
+    scheduler = sched.scheduler(time.time, time.sleep)
+    schedule_first, _ = schedule_time(interval, **kwargs)
+    schedule_first -= dt.timedelta(seconds=int(interval))
+    schedule_run(systems, scheduler, schedule_first, interval)
+    scheduler.run()
+
+def schedule_run(systems, scheduler, time, interval, **kwargs):
+    logger.info("Running th-e-yield for {0} systems".format(len(systems)))
+
+    for system in systems:
+        system.run(start=time)
+
+    time, delay = schedule_time(interval, **kwargs)
+    scheduler.enter(delay, 1, schedule_run,
+                    (systems, scheduler, time, interval))
+
+    logger.info("Schedule next execution in {0} seconds: {1}".format(round(delay), time))
+
+def schedule_time(interval, delay=0, **_):
+    if isinstance(interval, str) :
+        interval = int(interval)
+
+    now = dt.datetime.now()
+    time = now + ((dt.datetime.min - now) % dt.timedelta(seconds=interval))
+
+    return time, (time - now).total_seconds() + int(delay)
+
+
+def build(settings, rmlib):
+    from th_e_yield.database import ModuleDatabase, InverterDatabase
+
+    logger.info('Starting module library build')
+    modules = ModuleDatabase(settings)
+    if rmlib:
+        modules.clean()
+    modules.build()
+
+    logger.info('Starting inverter library build')
+    inverters = InverterDatabase(settings)
+    if rmlib:
+        inverters.clean()
+    inverters.build()
+
+
+def _get_parser(root_dir):
+    from th_e_yield import __version__
+
+    parser = ArgumentParser(description=__doc__, formatter_class=RawTextHelpFormatter)
+    parser.add_argument('-v', '--version',
+                        action='version',
+                        version='%(prog)s {version}'.format(version=__version__))
+
+    subparsers = parser.add_subparsers(dest='action')
+    subparsers.required = True
+    subparsers.add_parser('run', help='Retrieve weather information and provide the calculated photovoltaic yield')
+    subparsers.add_parser('start', help='Starts the ongoing calculation of photovoltaic yield in a regular interval')
+
+    parser.add_argument('-r', '--root-directory',
+                        dest='root_dir',
+                        help="directory where the package and related libraries are located",
+                        default=root_dir,
+                        metavar='DIR')
+
+    parser.add_argument('-c', '--config-directory',
+                        dest='config_dir',
+                        help="directory to expect configuration files",
+                        default='conf',
+                        metavar='DIR')
+
+    parser.add_argument('-d', '--data-directory',
+                        dest='data_dir',
+                        help="directory to expect and write result files to",
+                        default='data',
+                        metavar='DIR')
+
+    return parser
+
+
+if __name__ == "__main__":
+    root_dir = os.path.dirname(os.path.abspath(inspect.getsourcefile(main)))
+    if os.path.basename(root_dir) == 'bin':
+        root_dir = os.path.dirname(root_dir)
+
+    os.chdir(root_dir)
+
+    if not os.path.exists('log'):
+        os.makedirs('log')
+
+    # Load the logging configuration
+    import logging.config
+    logging_file = os.path.join(os.path.join(root_dir, 'conf'), 'logging.cfg')
+    logging.config.fileConfig(logging_file)
+    logger = logging.getLogger('th-e-yield')
+    
+    main(_get_parser(root_dir).parse_args())
+

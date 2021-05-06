@@ -117,6 +117,15 @@ venv.bak/
 # Rope project settings
 .ropeproject
 
+# PyCharm project settings
+.idea/*
+
+# Eclipse project files
+*.classpath
+*.project
+*.pydevproject
+*.settings/
+
 # mkdocs documentation
 /site
 
@@ -127,3 +136,14 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Configurations except for default files
+conf/*
+!conf/*.default.cfg
+
+# Generated output
+data/
+#!lib/modules
+#lib/modules/*.csv
+#!lib/inverters
+#lib/inverters/*.csv
