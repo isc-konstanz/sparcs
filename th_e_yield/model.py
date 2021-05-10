@@ -32,8 +32,8 @@ class Model(ModelChain, ModelCore):
         
         return cls.from_configs(system, configs, **kwargs)
 
-    def __init__(self, system, location, configs, **kwargs):
-        ModelChain.__init__(self, system, location, **dict(configs.items('Model')), **kwargs)
+    def __init__(self, system, location, configs, section='Model', **kwargs):
+        ModelChain.__init__(self, system, location, **dict(configs.items(section)), **kwargs)
         ModelCore.__init__(self, configs, system, **kwargs)
 
     def run(self, weather, **_):
@@ -53,9 +53,6 @@ class Model(ModelChain, ModelCore):
         return self
 
     def pvwatts_inverter(self):
-        # Scale the nameplate power rating to enable compatibility with other models
-        self.system.inverter_parameters['pdc0'] *= self.system.modules_per_string*self.system.strings_per_inverter
-        
         if isinstance(self.dc, pd.Series):
             pdc = self.dc
         elif 'p_mp' in self.dc:
@@ -64,9 +61,9 @@ class Model(ModelChain, ModelCore):
             pdc = self.dc['p_dc']
         else:
             raise ValueError('Unknown error while calculating PVWatts AC model')
-        
+
         self.ac = self.system.pvwatts_ac(pdc).fillna(0)
         self.ac.name = 'p_ac'
-        
+
         return self
 
