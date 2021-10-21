@@ -5,36 +5,37 @@
     
     
 """
+from __future__ import annotations
+
 import os
 import logging
 import pandas as pd
 
 from pvlib.modelchain import ModelChain
 from th_e_core import Model as ModelCore
+from th_e_core import System
+from th_e_core.pvsystem import PVSystem
 
 logger = logging.getLogger(__name__)
 
 
 class Model(ModelChain, ModelCore):
 
+    # noinspection PyShadowingBuiltins
     @classmethod
-    def read(cls, context, system, **kwargs):
-        configs = cls.read_configs(system, **kwargs)
+    def read(cls, system: System, arrays: PVSystem, **kwargs) -> Model:
+        configs = cls._read_configs(arrays, **kwargs)
         configs_override = os.path.join(configs['General']['config_dir'], 
-                                        system.id+'.d', 'model.cfg')
-        
+                                        arrays.id+'.d', 'model.cfg')
+
         if os.path.isfile(configs_override):
             configs.read(configs_override)
-        
-        type = configs.get('General', 'type', fallback='default')  #@ReservedAssignment
-        if type.lower() in ['default', 'optical', 'pvlib']:
-            return Model(system, context.location, configs, **kwargs)
-        
-        return cls.from_configs(system, configs, **kwargs)
 
-    def __init__(self, system, location, configs, section='Model', **kwargs):
-        ModelChain.__init__(self, system, location, **dict(configs.items(section)), **kwargs)
-        ModelCore.__init__(self, configs, system, **kwargs)
+        return cls(system, arrays, configs, **kwargs)
+
+    def __init__(self, system, arrays, configs, section='Model', **kwargs):
+        ModelChain.__init__(self, arrays, system.location, **dict(configs.items(section)), **kwargs)
+        ModelCore.__init__(self, system, configs, **kwargs)
 
     def run(self, weather, **_):
         self.run_model(weather)
@@ -44,13 +45,8 @@ class Model(ModelChain, ModelCore):
 
         return pd.concat([result, weather], axis=1)
 
-    def pvwatts_dc(self):
-        self.dc = self.system.pvwatts_dc(self.effective_irradiance,
-                                         self.cell_temperature)
-
-        self.dc *= self.system.modules_per_string * self.system.strings_per_inverter
-
-        return self
+    def infer_losses_model(self):
+        pass
 
     def pvwatts_inverter(self):
         if isinstance(self.dc, pd.Series):
@@ -66,4 +62,3 @@ class Model(ModelChain, ModelCore):
         self.ac.name = 'p_ac'
 
         return self
-

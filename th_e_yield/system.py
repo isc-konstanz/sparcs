@@ -10,15 +10,13 @@ import json
 import logging
 import pandas as pd
 import datetime as dt
-
-from pvlib.location import Location
-from configparser import ConfigParser
-from th_e_core import Forecast, ConfigUnavailableException
+import th_e_core
+from th_e_core import Forecast, Component, ConfigUnavailableException
 from th_e_core.weather import Weather, TMYWeather, EPWWeather
 from th_e_core.pvsystem import PVSystem
-from th_e_core.system import System as SystemCore
-from th_e_yield.database import ModuleDatabase, InverterDatabase
 from th_e_yield.model import Model
+from pvlib.location import Location
+from configparser import ConfigParser as Configurations
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +27,7 @@ DC_P = 'Power (DC) [W]'
 DC_E = 'Energy yield (DC) [kWh]'
 
 
-class System(SystemCore):
+class System(th_e_core.System):
 
     def _configure(self, configs, **kwargs):
         super()._configure(configs, **kwargs)
@@ -78,11 +76,12 @@ class System(SystemCore):
 
     @property
     def _component_types(self):
-        return super()._component_types + ['solar', 'modules', 'configs']
+        return super()._component_types + ['array', 'modules']
 
-    def _component(self, configs, type, **kwargs):
-        if type in ['pv', 'solar', 'modules', 'configs']:
-            return Configurations(configs, self, **kwargs)
+    # noinspection PyShadowingBuiltins
+    def _component(self, configs: Configurations, type: str, **kwargs) -> Component:
+        if type in ['pv', 'array', 'modules']:
+            return PVSystem(self, configs, **kwargs)
         
         return super()._component(configs, type, **kwargs)
 
@@ -134,10 +133,10 @@ class System(SystemCore):
         return pd.concat([result, weather], axis=1)
 
     def evaluate(self, results, weather):
-        json = {}
-        json.update(self._evaluate_yield(results, weather))
+        json_results = {}
+        json_results.update(self._evaluate_yield(results, weather))
 
-        return json
+        return json_results
 
     def _evaluate_yield(self, results, weather):
         hours = pd.Series(weather.index, index=weather.index)
@@ -216,9 +215,14 @@ class System(SystemCore):
                             left=border_side)
 
             results_book = Workbook()
-            results_book.remove_sheet(results_book.active)
-            results_writer = pd.ExcelWriter(self._results_excel, engine='openpyxl', options={'encoding': 'utf-8'})
+            results_writer = pd.ExcelWriter(self._results_excel, engine='openpyxl', engine_kwargs={'encoding': 'utf-8-sig'})
             results_writer.book = results_book
+            results_summary.to_excel(results_writer, sheet_name='Summary', float_format="%.2f", encoding='utf-8-sig')
+            results_book['Summary'].delete_cols(1, 1)
+            results_book.remove_sheet(results_book.active)
+            results_book.active = 0
+
+            results_total.tz_localize(None).to_excel(results_writer, sheet_name=self.name, encoding='utf-8-sig')
 
             for key, configs in self.items():
                 configs_name = configs.name
@@ -228,119 +232,28 @@ class System(SystemCore):
                     configs_name += str(list(self.values()).index(configs) + 1)
 
                 results[key].tz_localize(None).to_excel(results_writer,
-                                                        sheet_name=self.name+' '+configs_name,
+                                                        sheet_name=self.name + ' ' + configs_name,
                                                         encoding='utf-8-sig')
 
-            results_summary.to_excel(results_writer, sheet_name='Summary', float_format="%.2f", encoding='utf-8-sig')
-            results_total.tz_localize(None).to_excel(results_writer, sheet_name=self.name, encoding='utf-8-sig')
-            results_book['Summary'].delete_cols(1, 1)
-            results_sheets = results_book._sheets
-            results_sheets.insert(0, results_sheets.pop(len(results_sheets)-1))
-            results_sheets.insert(0, results_sheets.pop(len(results_sheets)-1))
-
-            for result_sheet in results_sheets:
-                for result_column in range(1, len(result_sheet[1])):
-                    result_sheet[1][result_column].border = border
-                    result_sheet.column_dimensions[get_column_letter(result_column+1)].width = len(result_sheet[1][result_column].value)+2
-
+            for result_sheet in results_book:
                 result_index_width = 0
                 for result_row in result_sheet:
                     result_row[0].border = border
                     result_index_width = max(result_index_width, len(str(result_row[0].value)))
 
-                result_sheet.column_dimensions[get_column_letter(1)].width = result_index_width+2
+                result_sheet.column_dimensions[get_column_letter(1)].width = result_index_width + 2
+
+                for result_column in range(1, len(result_sheet[1])):
+                    result_column_width = len(str(result_sheet[1][result_column].value))
+                    result_sheet[1][result_column].border = border
+                    result_sheet.column_dimensions[get_column_letter(result_column+1)].width = result_column_width + 2
 
             results_book.save(self._results_excel)
             results_writer.close()
 
         except ImportError as e:
-            logger.debug("Unable to plot boxplot for {} of system {}: {}".format(os.path.abspath(self._results_excel),
-                                                                                 self.name, str(e)))
-
-
-class Configurations(PVSystem):
-
-    def _configure(self, configs, **kwargs):
-        super()._configure(configs, **kwargs)
-
-        self.module_parameters = self._configure_module(configs)
-        self.modules_per_inverter = self.strings_per_inverter * self.modules_per_string
-
-        self.inverter_parameters = self._configure_inverter(configs)
-        self.inverters_per_system = configs.getfloat('Inverter', 'count', fallback=1)
-
-    def _configure_module(self, configs):
-        module = {}
-        
-        if 'type' in configs['Module']:
-            type = configs['Module']['type']
-            modules = ModuleDatabase(configs)
-            module = modules.get(type)
-        
-        def module_update(items):
-            for key, value in items:
-                try:
-                    module[key] = float(value)
-                except ValueError:
-                    module[key] = value
-        
-        if configs.has_section('Parameters'):
-            module_update(configs.items('Parameters'))
-        
-        module_file = os.path.join(configs['General']['config_dir'], 
-                                   configs['General']['id']+'.d', 'module.cfg')
-        
-        if os.path.exists(module_file):
-            with open(module_file) as f:
-                module_str = '[Module]\n' + f.read()
-            
-            module_configs = ConfigParser()
-            module_configs.optionxform = str
-            module_configs.read_string(module_str)
-            module_update(module_configs.items('Module'))
-        
-        if 'pdc0' not in module:
-            module['pdc0'] = module['I_mp_ref'] \
-                           * module['V_mp_ref']
-        
-        return module
-
-    def _configure_inverter(self, configs):
-        inverter = {}
-        
-        if 'type' in configs['Inverter']:
-            type = configs['Inverter']['type']
-            inverters = InverterDatabase(configs)
-            # TODO: Test and verify inverter CEC parameters
-            # inverter = inverters.get(type)
-        
-        def inverter_update(items):
-            for key, value in items:
-                try:
-                    inverter[key] = float(value)
-                except ValueError:
-                    inverter[key] = value
-        
-        inverter_file = os.path.join(configs['General']['config_dir'], 
-                                     configs['General']['id']+'.d', 'inverter.cfg')
-        
-        if os.path.exists(inverter_file):
-            with open(inverter_file) as f:
-                inverter_str = '[Inverter]\n' + f.read()
-            
-            inverter_configs = ConfigParser()
-            inverter_configs.optionxform = str
-            inverter_configs.read_string(inverter_str)
-            inverter_update(inverter_configs.items('Inverter'))
-        
-        if 'pdc0' not in inverter and 'pdc0' in self.module_parameters and \
-                configs.has_section('Inverter'):
-            total = configs.getfloat('Inverter', 'strings') \
-                  * configs.getfloat('Module', 'count')
-            
-            inverter['pdc0'] = self.module_parameters['pdc0']*total
-        
-        return inverter
+            logger.debug("Unable to write excel file for {} of system {}: {}".format(
+                os.path.abspath(self._results_excel), self.name, str(e)))
 
 
 class Progress:
