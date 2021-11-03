@@ -23,18 +23,18 @@ class Model(ModelChain, ModelCore):
 
     # noinspection PyShadowingBuiltins
     @classmethod
-    def read(cls, system: System, arrays: PVSystem, **kwargs) -> Model:
-        configs = cls._read_configs(arrays, **kwargs)
+    def read(cls, system: System, array: PVSystem, **kwargs) -> Model:
+        configs = cls._read_configs(array, **kwargs)
         configs_override = os.path.join(configs['General']['config_dir'], 
-                                        arrays.id+'.d', 'model.cfg')
+                                        array.id+'.d', 'model.cfg')
 
         if os.path.isfile(configs_override):
             configs.read(configs_override)
 
-        return cls(system, arrays, configs, **kwargs)
+        return cls(system, array, configs, **kwargs)
 
-    def __init__(self, system, arrays, configs, section='Model', **kwargs):
-        ModelChain.__init__(self, arrays, system.location, **dict(configs.items(section)), **kwargs)
+    def __init__(self, system, array, configs, section='Model', **kwargs):
+        ModelChain.__init__(self, array, system.location, **dict(configs.items(section)), **kwargs)
         ModelCore.__init__(self, system, configs, **kwargs)
 
     def run(self, weather, **_):
@@ -58,7 +58,7 @@ class Model(ModelChain, ModelCore):
         else:
             raise ValueError('Unknown error while calculating PVWatts AC model')
 
-        self.ac = self.system.pvwatts_ac(pdc).fillna(0)
+        self.ac = self.system.pvwatts_ac(pdc).fillna(0).abs()
         self.ac.name = 'p_ac'
 
         return self

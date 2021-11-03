@@ -11,7 +11,7 @@ import logging
 import pandas as pd
 import datetime as dt
 import th_e_core
-from th_e_core import Forecast, Component, ConfigUnavailableException
+from th_e_core import Forecast, Component, ConfigurationUnavailableException
 from th_e_core.weather import Weather, TMYWeather, EPWWeather
 from th_e_core.pvsystem import PVSystem
 from th_e_yield.model import Model
@@ -47,8 +47,8 @@ class System(th_e_core.System):
         super()._activate(components, configs, **kwargs)
         try:
             self.weather = Forecast.read(self, **kwargs)
-            
-        except ConfigUnavailableException:
+
+        except ConfigurationUnavailableException:
             # Use weather instead of forecast, if forecast.cfg not present
             self.weather = Weather.read(self, **kwargs)
         

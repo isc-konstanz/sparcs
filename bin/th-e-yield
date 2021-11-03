@@ -19,7 +19,7 @@ from configparser import ConfigParser
 
 def main(args):
     from th_e_yield import System
-    from th_e_core.tools import _path
+    from th_e_core.tools import join_path
 
     settings_file = os.path.join(args.config_dir, 'settings.cfg')
     if not os.path.isfile(settings_file):
@@ -31,10 +31,10 @@ def main(args):
     kwargs = vars(args)
     kwargs.update(dict(settings.items('General')))
 
-    settings.set('General', 'root_dir', _path(settings, 'root_dir', kwargs.get('root_dir')))
-    settings.set('General', 'lib_dir', _path(settings, 'lib_dir', kwargs.get('lib_dir')))
-    settings.set('General', 'data_dir', _path(settings, 'data_dir', kwargs.get('data_dir')))
-    settings.set('General', 'config_dir', _path(settings, 'config_dir', kwargs.get('config_dir')))
+    settings.set('General', 'root_dir', join_path(settings, 'root_dir', kwargs.get('root_dir')))
+    settings.set('General', 'lib_dir', join_path(settings, 'lib_dir', kwargs.get('lib_dir')))
+    settings.set('General', 'data_dir', join_path(settings, 'data_dir', kwargs.get('data_dir')))
+    settings.set('General', 'config_dir', join_path(settings, 'config_dir', kwargs.get('config_dir')))
 
     systems = System.read(**kwargs)
     if args.action == 'run':

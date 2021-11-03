@@ -48,7 +48,7 @@ def main(args):
         database.disabled = False
 
         with futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(system._database.get, start, end)
+            future = executor.submit(system._database.read, start, end)
 
             results = system.run(**dict(settings.items('General')))
             results['p_ref'] = future.result()['pv_power']
