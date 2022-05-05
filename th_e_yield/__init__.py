@@ -8,6 +8,10 @@
     and can be found on GitHub "https://github.com/pvlib/pvlib-python".
     
 """
-from th_e_yield._version import __version__
+from th_e_yield._version import __version__  # noqa: F401
 
-from th_e_yield.system import System
+from th_e_yield import system  # noqa: F401
+from th_e_yield.system import System  # noqa: F401
+
+from th_e_yield import model  # noqa: F401
+from th_e_yield.model import Model  # noqa: F401
