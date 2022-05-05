@@ -13,7 +13,7 @@ import datetime as dt
 import th_e_core
 from th_e_core import Forecast, Component, ConfigurationUnavailableException
 from th_e_core.weather import Weather, TMYWeather, EPWWeather
-from th_e_core.pvsystem import PVSystem
+from th_e_core.cmpt import Photovoltaics
 from th_e_yield.model import Model
 from pvlib.location import Location
 from configparser import ConfigParser as Configurations
@@ -81,7 +81,7 @@ class System(th_e_core.System):
     # noinspection PyShadowingBuiltins
     def _component(self, configs: Configurations, type: str, **kwargs) -> Component:
         if type in ['pv', 'array', 'modules']:
-            return PVSystem(self, configs, **kwargs)
+            return Photovoltaics(self, configs, **kwargs)
         
         return super()._component(configs, type, **kwargs)
 

@@ -24,24 +24,20 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(sys.argv[0])))
 
 
 def main(args):
+    from th_e_core import configs
     from th_e_yield import System
 
-    settings_file = os.path.join(args.config_dir, 'settings.cfg')
-    if not os.path.isfile(settings_file):
-        raise ValueError('Unable to open simulation settings: {}'.format(settings_file))
-
-    settings = ConfigParser()
-    settings.read(settings_file)
+    settings = configs.read('settings.cfg', **vars(args))
 
     kwargs = vars(args)
-    kwargs.update(dict(settings.items('General')))
+    kwargs.update(settings.items('General'))
 
     start = tz.utc.localize(dt.datetime.strptime(settings['General']['start'], '%d.%m.%Y'))
     end = tz.utc.localize(dt.datetime.strptime(settings['General']['end'], '%d.%m.%Y'))
 
     systems = System.read(**kwargs)
     for system in systems:
-        system_dir = system._configs['General']['data_dir']
+        system_dir = system.configs['General']['data_dir']
         database = copy.deepcopy(system._database)
         database.dir = os.path.join(system_dir, 'results')
         database.format = '%Y%m%d'
@@ -57,8 +53,8 @@ def main(args):
                 database.persist(result)
 
             # FIXME: Optional outlier cleaning
-            #results = results[(results['p_err'] < results['p_err'].quantile(.95)) & (results['p_err'] > results['p_err'].quantile(.05))]
-            hours = results.loc[:,'p_err'].groupby([results.index.hour])
+            # results = results[(results['p_err'] < results['p_err'].quantile(.95)) & (results['p_err'] > results['p_err'].quantile(.05))]
+            hours = results.loc[:, 'p_err'].groupby([results.index.hour])
             median = hours.median()
             median.name = 'median'
             desc = pd.concat([median, hours.describe()], axis=1).loc[:, ['count', 'median', 'mean', 'std', 'min', '25%', '50%', '75%', 'max']]
@@ -105,20 +101,30 @@ def _get_parser(root_dir):
 
 
 if __name__ == "__main__":
-    root_dir = os.path.dirname(os.path.abspath(inspect.getsourcefile(main)))
-    if os.path.basename(root_dir) == 'bin':
-        root_dir = os.path.dirname(root_dir)
+    run_dir = os.path.dirname(os.path.abspath(inspect.getsourcefile(main)))
+    if os.path.basename(run_dir) == 'bin':
+        run_dir = os.path.dirname(run_dir)
 
-    os.chdir(root_dir)
+    os.chdir(run_dir)
+
+    os.environ['NUMEXPR_MAX_THREADS'] = str(os.cpu_count())
 
     if not os.path.exists('log'):
         os.makedirs('log')
 
+    logging_file = os.path.join(os.path.join(run_dir, 'conf'), 'logging.cfg')
+    if not os.path.isfile(logging_file):
+        logging_default = logging_file.replace('logging.cfg', 'logging.default.cfg')
+        if os.path.isfile(logging_default):
+            shutil.copy(logging_default, logging_file)
+        else:
+            raise FileNotFoundError("Unable to open logging.cfg in: " +
+                                    os.path.join(os.path.join(run_dir, 'conf')))
+
     # Load the logging configuration
+    import logging
     import logging.config
-    logging_file = os.path.join(os.path.join(root_dir, 'conf'), 'logging.cfg')
     logging.config.fileConfig(logging_file)
     logger = logging.getLogger('th-e-simulation')
 
-    main(_get_parser(root_dir).parse_args())
-
+    main(_get_parser(run_dir).parse_args())

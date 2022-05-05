@@ -14,7 +14,7 @@ import pandas as pd
 from pvlib.modelchain import ModelChain
 from th_e_core import Model as ModelCore
 from th_e_core import System
-from th_e_core.pvsystem import PVSystem
+from th_e_core.cmpt import Photovoltaics
 
 logger = logging.getLogger(__name__)
 
