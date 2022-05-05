@@ -206,7 +206,7 @@ class System(th_e_core.System):
         try:
             from openpyxl import Workbook
             from openpyxl.utils import get_column_letter
-            from openpyxl.styles import Border, Side
+            from openpyxl.styles import Border, Font, Side
 
             border_side = Side(border_style=None)
             border = Border(top=border_side,
@@ -215,7 +215,7 @@ class System(th_e_core.System):
                             left=border_side)
 
             results_book = Workbook()
-            results_writer = pd.ExcelWriter(self._results_excel, engine='openpyxl', engine_kwargs={'encoding': 'utf-8-sig'})
+            results_writer = pd.ExcelWriter(self._results_excel, engine='openpyxl')
             results_writer.book = results_book
             results_summary.to_excel(results_writer, sheet_name='Summary', float_format="%.2f", encoding='utf-8-sig')
             results_book['Summary'].delete_cols(1, 1)
@@ -235,6 +235,7 @@ class System(th_e_core.System):
                                                         sheet_name=self.name + ' ' + configs_name,
                                                         encoding='utf-8-sig')
 
+            results_header_font = Font(name="Calibri Light", size=12, color='333333')
             for result_sheet in results_book:
                 result_index_width = 0
                 for result_row in result_sheet:
@@ -243,10 +244,11 @@ class System(th_e_core.System):
 
                 result_sheet.column_dimensions[get_column_letter(1)].width = result_index_width + 2
 
-                for result_column in range(1, len(result_sheet[1])):
+                for result_column in range(len(result_sheet[1])):
                     result_column_width = len(str(result_sheet[1][result_column].value))
-                    result_sheet[1][result_column].border = border
                     result_sheet.column_dimensions[get_column_letter(result_column+1)].width = result_column_width + 2
+                    result_sheet[1][result_column].font = results_header_font
+                    result_sheet[1][result_column].border = border
 
             results_book.save(self._results_excel)
             results_writer.close()
