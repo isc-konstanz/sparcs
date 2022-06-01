@@ -82,7 +82,7 @@ class System(th_e_core.System):
     def _component(self, configs: Configurations, type: str, **kwargs) -> Component:
         if type in ['pv', 'array', 'modules']:
             return Photovoltaics(self, configs, **kwargs)
-        
+
         return super()._component(configs, type, **kwargs)
 
     def run(self, *args, **kwargs):

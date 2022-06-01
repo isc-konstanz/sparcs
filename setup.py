@@ -36,8 +36,8 @@ URL = 'https://github.com/isc-konstanz/th-e-yield'
 
 INSTALL_REQUIRES = ['numpy',
                     'pandas',
-                    'pvlib <= 0.8.1',
-                    'th_e_core >= 0.4.1']
+                    'pvlib == 0.8.1',
+                    'th_e_core >= 0.4.2']
 
 SCRIPTS = ['bin/th-e-yield']
 

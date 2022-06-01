@@ -23,7 +23,7 @@ class Model(ModelChain, ModelCore):
 
     # noinspection PyShadowingBuiltins
     @classmethod
-    def read(cls, system: System, array: PVSystem, **kwargs) -> Model:
+    def read(cls, system: System, array: Photovoltaics, **kwargs) -> Model:
         configs = cls._read_configs(array, **kwargs)
         configs_override = os.path.join(configs['General']['config_dir'], 
                                         array.id+'.d', 'model.cfg')
