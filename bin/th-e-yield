@@ -8,59 +8,59 @@
 
 """
 import os
-import inspect
-import sched
 import time
+import sched
+import inspect
 import datetime as dt
 
 from argparse import ArgumentParser, RawTextHelpFormatter
-from configparser import ConfigParser
+from th_e_core import Settings, Configurations
+from th_e_yield import System
 
 
-def main(args):
-    from th_e_core import configs
-    from th_e_yield import System
+def main(**kwargs) -> None:
+    action = kwargs.pop('action')
+    interval = kwargs.pop('interval', 1)
 
-    settings = configs.read('settings.cfg', **vars(args))
+    systems = System.read(settings)
+    if action == 'run':
+        run(systems)
 
-    kwargs = vars(args)
-    kwargs.update(settings.items('General'))
+    elif action == 'start':
+        start(systems, interval)
 
-    systems = System.read(**kwargs)
-    if args.action == 'run':
-        systems.run()
-
-    elif args.action == 'start':
-        start(systems, **kwargs)
-
-    elif args.action == 'build':
+    elif action == 'build':
         build(settings)
 
 
-def start(systems, interval=1, **kwargs):
+def run(systems):
+    systems()
+
+
+def start(systems, interval):
     logger.info('Starting th-e-yield')
 
     scheduler = sched.scheduler(time.time, time.sleep)
-    schedule_first, _ = schedule_time(interval, **kwargs)
+    schedule_first, _ = schedule_time(interval)
     schedule_first -= dt.timedelta(seconds=int(interval))
     schedule_run(systems, scheduler, schedule_first, interval)
     scheduler.run()
 
 
-def schedule_run(systems, scheduler, date, interval, **kwargs):
+def schedule_run(systems, scheduler, date, interval):
     logger.info("Running th-e-yield for {0} systems".format(len(systems)))
 
     for system in systems:
-        system.run(start=date)
+        system(start=date)
 
-    date, delay = schedule_time(interval, **kwargs)
+    date, delay = schedule_time(interval)
     scheduler.enter(delay, 1, schedule_run,
                     (systems, scheduler, date, interval))
 
     logger.info("Schedule next execution in {0} seconds: {1}".format(round(delay), date))
 
 
-def schedule_time(interval, delay=0, **_):
+def schedule_time(interval, delay=0):
     if isinstance(interval, str):
         interval = int(interval)
 
@@ -70,8 +70,8 @@ def schedule_time(interval, delay=0, **_):
     return date, (date - now).total_seconds() + int(delay)
 
 
-def build(settings: ConfigParser, clean: bool = False):
-    from th_e_core.cmpt.pv import ModuleDatabase, InverterDatabase
+def build(settings: Configurations, clean: bool = False):
+    from th_e_yield.pv import ModuleDatabase, InverterDatabase
 
     logger.info('Starting module library build')
     modules = ModuleDatabase(settings)
@@ -86,7 +86,7 @@ def build(settings: ConfigParser, clean: bool = False):
     inverters.build()
 
 
-def _get_parser(root_dir):
+def _get_parser():
     from th_e_yield import __version__
 
     parser = ArgumentParser(description=__doc__, formatter_class=RawTextHelpFormatter)
@@ -100,30 +100,6 @@ def _get_parser(root_dir):
     subparsers.add_parser('start', help='Starts the ongoing calculation of photovoltaic yield in a regular interval')
     subparsers.add_parser('build', help='Build the module and inverter database')
 
-    parser.add_argument('-r', '--root-directory',
-                        dest='root_dir',
-                        help="directory where the package and related libraries are located",
-                        default=root_dir,
-                        metavar='DIR')
-
-    parser.add_argument('-c', '--config-directory',
-                        dest='config_dir',
-                        help="directory to expect configuration files",
-                        default='conf',
-                        metavar='DIR')
-
-    parser.add_argument('-d', '--data-directory',
-                        dest='data_dir',
-                        help="directory to expect and write result files to",
-                        default='data',
-                        metavar='DIR')
-
-    parser.add_argument('-l', '--lib-directory',
-                        dest='lib_dir',
-                        help="directory to expect and write library files to",
-                        default='lib',
-                        metavar='DIR')
-
     return parser
 
 
@@ -134,14 +110,8 @@ if __name__ == "__main__":
 
     os.chdir(run_dir)
 
-    if not os.path.exists('log'):
-        os.makedirs('log')
+    settings = Settings('th-e-srvy', parser=_get_parser())
 
-    # Load the logging configuration
     import logging
-    import logging.config
-    logging_file = os.path.join(os.path.join(run_dir, 'conf'), 'logging.cfg')
-    logging.config.fileConfig(logging_file)
-    logger = logging.getLogger('th-e-yield')
-
-    main(_get_parser(run_dir).parse_args())
+    logger = logging.getLogger('th-e-srvy')
+    main(**settings.general)

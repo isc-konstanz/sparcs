@@ -10,15 +10,11 @@
     
 """
 from os import path
-
-try:
-    from setuptools import setup
-except ImportError:
-    from distutils.core import setup
+from setuptools import setup, find_namespace_packages
 
 here = path.abspath(path.dirname(__file__))
 info = {}
-with open(path.join("th_e_yield", "_version.py")) as f: exec(f.read(), info)
+with open(path.join("th_e_yield", "_version.py")) as f : exec(f.read(), info)
 
 VERSION = info['__version__']
 
@@ -34,14 +30,15 @@ AUTHOR = 'ISC Konstanz'
 MAINTAINER_EMAIL = 'adrian.minde@isc-konstanz.de'
 URL = 'https://github.com/isc-konstanz/th-e-yield'
 
-INSTALL_REQUIRES = ['numpy',
-                    'pandas',
-                    'pvlib == 0.8.1',
-                    'th_e_core >= 0.4.2']
+INSTALL_REQUIRES = ['numpy >= 1.16',
+                    'pandas >= 0.23',
+                    'pvlib >= 0.9',
+                    'NREL-PySAM >= 4.0',
+                    'th-e-core @ git+https://github.com/isc-konstanz/th-e-core@master >= 0.4.2']
 
 SCRIPTS = ['bin/th-e-yield']
 
-PACKAGES = ['th_e_yield']
+PACKAGES = find_namespace_packages(include=['th_e_yield*'])
 
 SETUPTOOLS_KWARGS = {
     'zip_safe': False,

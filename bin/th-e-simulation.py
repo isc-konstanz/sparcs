@@ -3,7 +3,7 @@
 """
     th-e-simulation
     ~~~~~~~~~~~~~~~
-    
+
     To learn how to configure the photovoltaic yield simulation, see "th-e-simulation.py --help"
 
 """
@@ -16,9 +16,7 @@ import pytz as tz
 import pandas as pd
 import datetime as dt
 import concurrent.futures as futures
-
 from argparse import ArgumentParser, RawTextHelpFormatter
-from configparser import ConfigParser
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(sys.argv[0])))
 
@@ -37,7 +35,7 @@ def main(args):
 
     systems = System.read(**kwargs)
     for system in systems:
-        system_dir = system.configs['General']['data_dir']
+        system_dir = system.configs.dirs.data
         database = copy.deepcopy(system._database)
         database.dir = os.path.join(system_dir, 'results')
         database.format = '%Y%m%d'
