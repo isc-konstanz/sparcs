@@ -12,7 +12,8 @@ import numpy as np
 
 from pvlib import pvsystem
 from collections import OrderedDict
-from th_e_core.io.json import JsonDatabase
+from th_e_core.configs import Configurations
+from .db import ModelDatabase
 
 logger = logging.getLogger(__name__)
 
@@ -23,13 +24,10 @@ CEC_MODULES_XLSX = 'https://solarequipment.energy.ca.gov/Home/DownloadtoExcel?fi
 CEC_INVERTERS_XLSX = 'https://solarequipment.energy.ca.gov/Home/DownloadtoExcel?filename=InvertersList'
 
 
-class ModuleDatabase(JsonDatabase):
+class ModuleDatabase(ModelDatabase):
 
-    def read(self, key: str, sub_dir='', **kwargs):
-        return super().read(key, sub_dir=os.path.join('modules', sub_dir))
-
-    def write(self, key, data, lib_dir=None, sub_dir='', **kwargs):
-        return super().write(key, data, lib_dir=lib_dir, sub_dir=os.path.join('modules', sub_dir))
+    def __init__(self, configs: Configurations):
+        super().__init__(configs, 'modules')
 
     def build(self):
         data = _load_cec(SAM_CEC_MODULES_CSV)
@@ -88,7 +86,7 @@ class ModuleDatabase(JsonDatabase):
                 meta[manufacturer] = OrderedDict()
             meta[manufacturer][module_model] = module_meta
 
-            self.write(module_model, module_data, sub_dir='modules')
+            self.write(module_model, module_data, sub_dir=manufacturer)
 
             logger.debug("Successfully built Module: %s %s",
                          module_meta['Manufacturer'],
@@ -151,13 +149,10 @@ class ModuleDatabase(JsonDatabase):
         return meta, data
 
 
-class InverterDatabase(JsonDatabase):
+class InverterDatabase(ModelDatabase):
 
-    def read(self, key: str, sub_dir='', **kwargs):
-        return super().read(key, sub_dir=os.path.join('inverters', sub_dir))
-
-    def write(self, key, data, lib_dir=None, sub_dir='', **kwargs):
-        return super().write(key, data, lib_dir=lib_dir, sub_dir=os.path.join('inverters', sub_dir))
+    def __init__(self, configs: Configurations):
+        super().__init__(configs, 'inverters')
 
     def build(self):
         data = _load_cec(SAM_CEC_INVERTERS_CSV)
