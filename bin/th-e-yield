@@ -14,63 +14,59 @@ import inspect
 import datetime as dt
 
 from argparse import ArgumentParser, RawTextHelpFormatter
-from th_e_core import Settings, Configurations
+from th_e_core import Settings
 from th_e_yield import System
 
 
 def main(**kwargs) -> None:
     action = kwargs.pop('action')
+
     interval = kwargs.pop('interval', 1)
+    delay = kwargs.pop('delay', 0)
 
     systems = System.read(settings)
     if action == 'run':
         run(systems)
 
     elif action == 'start':
-        start(systems, interval)
+        start(systems, interval, delay)
 
     elif action == 'build':
-        build(settings)
+        build()
 
 
 def run(systems):
+    logger.info(f"Running th-e-yield for {len(systems)} system{'s' if len(systems) > 1 else ''}")
     systems()
 
 
-def start(systems, interval):
+def start(systems, interval, delay=0):
     logger.info('Starting th-e-yield')
 
     scheduler = sched.scheduler(time.time, time.sleep)
-    schedule_first, _ = schedule_time(interval)
-    schedule_first -= dt.timedelta(seconds=int(interval))
-    schedule_run(systems, scheduler, schedule_first, interval)
+    schedule_run(systems, scheduler, interval, delay)
     scheduler.run()
 
 
-def schedule_run(systems, scheduler, date, interval):
-    logger.info("Running th-e-yield for {0} systems".format(len(systems)))
-
-    for system in systems:
-        system(start=date)
-
-    date, delay = schedule_time(interval)
+def schedule_run(systems, scheduler, interval, delay=0):
+    run(systems)
+    date, delay = schedule_time(interval, delay)
     scheduler.enter(delay, 1, schedule_run,
-                    (systems, scheduler, date, interval))
+                    (systems, scheduler, interval))
 
-    logger.info("Schedule next execution in {0} seconds: {1}".format(round(delay), date))
+    logger.info(f"Schedule next execution in {round(delay/60)} minutes: {date}")
 
 
 def schedule_time(interval, delay=0):
-    if isinstance(interval, str):
-        interval = int(interval)
+    from th_e_core.tools import to_int, floor_date
 
     now = dt.datetime.now()
-    date = now + ((dt.datetime.min - now) % dt.timedelta(seconds=interval))
+    date = floor_date(now, freq=f"{interval}T") + dt.timedelta(minutes=to_int(interval) + to_int(delay))
+    delay = round((date - now).total_seconds())
+    return date, delay
 
-    return date, (date - now).total_seconds() + int(delay)
 
-
-def build(settings: Configurations, clean: bool = False):
+def build(clean: bool = False):
     from th_e_yield.pv import ModuleDatabase, InverterDatabase
 
     logger.info('Starting module library build')
@@ -95,7 +91,7 @@ def _get_parser():
                         version='%(prog)s {version}'.format(version=__version__))
 
     subparsers = parser.add_subparsers(dest='action')
-    subparsers.required = True
+    subparsers.default = 'run'
     subparsers.add_parser('run', help='Retrieve weather information and provide the calculated photovoltaic yield')
     subparsers.add_parser('start', help='Starts the ongoing calculation of photovoltaic yield in a regular interval')
     subparsers.add_parser('build', help='Build the module and inverter database')
@@ -110,8 +106,8 @@ if __name__ == "__main__":
 
     os.chdir(run_dir)
 
-    settings = Settings('th-e-srvy', parser=_get_parser())
+    settings = Settings('th-e-yield', parser=_get_parser())
 
     import logging
-    logger = logging.getLogger('th-e-srvy')
+    logger = logging.getLogger('th-e-yield')
     main(**settings.general)
