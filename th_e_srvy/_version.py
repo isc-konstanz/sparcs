@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-    th-e-yield._version
-    ~~~~~~~~~~~~~~~~~~~
+    th-e-srvy._version
+    ~~~~~~~~~~~~~~~~~~
     
     
 """

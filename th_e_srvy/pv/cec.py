@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-    th-e-core.pv.module
-    ~~~~~~~~~~~~~~~~~~~~~~~~
+    th-e-srvy.pv.module
+    ~~~~~~~~~~~~~~~~~~~
     
     
 """

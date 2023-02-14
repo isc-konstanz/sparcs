@@ -15,7 +15,7 @@ import datetime as dt
 
 from argparse import ArgumentParser, RawTextHelpFormatter
 from th_e_core import Settings
-from th_e_yield import System
+from th_e_srvy import System
 
 
 def main(**kwargs) -> None:
@@ -67,7 +67,7 @@ def schedule_time(interval, delay=0):
 
 
 def build(clean: bool = False):
-    from th_e_yield.pv import ModuleDatabase, InverterDatabase
+    from th_e_srvy.pv import ModuleDatabase, InverterDatabase
 
     logger.info('Starting module library build')
     modules = ModuleDatabase(settings)
@@ -83,7 +83,7 @@ def build(clean: bool = False):
 
 
 def _get_parser():
-    from th_e_yield import __version__
+    from th_e_srvy import __version__
 
     parser = ArgumentParser(description=__doc__, formatter_class=RawTextHelpFormatter)
     parser.add_argument('-v', '--version',

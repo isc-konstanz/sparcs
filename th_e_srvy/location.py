@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-    th-e-yield.location
-    ~~~~~~~~~~~~~~~~~~~
+    th-e-srvy.location
+    ~~~~~~~~~~~~~~~~~~
 
 
 """

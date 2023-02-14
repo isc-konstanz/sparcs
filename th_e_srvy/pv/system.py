@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-    th-e-yield.pv.system
-    ~~~~~~~~~~~~~~~~~~~~
+    th-e-srvy.pv.system
+    ~~~~~~~~~~~~~~~~~~~
     
-    This module provides the :class:`h-e-yield.pv.system.Photovoltaics`, containing information about orientation
+    This module provides the :class:`th-e-srvy.pv.system.Photovoltaics`, containing information about orientation
     and datasheet parameters of a specific photovoltaic installation.
     
 """

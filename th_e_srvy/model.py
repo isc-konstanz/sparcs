@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-    th-e-yield.model
-    ~~~~~~~~~~~~~~~~
+    th-e-srvy.model
+    ~~~~~~~~~~~~~~~
     
     
 """

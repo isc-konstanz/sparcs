@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-    th-e-yield
-    ~~~~~~~~~~
-    
-    TH-E Yield provides a set of functions to calculate the energy yield of photovoltaic systems.
+    th-e-srvy
+    ~~~~~~~~~
+
+    TH-E Survey This repository provides a set of python functions and scripts to evaluate
+    and generate surveys for energy systems.
     It utilizes the independent pvlib toolbox, originally developed in MATLAB at Sandia National Laboratories,
     and can be found on GitHub "https://github.com/pvlib/pvlib-python".
     

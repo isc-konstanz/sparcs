@@ -1,7 +1,11 @@
-This repository provides a set of python functions and scripts to forecast the energy yield of photovoltaic system.
+## TH-E Survey
 
-It utilizes the independent [pvlib](https://github.com/pvlib/pvlib-python) toolbox, originally developed in MATLAB at Sandia National Laboratories,
-and can be found on GitHub.
+This repository provides a set of python functions and scripts to evaluate and generate surveys for energy systems.
+
+It utilizes the independent pvlib toolbox, originally developed in MATLAB at Sandia National Laboratories,
+and can be found on GitHub "https://github.com/pvlib/pvlib-python".
+
+More detailed information and specifics about how to use the package will be added here in the future.
 
 
 ## Contact
