@@ -82,10 +82,6 @@ class PVSystem(Photovoltaics, pv.pvsystem.PVSystem):
         if self._read_inverter_configs(params) and inverter_params_exist:
             self._inverter_parameters_override = True
 
-        inverter_params_exist = len(params) > 0
-        if not inverter_params_exist:
-            raise ConfigurationException("Unable to find inverter parameters")
-
         return params
 
     def _fit_inverter_params(self) -> dict:
