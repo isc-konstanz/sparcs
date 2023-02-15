@@ -24,6 +24,13 @@ from .location import Location
 
 logger = logging.getLogger(__name__)
 
+CMPTS = {
+    'tes': 'Buffer Storage',
+    'ees': 'Battery Storage',
+    'ev': 'Electric Vehicle',
+    'pv': 'Photovoltaics'
+}
+
 AC_E = 'Energy yield [kWh]'
 AC_Y = 'Specific yield [kWh/kWp]'
 
@@ -189,15 +196,18 @@ class System(th_e_core.System):
             summary_data = {
                 self.name: prepare_data(results.data)
             }
-            if len(self) > 1:
-                for cmpt in self.values():
-                    results_name = cmpt.name
-                    for cmpt_type in self.get_types():
-                        results_name = results_name.replace(cmpt_type, '')
-                    if len(results_name) < 1:
-                        results_name += str(list(self.values()).index(results_name) + 1)
-                    results_name = (self.name + results_name).title()
-                    summary_data[results_name] = prepare_data(results[f"{self.id}/{cmpt.id}"])
+            if len(self.system) > 1:
+                for cmpt in self.system.values():
+                    cmpt_key = f"{self.system.id}/{cmpt.id}/output"
+                    if cmpt_key in results:
+                        results_suffix = cmpt.name
+                        for cmpt_type in self.system.get_types():
+                            results_suffix = results_suffix.replace(cmpt_type, '')
+                        if len(results_suffix) < 1 and len(self.system.get_type(cmpt.type)) > 1:
+                            results_suffix += str(list(self.system.values()).index(cmpt) + 1)
+                        results_name = CMPTS[cmpt.type] if cmpt.type in CMPTS else cmpt.type.upper()
+                        results_name = f"{results_name} {results_suffix}".strip().title()
+                        summary_data[results_name] = prepare_data(results[cmpt_key])
 
             write_csv(self, summary, self._results_csv)
             write_excel(summary, summary_data, file=self._results_excel)
