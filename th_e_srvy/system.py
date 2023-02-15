@@ -6,7 +6,7 @@
     
 """
 from __future__ import annotations
-from typing import Dict, Any
+from typing import Callable, Dict
 
 import os
 import json
@@ -70,75 +70,108 @@ class System(th_e_core.System):
     def __call__(self,
                  results=None,
                  results_json=None) -> pd.DataFrame:
-        progress = Progress(len(self) + 3, file=results_json)
+        progress = Progress(len(self) + 1, file=results_json)
 
-        weather_key = f"{self.id}/input"
-        if results is not None and weather_key in results:
-            weather = results[weather_key]
-        else:
-            weather = self.weather.get()
-            if 'precipitable_water' not in weather.columns or weather['precipitable_water'].sum() == 0:
-                from pvlib.atmosphere import gueymard94_pw
-                weather['precipitable_water'] = gueymard94_pw(weather['temp_air'], weather['relative_humidity'])
-            if 'albedo' in weather.columns and weather['albedo'].sum() == 0:
-                weather.drop('albedo', axis=1, inplace=True)
-            if results is not None:
-                results.set(weather_key, weather, concat=False)
-
+        weather = self._get_result(results, f"{self.id}/input", self._get_weather)
         progress.update()
+
         result = pd.DataFrame(columns=['pv_power', 'dc_power'], index=weather.index).fillna(0)
         result.index.name = 'time'
-        for key, cmpt in self.items():
-            result_key = f"{self.id}/{cmpt.id}/output"
-            if results is not None and result_key in results:
-                result[['pv_power', 'dc_power']] += results[result_key][['pv_power', 'dc_power']].abs()
-
-            elif cmpt.type == 'pv':
-                model = Model.read(cmpt)
-                data = model(weather).rename(columns={'p_ac': 'pv_power',
-                                                      'p_dc': 'dc_power'})
-
-                result[['pv_power', 'dc_power']] += data[['pv_power', 'dc_power']].abs()
-                if results is not None:
-                    results.set(result_key, result, concat=False)
+        for cmpt in self.values():
+            if cmpt.type == 'pv':
+                result_pv = self._get_result(results, f"{self.id}/{cmpt.id}/output", self._get_solar_yield, cmpt, weather)
+                result[['pv_power', 'dc_power']] += result_pv[['pv_power', 'dc_power']].abs()
 
             progress.update()
 
-        solar_position = self._get_solar_position(result.index)
-        progress.update()
+        return pd.concat([result, weather], axis=1)
 
-        return pd.concat([result, weather, solar_position], axis=1)
+    # noinspection PyUnresolvedReferences
+    @staticmethod
+    def _get_result(results, key: str, func: Callable, *args, **kwargs) -> pd.DataFrame:
+        from th_e_core.tools import to_bool
+        if results is None or key not in results:
+            concat = to_bool(kwargs.pop('concat', False))
+            result = func(*args, **kwargs)
+            if results is not None:
+                results.set(key, result, concat=concat)
+            return result
+
+        return results.get(key)
+
+    def _get_weather(self) -> pd.DataFrame:
+        weather = self.weather.get()
+        if 'precipitable_water' not in weather.columns or weather['precipitable_water'].sum() == 0:
+            from pvlib.atmosphere import gueymard94_pw
+            weather['precipitable_water'] = gueymard94_pw(weather['temp_air'], weather['relative_humidity'])
+        if 'albedo' in weather.columns and weather['albedo'].sum() == 0:
+            weather.drop('albedo', axis=1, inplace=True)
+
+        solar_position = self._get_solar_position(weather.index)
+        return pd.concat([weather, solar_position], axis=1)
+
+    def _get_solar_position(self, index: pd.DatetimeIndex) -> pd.DataFrame:
+        data = pd.DataFrame(index=index)
+        try:
+            # TODO: use weather pressure for solar position
+            data = solarposition.get_solarposition(index,
+                                                   self.location.latitude,
+                                                   self.location.longitude,
+                                                   altitude=self.location.altitude)
+            data = data.loc[:, ['azimuth', 'apparent_zenith', 'apparent_elevation']]
+            data.columns = ['solar_azimuth', 'solar_zenith', 'solar_elevation']
+
+        except ImportError as e:
+            logger.warning("Unable to generate solar position: {}".format(str(e)))
+
+        return data
+
+    # noinspection PyMethodMayBeStatic
+    def _get_solar_yield(self, pv: PVSystem, weather: pd.DataFrame) -> pd.DataFrame:
+        model = Model.read(pv)
+        return model(weather).rename(columns={'p_ac': 'pv_power',
+                                              'p_dc': 'dc_power'})
 
     # noinspection PyProtectedMember
     def evaluate(self, **kwargs):
         from th_e_data import Results
-        from th_e_data.io import write_csv, write_excel
         from th_e_core.io._var import COLUMNS
+        from th_e_data.io import write_csv, write_excel
         logger.info("Starting evaluation for system: %s", self.name)
 
         results = Results(self)
         results.durations.start('Evaluation')
         results_key = f"{self.id}/output"
-        reference_key = f"{self.id}/target"
-        if reference_key in results:
-            reference = results[reference_key]
-        else:
-            try:
-                reference = self.database.read(**kwargs)
-                results.set(reference_key, reference)
-
-            except DatabaseUnavailableException as e:
-                reference = None
-                logger.debug("Unable to retrieve reference values for system %s: %s", self.name, str(e))
         try:
-            if results_key in results:
-                # If this component was simulated already, load the results and skip the calculation
-                results.load(results_key)
-            else:
+            if results_key not in results:
                 results.durations.start('Prediction')
                 result = self(results, self._results_json)
                 results.set(results_key, result)
                 results.durations.stop('Prediction')
+            else:
+                # If this component was simulated already, load the results and skip the calculation
+                results.load(results_key)
+            try:
+                reference = self._get_result(results, f"{self.id}/reference", self.database.read, **kwargs)
+
+                def add_reference(type: str, unit: str = 'power'):
+                    cmpts = self.get_type(type)
+                    if len(cmpts) > 0:
+                        if all([f'{cmpt.id}_{unit}' in reference.columns for cmpt in cmpts]):
+                            results.data[f'{type}_{unit}_ref'] = 0
+                            for cmpt in self.get_type(f'{type}'):
+                                results.data[f'{type}_{unit}_ref'] += reference[f'{cmpt.id}_{unit}']
+                        elif f'{type}_{unit}' in reference.columns:
+                            results.data[f'{type}_{unit}_ref'] = reference[f'{type}_{unit}']
+
+                        results.data[f'{type}_{unit}_err'] = (results.data[f'{type}_{unit}'] -
+                                                              results.data[f'{type}_{unit}_ref'])
+
+                add_reference('pv')
+
+            except DatabaseUnavailableException as e:
+                reference = None
+                logger.debug("Unable to retrieve reference values for system %s: %s", self.name, str(e))
 
             def prepare_data(data: pd.DataFrame) -> pd.DataFrame:
                 data = data.tz_convert(self.location.timezone).tz_localize(None)
@@ -167,7 +200,7 @@ class System(th_e_core.System):
                     summary_data[results_name] = prepare_data(results[f"{self.id}/{cmpt.id}"])
 
             write_csv(self, summary, self._results_csv)
-            write_excel(self, summary, summary_data, self._results_excel)
+            write_excel(summary, summary_data, file=self._results_excel)
 
             with open(self._results_json, 'w', encoding='utf-8') as f:
                 json.dump(summary_json, f, ensure_ascii=False, indent=4)
@@ -238,28 +271,12 @@ class System(th_e_core.System):
 
         return {}
 
-    def _get_solar_position(self, index: pd.DatetimeIndex) -> pd.DataFrame:
-        data = pd.DataFrame(index=index)
-        try:
-            # TODO: use weather pressure for solar position
-            data = solarposition.get_solarposition(index,
-                                                   self.location.latitude,
-                                                   self.location.longitude,
-                                                   altitude=self.location.altitude)
-            data = data.loc[:, ['azimuth', 'apparent_zenith', 'apparent_elevation']]
-            data.columns = ['solar_azimuth', 'solar_zenith', 'solar_elevation']
-
-        except ImportError as e:
-            logger.warning("Unable to generate solar position: {}".format(str(e)))
-
-        return data
-
 
 class Progress:
 
     def __init__(self, total, value=0, file=None):
         self._file = file
-        self._total = total
+        self._total = total + 1
         self._value = value
 
     def update(self):

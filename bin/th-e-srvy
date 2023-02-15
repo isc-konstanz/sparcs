@@ -37,8 +37,8 @@ def eval(systems, **kwargs):
         result = system.evaluate(**kwargs)
         results.append(result)
 
-    # evaluation = Evaluation.read(settings, required=False)
-    # evaluation(results)
+    evaluation = Evaluation.read(settings)
+    evaluation(results)
 
     logger.info("Finished TH-E Survey")
 
