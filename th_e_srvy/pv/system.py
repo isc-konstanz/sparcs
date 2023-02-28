@@ -13,6 +13,8 @@ from typing import Dict, List, Any
 import os
 import glob
 import logging
+
+import pandas as pd
 import pvlib as pv
 from copy import deepcopy
 from th_e_core.io import DatabaseException
@@ -131,6 +133,18 @@ class PVSystem(Photovoltaics, pv.pvsystem.PVSystem):
             return True
         return False
 
+    # noinspection SpellCheckingInspection
+    def pvwatts_losses(self, solar_position: pd.DataFrame):
+        # noinspection SpellCheckingInspection
+        def _pvwatts_losses(array: PVArray):
+            return pv.pvsystem.pvwatts_losses(
+                **array.pvwatts_losses(solar_position)
+            )
+        if self.num_arrays > 1:
+            return tuple(_pvwatts_losses(array) for array in self.arrays)
+        else:
+            return _pvwatts_losses(self.arrays[0])
+
     @property
     def type(self) -> str:
         return 'pv'
@@ -148,7 +162,8 @@ class PVArray(Configurable, pv.pvsystem.Array):
         self.module_parameters = self._fit_module_params()
 
         self.temperature_model_parameters = self._infer_temperature_model_params()
-        # self.array_losses_parameters = self._infer_array_losses_params()
+        self.shading_losses_parameters = self._infer_shading_losses_params()
+        self.array_losses_parameters = self._infer_array_losses_params()
 
     @staticmethod
     def _read_mount(configs: Configurations) -> pv.pvsystem.AbstractMount:
@@ -303,6 +318,67 @@ class PVArray(Configurable, pv.pvsystem.Array):
                 params['module_efficiency'] = self.module_parameters['Efficiency']
 
         return params
+
+    def _infer_array_losses_params(self) -> dict:
+        params = {}
+        if 'Losses' in self.configs:
+            losses_configs = dict(self.configs['Losses'])
+            for param in ['soiling', 'shading', 'snow', 'mismatch',
+                          'wiring', 'connections', 'lid', 'age',
+                          'nameplate_rating', 'availability']:
+
+                if param in losses_configs:
+                    params[param] = float(losses_configs.pop(param))
+            if 'dc_ohmic_percent' in losses_configs:
+                params['dc_ohmic_percent'] = float(losses_configs.pop('dc_ohmic_percent'))
+            if len(losses_configs) > 0:
+                raise ConfigurationException(f"Unknown losses parameters for array {self.name}")
+        return params
+
+    def _infer_shading_losses_params(self) -> dict:
+        shading = {}
+        shading_file = os.path.join(self._override_dir, self.name.replace('array', 'shading') + '.cfg')
+        if os.path.isfile(shading_file):
+            shading_configs = Configurations(shading_file)
+            for section in shading_configs.sections():
+                shading[section] = dict(shading_configs.items(section))
+        return shading
+
+    # noinspection SpellCheckingInspection, PyProtectedMember
+    def pvwatts_losses(self, solar_position: pd.DataFrame) -> dict:
+        params = pv.tools._build_kwargs(['soiling', 'shading', 'snow', 'mismatch',
+                                         'wiring', 'connections', 'lid',
+                                         'nameplate_rating', 'age', 'availability'],
+                                        self.array_losses_parameters)
+        if 'shading' not in params:
+            shading_losses = self.shading_losses(solar_position)
+            if not (shading_losses.empty or
+                    shading_losses.isna().any()):
+                params['shading'] = shading_losses
+        return params
+
+    def shading_losses(self, solar_position) -> pd.Series:
+        shading_losses = deepcopy(solar_position)
+        for loss, shading in self.shading_losses_parameters.items():
+            shading_loss = shading_losses[shading['column']]
+            if 'condition' in shading:
+                shading_loss = shading_loss[shading_losses.query(shading['condition']).index]
+
+            shading_none = float(shading['none'])
+            shading_full = float(shading['full'])
+            if shading_none > shading_full:
+                shading_loss = (1. - (shading_loss - shading_full)/(shading_none - shading_full))*100
+                shading_loss[shading_losses[shading['column']] > shading_none] = 0
+                shading_loss[shading_losses[shading['column']] < shading_full] = 100
+            else:
+                shading_loss = (shading_loss - shading_none)/(shading_full - shading_none)*100
+                shading_loss[shading_losses[shading['column']] < shading_none] = 0
+                shading_loss[shading_losses[shading['column']] > shading_full] = 100
+
+            shading_losses[loss] = shading_loss
+        shading_losses = shading_losses.fillna(0)[self.shading_losses_parameters.keys()].max(axis=1)
+        shading_losses.name = 'shading'
+        return shading_losses
 
 
 def _update_parameters(parameters: dict, update: dict):

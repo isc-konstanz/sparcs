@@ -60,4 +60,17 @@ class Model(ModelCore, ModelChain):
         return params
 
     def infer_losses_model(self):
-        raise NotImplementedError
+        return 'pvwatts'
+
+    # noinspection SpellCheckingInspection
+    def pvwatts_losses(self):
+        if isinstance(self.results.dc, tuple):
+            self.results.losses = tuple((100 - losses) / 100. for losses in
+                                        self.system.pvwatts_losses(self.results.solar_position))
+
+            for dc, losses in zip(self.results.dc, self.results.losses):
+                dc[:] = dc.mul(losses, axis='index')
+        else:
+            self.results.losses = (100 - self.system.pvwatts_losses(self.results.solar_position)) / 100.
+            self.results.dc[:] = self.results.dc.mul(self.results.losses, axis='index')
+        return self
