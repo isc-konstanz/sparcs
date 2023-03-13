@@ -1,6 +1,6 @@
-## TH-E Survey
+## PVSys
 
-This repository provides a set of python functions and scripts to evaluate and generate surveys for energy systems.
+This repository provides a set of python functions and scripts to calculate the energy yield of photovoltaic systems.
 
 It utilizes the independent pvlib toolbox, originally developed in MATLAB at Sandia National Laboratories,
 and can be found on GitHub "https://github.com/pvlib/pvlib-python".

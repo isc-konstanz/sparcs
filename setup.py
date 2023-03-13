@@ -1,10 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-    th-e-srvy
-    ~~~~~~~~~
+    pvsys
+    ~~~~~
     
-    TH-E Survey provides a set of functions to evaluate and generate surveys for energy systems.
+    This repository provides a set of python functions and scripts to calculate the
+    energy yield of photovoltaic systems.
     
 """
 from os import path
@@ -12,38 +13,39 @@ from setuptools import setup, find_namespace_packages
 
 here = path.abspath(path.dirname(__file__))
 info = {}
-with open(path.join("th_e_srvy", "_version.py")) as f:
+with open(path.join("pvsys", "_version.py")) as f:
     exec(f.read(), info)
 
 VERSION = info['__version__']
 
-DESCRIPTION = 'TH-E Survey provides a set of functions to evaluate and generate surveys for energy systems.'
+DESCRIPTION = 'This repository provides a set of python functions and scripts to calculate the ' \
+              'energy yield of photovoltaic systems.'
 
 # Get the long description from the README file
 with open(path.join(here, 'README.md')) as f:
     README = f.read()
 
-NAME = 'th-e-srvy'
+NAME = 'pvsys'
 LICENSE = 'GPLv3'
 AUTHOR = 'ISC Konstanz'
 MAINTAINER_EMAIL = 'adrian.minde@isc-konstanz.de'
-URL = 'https://github.com/isc-konstanz/th-e-srvy'
+URL = 'https://github.com/isc-konstanz/pvsys'
 
 INSTALL_REQUIRES = [
     'numpy >= 1.16',
     'pandas >= 0.23',
     'pvlib >= 0.9',
     'NREL-PySAM >= 4.0',
-    'th-e-core @ git+https://github.com/isc-konstanz/th-e-core.git@master'
+    'corsys @ git+https://github.com/isc-konstanz/corsys.git@master'
 ]
 
 EXTRAS_REQUIRE = {
-    'eval': ['th-e-data[excel,plot] @ git+https://github.com/isc-konstanz/th-e-data.git@master']
+    'eval': ['scisys[excel,plot] @ git+https://github.com/isc-konstanz/scisys.git@master']
 }
 
-SCRIPTS = ['bin/th-e-srvy']
+SCRIPTS = ['bin/pvsys']
 
-PACKAGES = find_namespace_packages(include=['th_e_srvy*'])
+PACKAGES = find_namespace_packages(include=['pvsys*'])
 
 SETUPTOOLS_KWARGS = {
     'zip_safe': False,

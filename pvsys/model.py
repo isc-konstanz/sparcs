@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-    th-e-srvy.model
-    ~~~~~~~~~~~~~~~
+    pvsys.model
+    ~~~~~~~~~~~
     
     
 """
@@ -13,9 +13,9 @@ from abc import ABC
 import pandas as pd
 from typing import Dict, Any
 from pvlib.modelchain import ModelChain
-from th_e_core.model import Model as ModelCore
-from th_e_core.configs import Configurations
-from th_e_core import System
+from corsys.model import Model as ModelCore
+from corsys.configs import Configurations
+from corsys import System
 from . import PVSystem
 
 logger = logging.getLogger(__name__)

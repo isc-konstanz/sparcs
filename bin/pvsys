@@ -1,10 +1,10 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 """
-    th-e-yield
-    ~~~~~~~~~~
-    
-    To learn how to configure the photovoltaic yield calculation, see "th-e-yield --help"
+    pvsys
+    ~~~~~
+
+    To learn how to configure the photovoltaic system yield calculation, see "pvsys --help"
 
 """
 import os
@@ -14,8 +14,8 @@ import inspect
 import datetime as dt
 
 from argparse import ArgumentParser, RawTextHelpFormatter
-from th_e_core import Settings
-from th_e_srvy import System
+from corsys import Settings
+from pvsys import System
 
 
 def main(**kwargs) -> None:
@@ -31,43 +31,45 @@ def main(**kwargs) -> None:
     elif action == 'start':
         start(systems, interval, delay)
 
+    elif action == 'eval':
+        eval(systems, **kwargs)
+
     elif action == 'build':
-        build()
+        build(systems, **kwargs)
 
 
 def run(systems):
-    logger.info(f"Running th-e-yield for {len(systems)} system{'s' if len(systems) > 1 else ''}")
+    logger.info(f"Running pvsys for {len(systems)} system{'s' if len(systems) > 1 else ''}")
     systems()
 
 
 def start(systems, interval, delay=0):
-    logger.info('Starting th-e-yield')
+    logger.info('Starting pvsys')
 
     scheduler = sched.scheduler(time.time, time.sleep)
     schedule_run(systems, scheduler, interval, delay)
     scheduler.run()
 
 
-def schedule_run(systems, scheduler, interval, delay=0):
-    run(systems)
-    date, delay = schedule_time(interval, delay)
-    scheduler.enter(delay, 1, schedule_run,
-                    (systems, scheduler, interval))
+# noinspection PyShadowingBuiltins, PyBroadException
+def eval(systems, **kwargs):
+    from scisys import Evaluation
 
-    logger.info(f"Schedule next execution in {round(delay/60)} minutes: {date}")
+    logger.info(f"Running PV system evaluation for {len(systems)} system{'s' if len(systems) > 1 else ''}")
+    results = []
+    for system in systems:
+        system.build(**kwargs)
+        result = system.evaluate(**kwargs)
+        results.append(result)
+
+    evaluation = Evaluation.read(settings)
+    evaluation(results)
+
+    logger.info("Finished PV system evaluation")
 
 
-def schedule_time(interval, delay=0):
-    from th_e_core.tools import to_int, floor_date
-
-    now = dt.datetime.now()
-    date = floor_date(now, freq=f"{interval}T") + dt.timedelta(minutes=to_int(interval) + to_int(delay))
-    delay = round((date - now).total_seconds())
-    return date, delay
-
-
-def build(clean: bool = False):
-    from th_e_srvy.pv import ModuleDatabase, InverterDatabase
+def build(systems, clean: bool = False, **kwargs):
+    from pvsys.pv import ModuleDatabase, InverterDatabase
 
     logger.info('Starting module library build')
     modules = ModuleDatabase(settings)
@@ -81,9 +83,29 @@ def build(clean: bool = False):
         inverters.clean()
     inverters.build()
 
+    systems.build(**kwargs)
+
+
+def schedule_run(systems, scheduler, interval, delay=0):
+    run(systems)
+    date, delay = schedule_time(interval, delay)
+    scheduler.enter(delay, 1, schedule_run,
+                    (systems, scheduler, interval))
+
+    logger.info(f"Schedule next execution in {round(delay/60)} minutes: {date}")
+
+
+def schedule_time(interval, delay=0):
+    from corsys.tools import to_int, floor_date
+
+    now = dt.datetime.now()
+    date = floor_date(now, freq=f"{interval}T") + dt.timedelta(minutes=to_int(interval) + to_int(delay))
+    delay = round((date - now).total_seconds())
+    return date, delay
+
 
 def _get_parser():
-    from th_e_srvy import __version__
+    from pvsys import __version__
 
     parser = ArgumentParser(description=__doc__, formatter_class=RawTextHelpFormatter)
     parser.add_argument('-v', '--version',
@@ -94,6 +116,7 @@ def _get_parser():
     subparsers.default = 'run'
     subparsers.add_parser('run', help='Retrieve weather information and provide the calculated photovoltaic yield')
     subparsers.add_parser('start', help='Starts the ongoing calculation of photovoltaic yield in a regular interval')
+    subparsers.add_parser('eval', help='Retrieve weather information and evaluate the configured system')
     subparsers.add_parser('build', help='Build the module and inverter database')
 
     return parser
@@ -106,8 +129,8 @@ if __name__ == "__main__":
 
     os.chdir(run_dir)
 
-    settings = Settings('th-e-yield', parser=_get_parser())
+    settings = Settings('pvsys', parser=_get_parser())
 
     import logging
-    logger = logging.getLogger('th-e-yield')
+    logger = logging.getLogger('pvsys')
     main(**settings.general)

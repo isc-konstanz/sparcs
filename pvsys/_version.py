@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-    th-e-srvy._version
-    ~~~~~~~~~~~~~~~~~~
+    pvsys._version
+    ~~~~~~~~~~~~~~
     
     
 """
-__version_info__ = ('0', '1', '2')
+__version_info__ = ('0', '2', '0')
 __version__ = '.'.join(__version_info__)

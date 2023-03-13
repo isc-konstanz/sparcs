@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-    th-e-srvy.location
-    ~~~~~~~~~~~~~~~~~~
+    pvsys.location
+    ~~~~~~~~~~~~~~
 
 
 """
@@ -9,7 +9,7 @@ from __future__ import annotations
 import datetime as dt
 import pytz as tz
 import pvlib as pv
-import th_e_core as core
+import corsys as core
 
 
 class Location(core.Location, pv.location.Location):

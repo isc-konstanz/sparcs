@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-    th-e-yield.evaluation
-    ~~~~~~~~~~~~~~~~~
+    pvsys.evaluation
+    ~~~~~~~~~~~~~~~~
 
 
 """
@@ -14,12 +14,12 @@ import pandas as pd
 import traceback
 
 # noinspection PyProtectedMember
-from th_e_core.io._var import COLUMNS
-from th_e_core.io import DatabaseUnavailableException
-from th_e_core.tools import to_bool
-from th_e_core import Configurations, Configurable, System
-from th_e_data.io import write_csv, write_excel
-from th_e_data import Results
+from corsys.io._var import COLUMNS
+from corsys.io import DatabaseUnavailableException
+from corsys.tools import to_bool
+from corsys import Configurations, Configurable, System
+from scisys.io import write_csv, write_excel
+from scisys import Results
 
 logger = logging.getLogger(__name__)
 

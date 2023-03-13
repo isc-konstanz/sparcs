@@ -8,6 +8,6 @@ tables==3.8.*
 openpyxl==3.1.*
 matplotlib==3.6.*
 seaborn==0.12.*
-th_e_core>=0.6.1
-th_e_data>=0.1.0
+corsys>=0.7
+scisys>=0.2
 pvlib==0.9.*

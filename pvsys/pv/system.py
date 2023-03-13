@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-    th-e-srvy.pv.system
-    ~~~~~~~~~~~~~~~~~~~
+    pvsys.pv.system
+    ~~~~~~~~~~~~~~~
     
-    This module provides the :class:`th-e-srvy.pv.system.Photovoltaics`, containing information about orientation
+    This module provides the :class:`pvsys.pv.system.Photovoltaics`, containing information about orientation
     and datasheet parameters of a specific photovoltaic installation.
     
 """
@@ -17,10 +17,10 @@ import logging
 import pandas as pd
 import pvlib as pv
 from copy import deepcopy
-from th_e_core.io import DatabaseException
-from th_e_core.configs import Configurations, Configurable, ConfigurationException
-from th_e_core.cmpt import Photovoltaics
-from th_e_core import System
+from corsys.io import DatabaseException
+from corsys.configs import Configurations, Configurable, ConfigurationException
+from corsys.cmpt import Photovoltaics
+from corsys import System
 from . import ModuleDatabase, InverterDatabase
 
 logger = logging.getLogger(__name__)

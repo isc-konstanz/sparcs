@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-    th-e-srvy.pv.module
-    ~~~~~~~~~~~~~~~~~~~
+    pvsys.pv.module
+    ~~~~~~~~~~~~~~~
     
     
 """
@@ -12,7 +12,7 @@ import numpy as np
 
 from pvlib import pvsystem
 from collections import OrderedDict
-from th_e_core.configs import Configurations
+from corsys.configs import Configurations
 from .db import ModelDatabase
 
 logger = logging.getLogger(__name__)

@@ -1,22 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-    th-e-srvy.system
-    ~~~~~~~~~~~~~~~~
+    pvsys.system
+    ~~~~~~~~~~~~
     
     
 """
 from __future__ import annotations
-from typing import Callable, Dict
 
-import os
-import json
 import logging
 import pandas as pd
-import traceback
-import th_e_core
-from th_e_core import Component
-from th_e_core.io import DatabaseUnavailableException
-from th_e_core.configs import Configurations
+import corsys
+from corsys import Component
+from corsys.configs import Configurations
 from pvlib import solarposition
 from .pv import PVSystem
 from .model import Model
@@ -35,7 +30,7 @@ AC_E = 'Energy yield [kWh]'
 AC_Y = 'Specific yield [kWh/kWp]'
 
 
-class System(th_e_core.System):
+class System(corsys.System):
 
     def __location__(self, configs: Configurations) -> Location:
         # FIXME: location necessary for for weather instantiation, but called afterwards here

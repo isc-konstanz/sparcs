@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-    th-e-srvy.pv.db
-    ~~~~~~~~~~~~~~~
+    pvsys.pv.db
+    ~~~~~~~~~~~
     
     
 """
@@ -12,8 +12,8 @@ import json
 import shutil
 import time
 
-from th_e_core.io import DatabaseException
-from th_e_core import Configurations
+from corsys.io import DatabaseException
+from corsys import Configurations
 
 
 class ModelDatabase(ABC):
