@@ -11,6 +11,7 @@ import logging
 import pandas as pd
 import corsys
 from corsys import Component
+from corsys.weather import Weather
 from corsys.configs import Configurations
 from pvlib import solarposition
 from .pv import PVSystem
@@ -45,6 +46,19 @@ class System(corsys.System):
                         altitude=configs.getfloat('Location', 'altitude', fallback=None),
                         country=configs.get('Location', 'country', fallback=None),
                         state=configs.get('Location', 'state', fallback=None))
+
+    def __weather__(self, configs: Configurations) -> Weather:
+        conf_file = 'weather.cfg'
+        configs = Configurations.from_configs(self.configs, conf_file)
+        type = configs.get('General', 'type', fallback='default').lower()
+        if type == 'tmy':
+            from .weather.tmy import TMYWeather
+            return TMYWeather(self, configs)
+        elif type == 'epw':
+            from .weather.epw import EPWWeather
+            return EPWWeather(self, configs)
+
+        return Weather.read(self, conf_file)
 
     def __cmpt_types__(self):
         return super().__cmpt_types__('solar', 'array')
