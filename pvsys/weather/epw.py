@@ -15,7 +15,7 @@ import logging
 from pvlib.iotools import read_epw
 from corsys.configs import Configurations
 from corsys.system import System
-from .wx import Weather
+from corsys.weather import Weather
 
 logger = logging.getLogger(__name__)
 

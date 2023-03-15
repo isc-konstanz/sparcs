@@ -13,7 +13,7 @@ import pandas as pd
 from pvlib.iotools import read_tmy2, read_tmy3
 from corsys.configs import Configurations
 from corsys.system import System
-from .wx import Weather
+from corsys.weather import Weather
 
 
 class TMYWeather(Weather):
