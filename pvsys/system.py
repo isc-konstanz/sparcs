@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import pandas as pd
-import corsys
+import corsys as core
 from corsys import Component
 from corsys.weather import Weather
 from corsys.configs import Configurations
@@ -17,6 +17,10 @@ from pvlib import solarposition
 from .pv import PVSystem
 from .model import Model
 from .location import Location
+from .input import (
+    relative_humidity_from_dewpoint,
+    precipitable_water_from_relative_humidity
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +35,7 @@ AC_E = 'Energy yield [kWh]'
 AC_Y = 'Specific yield [kWh/kWp]'
 
 
-class System(corsys.System):
+class System(core.System):
 
     def __location__(self, configs: Configurations) -> Location:
         # FIXME: location necessary for for weather instantiation, but called afterwards here
@@ -71,23 +75,37 @@ class System(corsys.System):
         return super().__cmpt__(configs, type)
 
     def __call__(self) -> pd.DataFrame:
-        weather = self._get_weather()
-
-        result = pd.DataFrame(columns=['pv_power', 'dc_power'], index=weather.index).fillna(0)
+        input = self._get_input()
+        result = pd.DataFrame(columns=['pv_power', 'dc_power'], index=input.index).fillna(0)
         result.index.name = 'time'
         for cmpt in self.values():
             if cmpt.type == 'pv':
-                result_pv = self._get_solar_yield(cmpt, weather)
+                result_pv = self._get_solar_yield(cmpt, input)
                 result[['pv_power', 'dc_power']] += result_pv[['pv_power', 'dc_power']].abs()
 
-        return pd.concat([result, weather], axis=1)
+        return pd.concat([result, input], axis=1)
 
-    def _get_weather(self) -> pd.DataFrame:
+    def _get_input(self) -> pd.DataFrame:
         weather = self.weather.get()
-        if 'precipitable_water' not in weather.columns or weather['precipitable_water'].sum() == 0:
-            from pvlib.atmosphere import gueymard94_pw
-            weather['precipitable_water'] = gueymard94_pw(weather['temp_air'], weather['relative_humidity'])
-        if 'albedo' in weather.columns and weather['albedo'].sum() == 0:
+
+        # noinspection PyShadowingBuiltins
+        def assert_inputs(*inputs, error=False):
+            if any(input for input in inputs if input not in weather.colums or weather[input].sum() == 0):
+                if error:
+                    raise ValueError(f"Unable to complete input data with missing or invalid features: "
+                                     ', '.join(inputs))
+                return False
+            return True
+
+        if not assert_inputs('relative_humidity'):
+            assert_inputs('temp_air', 'dew_point', error=True)
+            weather['precipitable_water'] = relative_humidity_from_dewpoint(weather['temp_air'],
+                                                                            weather['dew_point'])
+        if not assert_inputs('precipitable_water'):
+            assert_inputs('temp_air', 'relative_humidity', error=True)
+            weather['precipitable_water'] = precipitable_water_from_relative_humidity(weather['temp_air'],
+                                                                                      weather['relative_humidity'])
+        if not assert_inputs('albedo'):
             weather.drop('albedo', axis=1, inplace=True)
 
         solar_position = self._get_solar_position(weather.index)
@@ -96,7 +114,6 @@ class System(corsys.System):
     def _get_solar_position(self, index: pd.DatetimeIndex) -> pd.DataFrame:
         data = pd.DataFrame(index=index)
         try:
-            # TODO: use weather pressure for solar position
             data = solarposition.get_solarposition(index,
                                                    self.location.latitude,
                                                    self.location.longitude,

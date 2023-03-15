@@ -66,20 +66,20 @@ class Evaluation(Configurable):
         try:
             if results_key not in results:
                 results.durations.start('Prediction')
-                weather = _get(results, f"{self.system.id}/input", self.system._get_weather)
+                input = _get(results, f"{self.system.id}/input", self.system._get_input)
                 progress.update()
 
-                result = pd.DataFrame(columns=['pv_power', 'dc_power'], index=weather.index).fillna(0)
+                result = pd.DataFrame(columns=['pv_power', 'dc_power'], index=input.index).fillna(0)
                 result.index.name = 'time'
                 for cmpt in self.system.values():
                     if cmpt.type == 'pv':
                         cmpt_key = f"{self.system.id}/{cmpt.id}/output"
-                        result_pv = _get(results, cmpt_key, self.system._get_solar_yield, cmpt, weather)
+                        result_pv = _get(results, cmpt_key, self.system._get_solar_yield, cmpt, input)
                         result[['pv_power', 'dc_power']] += result_pv[['pv_power', 'dc_power']].abs()
 
                     progress.update()
 
-                result = pd.concat([result, weather], axis=1)
+                result = pd.concat([result, input], axis=1)
                 results.set(results_key, result)
                 results.durations.stop('Prediction')
             else:
