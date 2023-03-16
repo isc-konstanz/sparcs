@@ -56,7 +56,7 @@ class Evaluation(Configurable):
             os.makedirs(self._results_dir)
 
     # noinspection PyProtectedMember
-    def __call__(self, **kwargs) -> Results:
+    def __call__(self, *args, **kwargs) -> Results:
         logger.info("Starting evaluation for system: %s", self.system.name)
         progress = Progress(len(self.system) + 1, file=self._results_json)
 
@@ -66,7 +66,7 @@ class Evaluation(Configurable):
         try:
             if results_key not in results:
                 results.durations.start('Prediction')
-                input = _get(results, f"{self.system.id}/input", self.system._get_input)
+                input = _get(results, f"{self.system.id}/input", self.system._get_input, *args, **kwargs)
                 progress.update()
 
                 result = pd.DataFrame(columns=['pv_power', 'dc_power'], index=input.index).fillna(0)

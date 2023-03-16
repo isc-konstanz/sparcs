@@ -19,20 +19,12 @@ from .model import Model
 from .location import Location
 from .input import (
     relative_humidity_from_dewpoint,
-    precipitable_water_from_relative_humidity
+    precipitable_water_from_relative_humidity,
+    global_diffuse_to_direct_normal_irradiance,
+    cloud_cover_to_irradiance
 )
 
 logger = logging.getLogger(__name__)
-
-CMPTS = {
-    'tes': 'Buffer Storage',
-    'ees': 'Battery Storage',
-    'ev': 'Electric Vehicle',
-    'pv': 'Photovoltaics'
-}
-
-AC_E = 'Energy yield [kWh]'
-AC_Y = 'Specific yield [kWh/kWp]'
 
 
 class System(core.System):
@@ -74,6 +66,7 @@ class System(core.System):
 
         return super().__cmpt__(configs, type)
 
+    # noinspection PyShadowingBuiltins
     def __call__(self) -> pd.DataFrame:
         input = self._get_input()
         result = pd.DataFrame(columns=['pv_power', 'dc_power'], index=input.index).fillna(0)
@@ -85,29 +78,53 @@ class System(core.System):
 
         return pd.concat([result, input], axis=1)
 
-    def _get_input(self) -> pd.DataFrame:
-        weather = self.weather.get()
+    # noinspection PyUnresolvedReferences
+    def _get_input(self, *args, **kwargs) -> pd.DataFrame:
+        weather = self.weather.get(*args, **kwargs)
 
         # noinspection PyShadowingBuiltins
         def assert_inputs(*inputs, error=False):
-            if any(input for input in inputs if input not in weather.colums or weather[input].sum() == 0):
+            if any(input for input in inputs if input not in weather.columns or weather[input].isna().any()):
                 if error:
                     raise ValueError(f"Unable to complete input data with missing or invalid features: "
                                      ', '.join(inputs))
                 return False
             return True
 
-        if not assert_inputs('relative_humidity'):
-            assert_inputs('temp_air', 'dew_point', error=True)
-            weather['precipitable_water'] = relative_humidity_from_dewpoint(weather['temp_air'],
-                                                                            weather['dew_point'])
-        if not assert_inputs('precipitable_water'):
-            assert_inputs('temp_air', 'relative_humidity', error=True)
-            weather['precipitable_water'] = precipitable_water_from_relative_humidity(weather['temp_air'],
-                                                                                      weather['relative_humidity'])
-        if not assert_inputs('albedo'):
-            weather.drop('albedo', axis=1, inplace=True)
+        # noinspection PyShadowingBuiltins
+        def insert_input(input, data):
+            if input not in weather.columns:
+                weather[input] = data
+            else:
+                weather[input] = weather[input].combine_first(data)
 
+        if not assert_inputs(Weather.GHI, Weather.DHI, Weather.DNI):
+            solar_position = self.location.get_solarposition(weather.index)
+            if not assert_inputs(Weather.GHI):
+                assert_inputs(Weather.CLOUD_COVER, error=True)
+                ghi, dhi, dni = cloud_cover_to_irradiance(self.location, weather[Weather.CLOUD_COVER], solar_position)
+                insert_input(Weather.GHI, ghi)
+                insert_input(Weather.DHI, dhi)
+                insert_input(Weather.DNI, dni)
+            if not assert_inputs(Weather.DNI):
+                assert_inputs(Weather.GHI, Weather.DHI, error=True)
+                insert_input(Weather.DNI, global_diffuse_to_direct_normal_irradiance(
+                    weather[Weather.GHI],
+                    weather[Weather.DHI],
+                    solar_position)
+                )
+        if not assert_inputs(Weather.HUMIDITY_REL):
+            assert_inputs(Weather.TEMP_AIR, Weather.TEMP_DEW_POINT, error=True)
+            insert_input(Weather.HUMIDITY_REL, relative_humidity_from_dewpoint(
+                weather[Weather.TEMP_AIR],
+                weather[Weather.TEMP_DEW_POINT])
+            )
+        if not assert_inputs(Weather.PRECIPITABLE_WATER):
+            assert_inputs(Weather.TEMP_AIR, Weather.HUMIDITY_REL, error=True)
+            insert_input(Weather.PRECIPITABLE_WATER, precipitable_water_from_relative_humidity(
+                weather[Weather.TEMP_AIR],
+                weather[Weather.HUMIDITY_REL])
+            )
         solar_position = self._get_solar_position(weather.index)
         return pd.concat([weather, solar_position], axis=1)
 
