@@ -41,6 +41,10 @@ class EPWWeather(Weather):
             self._download(system)
 
         self.data, self.meta = read_epw(filename=self.file, coerce_year=self.year)
+        columns = self.data.columns
+        for column in columns:
+            if self.data[column].sum() == 0:
+                self.data.drop(column, axis=1, inplace=True)
 
     # noinspection PyPackageRequirements
     def _download(self, system: System) -> None:
