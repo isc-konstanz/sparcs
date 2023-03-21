@@ -6,12 +6,12 @@
     
 """
 from __future__ import annotations
+from typing import Dict, Any
 import os
 import logging
-from abc import ABC
-
 import pandas as pd
-from typing import Dict, Any
+
+from copy import deepcopy
 from pvlib.modelchain import ModelChain
 from corsys.model import Model as ModelCore
 from corsys.configs import Configurations
@@ -25,11 +25,9 @@ class Model(ModelCore, ModelChain):
 
     # noinspection PyShadowingBuiltins
     @classmethod
-    def read(cls, system: PVSystem, config_file: str = 'model.cfg') -> Model:
-        configs = Configurations.from_configs(system.configs, config_file)
-        configs_override = os.path.join(configs.dirs.conf,
-                                        system.id+'.d', 'model.cfg')
-
+    def read(cls, system: PVSystem, override_file: str = 'forecast.cfg') -> Model:
+        configs = deepcopy(system.configs)
+        configs_override = os.path.join(configs.dirs.conf, system.id+'.d', override_file)
         if os.path.isfile(configs_override):
             configs.read(configs_override)
 
