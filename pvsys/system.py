@@ -78,9 +78,8 @@ class System(core.System):
 
         return pd.concat([result, input], axis=1)
 
-    # noinspection PyUnresolvedReferences
-    def _get_input(self, *args, **kwargs) -> pd.DataFrame:
-        weather = self.weather.get(*args, **kwargs)
+    # noinspection PyUnresolvedReferences, PyTypeChecker
+    def _validate_input(self, weather: pd.DataFrame) -> pd.DataFrame:
 
         # noinspection PyShadowingBuiltins
         def assert_inputs(*inputs, error=False):
@@ -127,6 +126,11 @@ class System(core.System):
             )
         solar_position = self._get_solar_position(weather.index)
         return pd.concat([weather, solar_position], axis=1)
+
+    def _get_input(self, *args, **kwargs) -> pd.DataFrame:
+        weather = self.weather.get(*args, **kwargs)
+        input = self._validate_input(weather)
+        return input
 
     def _get_solar_position(self, index: pd.DatetimeIndex) -> pd.DataFrame:
         data = pd.DataFrame(index=index)
