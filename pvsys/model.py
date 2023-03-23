@@ -38,14 +38,17 @@ class Model(ModelCore, ModelChain):
 
     def __call__(self, weather, **_):
         self.run_model(weather)
+        results = deepcopy(self.results)
+        results_dc = results.dc.to_frame() if isinstance(results.dc, pd.Series) else results.dc
+        results_dc = results_dc.rename(columns={'p_mp': 'p_dc'})
+        results_ac = results.ac.to_frame() if isinstance(results.ac, pd.Series) else results.ac
+        results_ac = results_ac.rename(columns={'p_mp': 'p_ac'})['p_ac']
 
-        results_dc = self.results.dc.rename(columns={'p_mp': 'p_dc'})
-        results_ac = self.results.ac.rename(columns={'p_mp': 'p_ac'})['p_ac']
         result = pd.concat([results_ac, results_dc], axis=1)
-        result = result[['p_ac', 'p_dc', 'i_mp', 'v_mp', 'i_sc', 'v_oc']]
+        result = result[[c for c in ['p_ac', 'p_dc', 'i_mp', 'v_mp', 'i_sc', 'v_oc'] if c in result.columns]]
 
-        if not isinstance(self.results.losses, float):
-            losses = self.results.losses
+        if not isinstance(results.losses, float):
+            losses = results.losses
             result = pd.concat([result, losses], axis=1)
 
         return pd.concat([result, weather], axis=1)

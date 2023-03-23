@@ -227,8 +227,6 @@ class PVArray(Configurable, pv.pvsystem.Array):
         if 'pdc0' not in params and all(p in params for p in ['I_mp_ref', 'V_mp_ref']):
             params['pdc0'] = params['I_mp_ref'] \
                            * params['V_mp_ref']
-            if 'gamma_pdc' not in params and 'gamma_mp' in params:
-                params['gamma_pdc'] = denormalize_coeff('gamma_mp', 'pdc0')
 
         if 'Efficiency' not in params.keys():
             params['Efficiency'] = float(self.module_parameters['pdc0']) / \
@@ -259,6 +257,8 @@ class PVArray(Configurable, pv.pvsystem.Array):
                     params_fit = dict(zip(params_iv, params_fit_result))
                 elif all(k in params.keys() for k in params_desoto):
                     params_fit, params_fit_result = pv.ivtools.sdm.fit_desoto(*param_values(params_desoto))
+                elif 'gamma_pdc' not in params and 'gamma_mp' in params:
+                    params['gamma_pdc'] = denormalize_coeff('gamma_mp', 'pdc0')
                 else:
                     raise RuntimeError("Unable to estimate parameters due to incomplete variables")
 
@@ -266,6 +266,9 @@ class PVArray(Configurable, pv.pvsystem.Array):
 
         except RuntimeError as e:
             logger.warning(str(e))
+
+            if 'gamma_pdc' not in params and 'gamma_mp' in params:
+                params['gamma_pdc'] = denormalize_coeff('gamma_mp', 'pdc0')
 
         return params
 
