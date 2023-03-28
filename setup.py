@@ -32,8 +32,6 @@ MAINTAINER_EMAIL = 'adrian.minde@isc-konstanz.de'
 URL = 'https://github.com/isc-konstanz/pvsys'
 
 INSTALL_REQUIRES = [
-    'numpy >= 1.16',
-    'pandas >= 0.23',
     'pvlib >= 0.9',
     'NREL-PySAM >= 4.0',
     'corsys @ git+https://github.com/isc-konstanz/corsys.git@master'
