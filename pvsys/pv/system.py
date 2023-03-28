@@ -245,8 +245,8 @@ class PVArray(Configurable, pv.pvsystem.Array):
 
                 def param_values(keys) -> List[float | int]:
                     params_slice = {k: params[k] for k in keys}
-                    params_slice['alpha_sc'] = denormalize_coeff('alpha_sc', 'I_mp_ref')
-                    params_slice['beta_oc'] = denormalize_coeff('beta_oc', 'V_mp_ref')
+                    params_slice['alpha_sc'] = denormalize_coeff('alpha_sc', 'I_sc_ref')
+                    params_slice['beta_oc'] = denormalize_coeff('beta_oc', 'V_oc_ref')
 
                     return list(params_slice.values())
 
@@ -258,7 +258,7 @@ class PVArray(Configurable, pv.pvsystem.Array):
                 elif all(k in params.keys() for k in params_desoto):
                     params_fit, params_fit_result = pv.ivtools.sdm.fit_desoto(*param_values(params_desoto))
                 elif 'gamma_pdc' not in params and 'gamma_mp' in params:
-                    params['gamma_pdc'] = denormalize_coeff('gamma_mp', 'pdc0')
+                    params['gamma_pdc'] = params['gamma_mp'] / 100.
                 else:
                     raise RuntimeError("Unable to estimate parameters due to incomplete variables")
 
@@ -268,7 +268,7 @@ class PVArray(Configurable, pv.pvsystem.Array):
             logger.warning(str(e))
 
             if 'gamma_pdc' not in params and 'gamma_mp' in params:
-                params['gamma_pdc'] = denormalize_coeff('gamma_mp', 'pdc0')
+                params['gamma_pdc'] = params['gamma_mp'] / 100.
 
         return params
 
