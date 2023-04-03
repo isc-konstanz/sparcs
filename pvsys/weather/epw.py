@@ -33,8 +33,8 @@ class EPWWeather(Weather):
         self.year = configs.getint('EPW', 'year', fallback=None)
 
     # noinspection PyShadowingBuiltins
-    def __activate__(self, system: System, configs: Configurations) -> None:
-        super().__activate__(system, configs)
+    def __activate__(self, system: System) -> None:
+        super().__activate__(system)
         dir = os.path.dirname(self.file)
         if not os.path.isfile(self.file):
             os.makedirs(dir, exist_ok=True)

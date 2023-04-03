@@ -6,6 +6,7 @@
     
 """
 from __future__ import annotations
+from typing import List
 
 import logging
 import pandas as pd
@@ -56,8 +57,8 @@ class System(core.System):
 
         return Weather.read(self, conf_file)
 
-    def __cmpt_types__(self):
-        return super().__cmpt_types__('solar', 'array')
+    def __cmpt_types__(self, *args: str) -> List[str]:
+        return super().__cmpt_types__('solar', 'array', *args)
 
     # noinspection PyShadowingBuiltins
     def __cmpt__(self, configs: Configurations, type: str) -> Component:
