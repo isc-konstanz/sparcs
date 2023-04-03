@@ -88,7 +88,7 @@ class Evaluation(Configurable):
             try:
                 reference = _get(results, f"{self.system.id}/reference", self.system.database.read, **kwargs)
 
-                # noinspection SpellCheckingInspection, PyShadowingBuiltins, PyShadowingNames
+                # noinspection PyShadowingBuiltins, PyShadowingNames
                 def add_reference(type: str, unit: str = 'power'):
                     cmpts = self.system.get_type(type)
                     if len(cmpts) > 0:

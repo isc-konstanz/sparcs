@@ -127,6 +127,7 @@ class System(core.System):
         solar_position = self._get_solar_position(weather.index)
         return pd.concat([weather, solar_position], axis=1)
 
+    # noinspection PyShadowingBuiltins
     def _get_input(self, *args, **kwargs) -> pd.DataFrame:
         weather = self.weather.get(*args, **kwargs)
         input = self._validate_input(weather)

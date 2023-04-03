@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 class Model(ModelCore, ModelChain):
 
-    # noinspection PyShadowingBuiltins
+    # noinspection PyTypeChecker, PyShadowingBuiltins
     @classmethod
     def read(cls, system: PVSystem, override_file: str = 'forecast.cfg') -> Model:
         configs = deepcopy(system.configs)
