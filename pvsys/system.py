@@ -84,11 +84,8 @@ class System(core.System):
     def _validate_input(self, weather: pd.DataFrame) -> pd.DataFrame:
 
         # noinspection PyShadowingBuiltins
-        def assert_inputs(*inputs, error=False):
+        def assert_inputs(*inputs):
             if any(input for input in inputs if input not in weather.columns or weather[input].isna().any()):
-                if error:
-                    raise ValueError(f"Unable to complete input data with missing or invalid features: "
-                                     ', '.join(inputs))
                 return False
             return True
 
@@ -102,26 +99,35 @@ class System(core.System):
         if not assert_inputs(Weather.GHI, Weather.DHI, Weather.DNI):
             solar_position = self.location.get_solarposition(weather.index)
             if not assert_inputs(Weather.GHI):
-                assert_inputs(Weather.CLOUD_COVER, error=True)
+                if not assert_inputs(Weather.CLOUD_COVER):
+                    raise ValueError(f'Unable to estimate missing "{Weather.GHI}" data with '
+                                     f'missing or invalid column: {Weather.CLOUD_COVER}')
                 ghi, dhi, dni = cloud_cover_to_irradiance(self.location, weather[Weather.CLOUD_COVER], solar_position)
                 insert_input(Weather.GHI, ghi)
                 insert_input(Weather.DHI, dhi)
                 insert_input(Weather.DNI, dni)
             if not assert_inputs(Weather.DNI):
-                assert_inputs(Weather.GHI, Weather.DHI, error=True)
+                if not assert_inputs(Weather.GHI, Weather.DHI):
+                    raise ValueError(f'Unable to estimate missing "{Weather.DNI}" data with '
+                                     f'missing or invalid columns: {", ".join([Weather.GHI, Weather.DHI])}')
+
                 insert_input(Weather.DNI, global_diffuse_to_direct_normal_irradiance(
                     weather[Weather.GHI],
                     weather[Weather.DHI],
                     solar_position)
                 )
         if not assert_inputs(Weather.HUMIDITY_REL):
-            assert_inputs(Weather.TEMP_AIR, Weather.TEMP_DEW_POINT, error=True)
+            if not assert_inputs(Weather.TEMP_AIR, Weather.TEMP_DEW_POINT):
+                raise ValueError(f'Unable to estimate missing "{Weather.HUMIDITY_REL}" data with '
+                                 f'missing or invalid columns: {", ".join([Weather.TEMP_AIR, Weather.TEMP_DEW_POINT])}')
             insert_input(Weather.HUMIDITY_REL, relative_humidity_from_dewpoint(
                 weather[Weather.TEMP_AIR],
                 weather[Weather.TEMP_DEW_POINT])
             )
         if not assert_inputs(Weather.PRECIPITABLE_WATER):
-            assert_inputs(Weather.TEMP_AIR, Weather.HUMIDITY_REL, error=True)
+            if not assert_inputs(Weather.TEMP_AIR, Weather.HUMIDITY_REL):
+                raise ValueError(f'Unable to estimate missing "{Weather.PRECIPITABLE_WATER}" data with '
+                                 f'missing or invalid columns: {", ".join([Weather.TEMP_AIR, Weather.HUMIDITY_REL])}')
             insert_input(Weather.PRECIPITABLE_WATER, precipitable_water_from_relative_humidity(
                 weather[Weather.TEMP_AIR],
                 weather[Weather.HUMIDITY_REL])
