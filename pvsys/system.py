@@ -42,7 +42,8 @@ class System(core.System):
                         timezone=configs.get('Location', 'timezone', fallback='UTC'),
                         altitude=configs.getfloat('Location', 'altitude', fallback=None),
                         country=configs.get('Location', 'country', fallback=None),
-                        state=configs.get('Location', 'state', fallback=None))
+                        state=configs.get('Location', 'state', fallback=None),
+                        name=configs.get('Location', 'name', fallback=self.name))
 
     def __weather__(self, configs: Configurations) -> Weather:
         conf_file = 'weather.cfg'
