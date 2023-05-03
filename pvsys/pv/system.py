@@ -19,14 +19,14 @@ import pvlib as pv
 from copy import deepcopy
 from corsys.io import DatabaseException
 from corsys.configs import Configurations, Configurable, ConfigurationException
-from corsys.cmpt import Photovoltaics
+from corsys.cmpt import Photovoltaic
 from corsys import System
 from . import ModuleDatabase, InverterDatabase
 
 logger = logging.getLogger(__name__)
 
 
-class PVSystem(Photovoltaics, pv.pvsystem.PVSystem):
+class PVSystem(Photovoltaic, pv.pvsystem.PVSystem):
 
     def __init__(self, system: System, configs: Configurations) -> None:
         super().__init__(system, configs, arrays=self._load_arrays(configs), name=configs.get('General', 'id'))
