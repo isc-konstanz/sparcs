@@ -23,18 +23,20 @@ logger = logging.getLogger(__name__)
 
 class Model(ModelCore, ModelChain):
 
-    # noinspection PyTypeChecker, PyShadowingBuiltins
+    # noinspection SpellCheckingInspection, PyTypeChecker, PyShadowingBuiltins
     @classmethod
-    def read(cls, system: PVSystem, override_file: str = 'forecast.cfg') -> Model:
-        configs = deepcopy(system.configs)
-        configs_override = os.path.join(configs.dirs.conf, system.id+'.d', override_file)
+    def read(cls, pvsystem: PVSystem, override_file: str = 'forecast.cfg') -> Model:
+        configs = deepcopy(pvsystem.configs)
+        configs_override = os.path.join(configs.dirs.conf, pvsystem.id+'.d', override_file)
         if os.path.isfile(configs_override):
             configs.read(configs_override)
 
-        return cls(system.context, system, configs)
+        return cls(pvsystem.system, pvsystem, configs)
 
-    def __init__(self, context: System, system: PVSystem, configs: Configurations, section: str = 'Model', **kwargs):
-        super().__init__(context, configs, system, context.location, **self._infer_params(configs, section, **kwargs))
+    # noinspection SpellCheckingInspection
+    def __init__(self, system: System, pvsystem: PVSystem, configs: Configurations, section: str = 'Model', **kwargs):
+        super().__init__(system, configs, pvsystem, system.location, **self._infer_params(configs, section, **kwargs))
+        self.system = pvsystem
 
     def __call__(self, weather, **_):
         self.run_model(weather)

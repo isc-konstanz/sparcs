@@ -16,7 +16,7 @@ import traceback
 # noinspection PyProtectedMember
 from corsys.io._var import COLUMNS
 from corsys.io import DatabaseUnavailableException
-from corsys.tools import to_bool
+from corsys.cmpt import Photovoltaic
 from corsys import Configurations, Configurable, System
 from scisys.io import write_csv, write_excel
 from scisys import Results
@@ -76,15 +76,17 @@ class Evaluation(Configurable):
                         cmpt_key = f"{self.system.id}/{cmpt.id}/output"
                         result_pv = _get(results, cmpt_key, self.system._get_solar_yield, cmpt, input)
                         result[['pv_power', 'dc_power']] += result_pv[['pv_power', 'dc_power']].abs()
+                        # result[f'{cmpt.id}_power'] = result_pv['pv_power']
 
                     progress.update()
 
                 result = pd.concat([result, input], axis=1)
-                results.set(results_key, result)
+                results.set(results_key, result, how='combine')
                 results.durations.stop('Prediction')
             else:
                 # If this component was simulated already, load the results and skip the calculation
                 results.load(results_key)
+                progress.complete()
             try:
                 reference = _get(results, f"{self.system.id}/reference", self.system.database.read, **kwargs)
 
@@ -102,7 +104,7 @@ class Evaluation(Configurable):
                         results.data[f'{type}_{unit}_err'] = (results.data[f'{type}_{unit}'] -
                                                               results.data[f'{type}_{unit}_ref'])
 
-                add_reference('pv')
+                add_reference(Photovoltaic.TYPE)
 
             except DatabaseUnavailableException as e:
                 reference = None
@@ -213,10 +215,9 @@ class Evaluation(Configurable):
 # noinspection PyUnresolvedReferences
 def _get(results, key: str, func: Callable, *args, **kwargs) -> pd.DataFrame:
     if results is None or key not in results:
-        concat = to_bool(kwargs.pop('concat', False))
         result = func(*args, **kwargs)
         if results is not None:
-            results.set(key, result, concat=concat)
+            results.set(key, result)
         return result
 
     return results.get(key)
@@ -226,8 +227,11 @@ class Progress:
 
     def __init__(self, total, value=0, file=None):
         self._file = file
-        self._total = total + 1
+        self._total = total
         self._value = value
+
+    def complete(self):
+        self._update(self._total)
 
     def update(self):
         self._value += 1
