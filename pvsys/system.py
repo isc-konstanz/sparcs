@@ -21,8 +21,9 @@ from .location import Location
 from .input import (
     relative_humidity_from_dewpoint,
     precipitable_water_from_relative_humidity,
-    global_diffuse_to_direct_normal_irradiance,
-    cloud_cover_to_irradiance
+    direct_normal_from_global_diffuse_irradiance,
+    direct_diffuse_from_global_irradiance,
+    global_irradiance_from_cloud_cover
 )
 
 logger = logging.getLogger(__name__)
@@ -102,36 +103,56 @@ class System(core.System):
                 if not assert_inputs(Weather.CLOUD_COVER):
                     raise ValueError(f'Unable to estimate missing "{Weather.GHI}" data with '
                                      f'missing or invalid column: {Weather.CLOUD_COVER}')
-                ghi, dhi, dni = cloud_cover_to_irradiance(self.location, weather[Weather.CLOUD_COVER], solar_position)
+                ghi = global_irradiance_from_cloud_cover(self.location, weather[Weather.CLOUD_COVER], solar_position)
                 insert_input(Weather.GHI, ghi)
-                insert_input(Weather.DHI, dhi)
-                insert_input(Weather.DNI, dni)
-            if not assert_inputs(Weather.DNI):
-                if not assert_inputs(Weather.GHI, Weather.DHI):
-                    raise ValueError(f'Unable to estimate missing "{Weather.DNI}" data with '
-                                     f'missing or invalid columns: {", ".join([Weather.GHI, Weather.DHI])}')
 
-                insert_input(Weather.DNI, global_diffuse_to_direct_normal_irradiance(
-                    weather[Weather.GHI],
-                    weather[Weather.DHI],
-                    solar_position)
-                )
+            if not assert_inputs(Weather.DHI, Weather.DNI):
+                if not assert_inputs(Weather.DHI):
+                    if not assert_inputs(Weather.GHI):
+                        raise ValueError(f'Unable to estimate missing "{Weather.DHI}" and "{Weather.DNI}" data with '
+                                         f'missing or invalid columns: {", ".join([Weather.GHI])}')
+                    kwargs = {}
+                    if assert_inputs(Weather.TEMP_DEW_POINT):
+                        kwargs['pressure'] = weather[Weather.TEMP_DEW_POINT]
+                    if assert_inputs(Weather.PRESSURE_SEA):
+                        kwargs['temp_dew'] = weather[Weather.PRESSURE_SEA]
+
+                    dni, dhi = direct_diffuse_from_global_irradiance(
+                        solar_position,
+                        weather[Weather.GHI],
+                        **kwargs
+                    )
+                    insert_input(Weather.DHI, dhi)
+                    insert_input(Weather.DNI, dni)
+                else:
+                    if not assert_inputs(Weather.GHI, Weather.DHI):
+                        raise ValueError(f'Unable to estimate missing "{Weather.DNI}" data with '
+                                         f'missing or invalid columns: {", ".join([Weather.GHI, Weather.DHI])}')
+                    dni = direct_normal_from_global_diffuse_irradiance(
+                        solar_position,
+                        weather[Weather.GHI],
+                        weather[Weather.DHI]
+                    )
+                    insert_input(Weather.DNI, dni)
+
         if not assert_inputs(Weather.HUMIDITY_REL):
             if not assert_inputs(Weather.TEMP_AIR, Weather.TEMP_DEW_POINT):
-                raise ValueError(f'Unable to estimate missing "{Weather.HUMIDITY_REL}" data with '
-                                 f'missing or invalid columns: {", ".join([Weather.TEMP_AIR, Weather.TEMP_DEW_POINT])}')
-            insert_input(Weather.HUMIDITY_REL, relative_humidity_from_dewpoint(
-                weather[Weather.TEMP_AIR],
-                weather[Weather.TEMP_DEW_POINT])
-            )
+                logger.warning(f'Unable to estimate missing "{Weather.HUMIDITY_REL}" data with '
+                               f'missing or invalid columns: {", ".join([Weather.TEMP_AIR, Weather.TEMP_DEW_POINT])}')
+            else:
+                insert_input(Weather.HUMIDITY_REL, relative_humidity_from_dewpoint(
+                    weather[Weather.TEMP_AIR],
+                    weather[Weather.TEMP_DEW_POINT])
+                )
         if not assert_inputs(Weather.PRECIPITABLE_WATER):
             if not assert_inputs(Weather.TEMP_AIR, Weather.HUMIDITY_REL):
-                raise ValueError(f'Unable to estimate missing "{Weather.PRECIPITABLE_WATER}" data with '
-                                 f'missing or invalid columns: {", ".join([Weather.TEMP_AIR, Weather.HUMIDITY_REL])}')
-            insert_input(Weather.PRECIPITABLE_WATER, precipitable_water_from_relative_humidity(
-                weather[Weather.TEMP_AIR],
-                weather[Weather.HUMIDITY_REL])
-            )
+                logger.warning(f'Unable to estimate missing "{Weather.PRECIPITABLE_WATER}" data with '
+                               f'missing or invalid columns: {", ".join([Weather.TEMP_AIR, Weather.HUMIDITY_REL])}')
+            else:
+                insert_input(Weather.PRECIPITABLE_WATER, precipitable_water_from_relative_humidity(
+                    weather[Weather.TEMP_AIR],
+                    weather[Weather.HUMIDITY_REL])
+                )
         solar_position = self._get_solar_position(weather.index)
         return pd.concat([weather, solar_position], axis=1)
 

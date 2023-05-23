@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from pvlib import atmosphere
 from pvlib.location import Location
-from pvlib.irradiance import dni, disc
+from pvlib.irradiance import dni, disc, dirint
 
 
 def precipitable_water_from_relative_humidity(temperature: pd.Series, relative_humidity: pd.Series) -> pd.Series:
@@ -82,7 +82,7 @@ def _saturation_vapor_pressure(temperature: pd.Series) -> pd.Series:
     )
 
 
-def global_diffuse_to_direct_normal_irradiance(ghi, dhi, solar_position):
+def direct_normal_from_global_diffuse_irradiance(solar_position, ghi, dhi):
     """
     Determine DNI from GHI and DHI.
 
@@ -94,12 +94,12 @@ def global_diffuse_to_direct_normal_irradiance(ghi, dhi, solar_position):
 
     Parameters
     ----------
+    solar_position : DataFrame
+        Solar positions in decimal degrees
     ghi : Series
         Global horizontal irradiance.
     dhi : Series
         Diffuse horizontal irradiance.
-    solar_position : DataFrame
-        Solar positions in decimal degrees
 
     Returns
     -------
@@ -113,16 +113,44 @@ def global_diffuse_to_direct_normal_irradiance(ghi, dhi, solar_position):
 
 
 # noinspection PyShadowingNames
-def cloud_cover_to_irradiance(location, cloud_cover, solar_position=None, method='linear', **kwargs):
+def direct_diffuse_from_global_irradiance(solar_position, ghi, **kwargs):
+    """
+    Estimates DNI using the DIRINT or DISC model and calculate DHI from DNI and GHI.
+
+    Parameters
+    ----------
+    solar_position : DataFrame
+        Solar positions in decimal degrees
+    ghi : Series
+        Global horizontal irradiance.
+    **kwargs
+        Passed to the method that does the conversion
+
+    Returns
+    -------
+    dhi, dni : Series
+        Estimated DHI and DNI.
+    """
+    if 'pressure' in kwargs or \
+       'temp_dew' in kwargs:
+
+        dni = dirint(ghi, solar_position['zenith'], ghi.index, **kwargs).fillna(0)
+    else:
+        dni = disc(ghi, solar_position['zenith'], ghi.index, **kwargs)['dni']
+
+    dhi = ghi - dni * np.cos(np.radians(solar_position['zenith']))
+
+    return (_fill_irradiance(dhi),
+            _fill_irradiance(dni))
+
+
+# noinspection PyShadowingNames
+def global_irradiance_from_cloud_cover(location, cloud_cover, solar_position=None, method='linear', **kwargs):
     """
     Estimates irradiance from cloud cover in the following steps:
     1. Determine clear sky GHI using Ineichen model and
        climatological turbidity.
-    2. Estimate cloudy sky GHI using a function of
-       cloud_cover e.g.
-       :py:meth:`~ForecastModel.cloud_cover_to_ghi_linear`
-    3. Estimate cloudy sky DNI using the DISC model.
-    4. Calculate DHI from DNI and GHI.
+    2. Estimate cloudy sky GHI using a function of cloud_cover
 
     Parameters
     ----------
@@ -140,8 +168,8 @@ def cloud_cover_to_irradiance(location, cloud_cover, solar_position=None, method
 
     Returns
     -------
-    ghi, dhi, dni : Series
-        Estimated GHI, DHI and DNI.
+    ghi : Series
+        The modeled global horizontal irradiance.
     """
     if solar_position is None:
         solar_position = location.get_solarposition(cloud_cover.index)
@@ -153,12 +181,7 @@ def cloud_cover_to_irradiance(location, cloud_cover, solar_position=None, method
     else:
         raise ValueError('invalid method argument')
 
-    dni = disc(ghi, solar_position['zenith'], ghi.index)['dni']
-    dhi = ghi - dni * np.cos(np.radians(solar_position['zenith']))
-
-    return (_fill_irradiance(ghi),
-            _fill_irradiance(dhi),
-            _fill_irradiance(dni))
+    return _fill_irradiance(ghi)
 
 
 def _cloud_cover_to_ghi_linear(cloud_cover, ghi_clear, offset=35):
@@ -195,5 +218,5 @@ def _cloud_cover_to_ghi_linear(cloud_cover, ghi_clear, offset=35):
 def _fill_irradiance(irradiance):
     if irradiance.isna().any():
         irradiance = irradiance.interpolate(method='akima')
-        irradiance[irradiance < 0] = 0
+        irradiance[irradiance < 1e-3] = 0
     return irradiance.abs()
