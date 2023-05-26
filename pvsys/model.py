@@ -46,6 +46,7 @@ class Model(ModelCore, ModelChain):
 
         result = pd.concat([results_ac, results_dc], axis=1)
         result = result[[c for c in ['p_ac', 'p_dc', 'i_mp', 'v_mp', 'i_sc', 'v_oc'] if c in result.columns]]
+        result.loc[:, result.columns.str.startswith(('p_', 'i_'))] *= self.system.inverters_per_system
 
         if not isinstance(results.losses, float):
             losses = results.losses

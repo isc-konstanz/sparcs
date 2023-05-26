@@ -34,16 +34,14 @@ class PVSystem(Photovoltaic, pv.pvsystem.PVSystem):
     def __configure__(self, configs: Configurations) -> None:
         super().__configure__(configs)
 
-        self.modules_per_inverter = sum([a.modules_per_string*a.strings
-                                         for a in self.arrays])
-
-        if all(['pdc0' in a.module_parameters for a in self.arrays]):
-            self._power_max = round(sum([a.modules_per_string*a.strings*a.module_parameters['pdc0']
-                                         for a in self.arrays]))
-
+        self.modules_per_inverter = sum([array.modules_per_string * array.strings for array in self.arrays])
+        self.inverters_per_system = configs.getfloat('Inverter', 'count', fallback=1)
         self.inverter_parameters = self._infer_inverter_params()
         self.inverter_parameters = self._fit_inverter_params()
-        self.inverters_per_system = configs.getfloat('Inverter', 'count', fallback=1)
+
+        if all(['pdc0' in a.module_parameters for a in self.arrays]):
+            self.power_max = round(sum([array.modules_per_string * array.strings * array.module_parameters['pdc0']
+                                        for array in self.arrays])) * self.inverters_per_system
 
     @staticmethod
     def _load_arrays(configs: Configurations) -> List[PVArray]:
@@ -89,8 +87,9 @@ class PVSystem(Photovoltaic, pv.pvsystem.PVSystem):
     def _fit_inverter_params(self) -> dict:
         params = self.inverter_parameters
 
-        if 'pdc0' not in params and self.power_max is not None:
-            params['pdc0'] = self.power_max
+        if 'pdc0' not in params and all(['pdc0' in a.module_parameters for a in self.arrays]):
+            params['pdc0'] = round(sum([array.modules_per_string * array.strings * array.module_parameters['pdc0']
+                                        for array in self.arrays]))
 
         return params
 
