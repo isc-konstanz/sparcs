@@ -13,9 +13,8 @@ import pandas as pd
 
 from copy import deepcopy
 from pvlib.modelchain import ModelChain
-from corsys.model import Model as ModelCore
-from corsys.configs import Configurations
-from corsys import System
+from corsys import Model as ModelCore
+from corsys import Location, Configurations
 from . import PVSystem
 
 logger = logging.getLogger(__name__)
@@ -31,12 +30,11 @@ class Model(ModelCore, ModelChain):
         if os.path.isfile(configs_override):
             configs.read(configs_override)
 
-        return cls(pvsystem.system, pvsystem, configs)
+        return cls(pvsystem, pvsystem.system.location, configs)
 
     # noinspection SpellCheckingInspection
-    def __init__(self, system: System, pvsystem: PVSystem, configs: Configurations, section: str = 'Model', **kwargs):
-        super().__init__(system, configs, pvsystem, system.location, **self._infer_params(configs, section, **kwargs))
-        self.system = pvsystem
+    def __init__(self, pvsystem: PVSystem, location: Location, configs: Configurations, section: str = 'Model', **kwargs):
+        super().__init__(configs, pvsystem, location, **self._infer_params(configs, section, **kwargs))
 
     def __call__(self, weather, **_):
         self.run_model(weather)

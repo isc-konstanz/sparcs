@@ -46,6 +46,7 @@ class System(core.System):
                         state=configs.get('Location', 'state', fallback=None),
                         name=configs.get('Location', 'name', fallback=self.name))
 
+    # noinspection PyShadowingBuiltins
     def __weather__(self, configs: Configurations) -> Weather:
         conf_file = 'weather.cfg'
         configs = Configurations.from_configs(self.configs, conf_file)
