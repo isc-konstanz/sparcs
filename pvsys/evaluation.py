@@ -136,7 +136,7 @@ class Evaluation(Configurable):
                         if len(results_suffix) < 1 and len(self.system.get_type(cmpt.type)) > 1:
                             results_suffix += str(list(self.system.values()).index(cmpt) + 1)
                         results_name = CMPTS[cmpt.type] if cmpt.type in CMPTS else cmpt.type.upper()
-                        results_name = f"{results_name} {results_suffix}".strip().title()
+                        results_name = f"{results_name.strip()} {results_suffix.strip()}".title()
                         summary_data[results_name] = prepare_data(results[cmpt_key])
 
             write_csv(self.system, summary, self._results_csv)
