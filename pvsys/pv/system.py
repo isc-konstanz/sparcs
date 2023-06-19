@@ -91,6 +91,13 @@ class PVSystem(Photovoltaic, pv.pvsystem.PVSystem):
             params['pdc0'] = round(sum([array.modules_per_string * array.strings * array.module_parameters['pdc0']
                                         for array in self.arrays]))
 
+        if 'eta_inv_nom' not in params and 'Efficiency' in params:
+            if params['Efficiency'] > 1:
+                params['Efficiency'] /= 100.0
+                logger.debug("Inverter efficiency configured in percent and will be adjusted: ",
+                             params['Efficiency'] * 100.)
+            params['eta_inv_nom'] = params['Efficiency']
+
         return params
 
     def _read_inverter_params(self, params: dict) -> bool:
@@ -231,6 +238,9 @@ class PVArray(Configurable, pv.pvsystem.Array):
             params['Efficiency'] = float(self.module_parameters['pdc0']) / \
                                    (float(self.module_parameters['Width']) *
                                     float(self.module_parameters['Length']) * 1000.0)
+        elif params['Efficiency'] > 1:
+            params['Efficiency'] /= 100.0
+            logger.debug(f"Module efficiency configured in percent and will be adjusted: {params['Efficiency']*100.}")
 
         if 'T_NOCT' not in params.keys():
             params['T_NOCT'] = 45
