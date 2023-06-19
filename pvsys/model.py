@@ -6,7 +6,7 @@
     
 """
 from __future__ import annotations
-from typing import Dict, Any
+from typing import Dict, Tuple, Any
 import os
 import logging
 import pandas as pd
@@ -38,21 +38,35 @@ class Model(ModelCore, ModelChain):
 
     def __call__(self, weather, **_):
         self.run_model(weather)
-        results = deepcopy(self.results)
-        results_dc = results.dc.to_frame() if isinstance(results.dc, pd.Series) else results.dc
-        results_dc = results_dc.rename(columns={'p_mp': 'p_dc'})
+
+        results = self.results
+        losses = self.results.losses
+
+        if isinstance(results.dc, tuple):
+            results_dc = pd.concat([dc['p_mp'] for dc in results.dc], axis='columns').sum(axis='columns')
+        elif isinstance(results.dc, pd.DataFrame):
+            results_dc = results.dc['p_mp']
+        else:
+            results_dc = results.dc
+        results_dc.name = 'p_dc'
+
         results_ac = results.ac.to_frame() if isinstance(results.ac, pd.Series) else results.ac
-        results_ac = results_ac.rename(columns={'p_mp': 'p_ac'})['p_ac']
+        results_ac = results_ac.rename(columns={'p_mp': 'p_ac'})
 
-        result = pd.concat([results_ac, results_dc], axis=1)
-        result = result[[c for c in ['p_ac', 'p_dc', 'i_mp', 'v_mp', 'i_sc', 'v_oc'] if c in result.columns]]
-        result.loc[:, result.columns.str.startswith(('p_', 'i_'))] *= self.system.inverters_per_system
+        results = pd.concat([results_ac, results_dc], axis='columns')
+        results = results[[c for c in ['p_ac', 'p_dc', 'i_x', 'i_xx', 'i_mp', 'v_mp', 'i_sc', 'v_oc']
+                           if c in results.columns]]
 
-        if not isinstance(results.losses, float):
-            losses = results.losses
-            result = pd.concat([result, losses], axis=1)
+        results.loc[:, results.columns.str.startswith(('p_', 'i_'))] *= self.system.inverters_per_system
 
-        return pd.concat([result, weather], axis=1)
+        if not isinstance(losses, float) and not \
+                (isinstance(losses, tuple) and any([isinstance(loss, float) for loss in losses])):
+            if isinstance(losses, tuple):
+                losses = pd.concat(list(losses), axis='columns').mean(axis='columns')
+                losses.name = 'losses'
+            results = pd.concat([results, losses], axis='columns')
+
+        return pd.concat([results, weather], axis='columns')
 
     @staticmethod
     def _infer_params(configs: Configurations, section: str, **kwargs) -> Dict[str, Any]:
