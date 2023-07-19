@@ -6,7 +6,7 @@
     
 """
 from __future__ import annotations
-from typing import Dict, Tuple, Any
+from typing import Dict, Any
 import os
 import logging
 import pandas as pd
@@ -65,8 +65,7 @@ class Model(ModelCore, ModelChain):
                 losses = pd.concat(list(losses), axis='columns').mean(axis='columns')
                 losses.name = 'losses'
             results = pd.concat([results, losses], axis='columns')
-
-        return pd.concat([results, weather], axis='columns')
+        return results
 
     @staticmethod
     def _infer_params(configs: Configurations, section: str, **kwargs) -> Dict[str, Any]:
