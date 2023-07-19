@@ -34,7 +34,7 @@ URL = 'https://github.com/isc-konstanz/pvsys'
 INSTALL_REQUIRES = [
     'pvlib >= 0.9',
     'NREL-PySAM >= 4.0',
-    'corsys @ git+https://github.com/isc-konstanz/corsys.git@0.8.2'
+    'corsys @ git+https://github.com/isc-konstanz/corsys.git@v0.8.2'
 ]
 
 EXTRAS_REQUIRE = {
