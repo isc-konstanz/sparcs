@@ -62,21 +62,19 @@ class EPWWeather(Weather):
         data = response.json()  # metadata for available files
         # download lat/lon and url details for each .epw file into a dataframe
 
-        locations = pd.DataFrame({'url': [], 'lat': [], 'lon': [], 'name': []})
+        locations = [{'url': [], 'lat': [], 'lon': [], 'name': []}]
         for location in data['features']:
             match = re.search(r'href=[\'"]?([^\'" >]+)', location['properties']['epw'])
             if match:
                 url = match.group(1)
                 name = url[url.rfind('/') + 1:]
-                lontemp = location['geometry']['coordinates'][0]
-                lattemp = location['geometry']['coordinates'][1]
-                locations = locations.append(pd.DataFrame({'url': [url],
-                                                           'lat': [lattemp],
-                                                           'lon': [lontemp],
-                                                           'name': [name]}), ignore_index=True)
+                longitude = location['geometry']['coordinates'][0]
+                latitude = location['geometry']['coordinates'][1]
+                locations.append({'name': name, 'url': url, 'latitude': float(latitude), 'longitude': float(longitude)})
 
-        errorvec = np.sqrt(np.square(locations.lat - system.location.latitude) +
-                           np.square(locations.lon - system.location.longitude))
+        locations = pd.DataFrame(locations)
+        errorvec = np.sqrt(np.square(locations.latitude - system.location.latitude) +
+                           np.square(locations.longitude - system.location.longitude))
         index = errorvec.idxmin()
         url = locations['url'][index]
         # name = locations['name'][index]
