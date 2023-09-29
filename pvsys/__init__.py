@@ -10,7 +10,11 @@
 from ._version import __version__  # noqa: F401
 
 from . import pv  # noqa: F401
-from .pv import PVSystem, PVArray  # noqa: F401
+from .pv import (  # noqa: F401
+    PVSystem,
+    PVArray,
+    Orientation
+)
 
 from . import system  # noqa: F401
 from .system import System  # noqa: F401

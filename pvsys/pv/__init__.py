@@ -5,5 +5,12 @@
     
     
 """
-from .cec import ModuleDatabase, InverterDatabase  # noqa: F401
-from .system import PVSystem, PVArray  # noqa: F401
+from .cec import (  # noqa: F401
+    ModuleDatabase,
+    InverterDatabase
+)
+from .system import (  # noqa: F401
+    PVSystem,
+    PVArray,
+    Orientation
+)

@@ -8,7 +8,7 @@
     
 """
 from __future__ import annotations
-from typing import Dict, List, Any
+from typing import Optional, Dict, List, Any
 
 import os
 import glob
@@ -16,6 +16,8 @@ import logging
 
 import pandas as pd
 import pvlib as pv
+from pvlib.pvsystem import FixedMount, SingleAxisTrackerMount
+from enum import Enum
 from copy import deepcopy
 from corsys.io import DatabaseException
 from corsys.configs import Configurations, Configurable, ConfigurationException
@@ -29,7 +31,7 @@ logger = logging.getLogger(__name__)
 class PVSystem(Photovoltaic, pv.pvsystem.PVSystem):
 
     def __init__(self, system: System, configs: Configurations) -> None:
-        super().__init__(system, configs, arrays=self._load_arrays(configs), name=configs.get('General', 'id'))
+        super().__init__(system, configs, arrays=self.__arrays__(configs), name=configs.get('General', 'id'))
 
     def __configure__(self, configs: Configurations) -> None:
         super().__configure__(configs)
@@ -44,7 +46,7 @@ class PVSystem(Photovoltaic, pv.pvsystem.PVSystem):
                                         for array in self.arrays])) * self.inverters_per_system
 
     @staticmethod
-    def _load_arrays(configs: Configurations) -> List[PVArray]:
+    def __arrays__(configs: Configurations) -> List[PVArray]:
         arrays = []
         array_dir = os.path.join(configs.dirs.conf,
                                  configs.get('General', 'id') + '.d')
@@ -71,6 +73,10 @@ class PVSystem(Photovoltaic, pv.pvsystem.PVSystem):
             arrays.append(PVArray(array_configs))
 
         return arrays
+
+    @staticmethod
+    def __array__(configs: Configurations) -> PVArray:
+        return PVArray(configs)
 
     def _infer_inverter_params(self) -> dict:
         params = {}
@@ -158,8 +164,16 @@ class PVSystem(Photovoltaic, pv.pvsystem.PVSystem):
 
 class PVArray(Configurable, pv.pvsystem.Array):
 
+    ROWS = 'Rows'
+
+    row_pitch: Optional[float] = None
+
+    module_stack_gap_height: float = 0
+    module_stack_gap_width: float = 0
+    module_stack_gap_ratio: Optional[float] = None
+
     def __init__(self, configs: Configurations) -> None:
-        super().__init__(configs, mount=self._read_mount(configs), **self._infer_params(configs))
+        super().__init__(configs, mount=self.__mount__(configs), **self._infer_params(configs))
 
     def __configure__(self, configs: Configurations) -> None:
         super().__configure__(configs)
@@ -167,18 +181,71 @@ class PVArray(Configurable, pv.pvsystem.Array):
         self.module_parameters = self._infer_module_params()
         self.module_parameters = self._fit_module_params()
 
+        self.modules_stacked = configs.getint(PVArray.ROWS, 'stack', fallback=1)
+        self.module_stack_gap_height = configs.getfloat('Rows', 'gap_height', fallback=PVArray.module_stack_gap_height)
+        self.module_stack_gap_width = configs.getfloat('Rows', 'gap_width', fallback=PVArray.module_stack_gap_width)
+        self.module_stack_gap_ratio = configs.getfloat('Rows', 'gap_ratio', fallback=PVArray.module_stack_gap_ratio)
+
+        self.module_orientation = Orientation[configs.get('Module', 'orientation', fallback='portrait').upper()]
+        if self.module_orientation == Orientation.PORTRAIT:
+            self.module_length = self.module_parameters['Length'] * self.modules_stacked
+
+        elif self.module_orientation == Orientation.LANDSCAPE:
+            self.module_length = self.module_parameters['Width'] * self.modules_stacked
+
+        else:
+            raise ValueError(f"Invalid module orientation to calculate length: {str(self.module_orientation)}")
+
+        if self.modules_stacked > 1:
+            self.module_length += self.module_stack_gap_height * (self.modules_stacked - 1)
+
+            self.module_stack_gap_ratio = (self.module_stack_gap_height *
+                                           (self.modules_stacked - 1) / self.module_length)
+        else:
+            self.module_stack_gap_ratio = 0
+
+        self.row_pitch = configs.get(PVArray.ROWS, 'pitch', fallback=PVArray.row_pitch)
+        if self.row_pitch and isinstance(self.mount, SingleAxisTrackerMount) and \
+                self.mount.gcr == SingleAxisTrackerMount.gcr:
+            self.mount.gcr = self.module_length / self.row_pitch
+
         self.temperature_model_parameters = self._infer_temperature_model_params()
         self.shading_losses_parameters = self._infer_shading_losses_params()
         self.array_losses_parameters = self._infer_array_losses_params()
 
     @staticmethod
-    def _read_mount(configs: Configurations) -> pv.pvsystem.AbstractMount:
-        # TODO: Implement other mounting systems
-        from pvlib.pvsystem import FixedMount
-        return FixedMount(surface_azimuth=configs.getfloat('Mounting', 'azimuth', fallback=FixedMount.surface_azimuth),
-                          surface_tilt=configs.getfloat('Mounting', 'tilt', fallback=FixedMount.surface_tilt),
-                          module_height=configs.get('Mounting', 'module_height', fallback=FixedMount.module_height),
-                          racking_model=configs.get('Mounting', 'racking_model', fallback=FixedMount.racking_model))
+    def __mount__(configs: Configurations) -> pv.pvsystem.AbstractMount:
+        module_azimuth = configs.getfloat('Mounting', 'module_azimuth')
+        module_tilt = configs.getfloat('Mounting', 'module_tilt')
+
+        if configs.has_section('Tracking') and \
+                configs.getboolean('Tracking', 'enabled', fallback=False):
+            max_angle = configs.get('Tracking', 'max_angle', fallback=SingleAxisTrackerMount.max_angle)
+            backtrack = configs.get('Tracking', 'backtrack', fallback=SingleAxisTrackerMount.backtrack)
+            ground_coverage = configs.get('Tracking', 'ground_coverage', fallback=SingleAxisTrackerMount.gcr)
+
+            cross_tilt = configs.get('Tracking', 'cross_axis_tilt', fallback=SingleAxisTrackerMount.cross_axis_tilt)
+            # TODO: Implement cross_axis_tilt for sloped ground surface
+            # if cross_tilt == SingleAxisTrackerMount.cross_axis_tilt:
+            #     from pvlib.tracking import calc_cross_axis_tilt
+            #     cross_tilt = calc_cross_axis_tilt(slope_azimuth, slope_tilt, axis_azimuth, axis_tilt)
+
+            racking_model = configs.get('Mounting', 'racking_model', fallback=SingleAxisTrackerMount.racking_model)
+            module_height = configs.get('Mounting', 'module_height', fallback=SingleAxisTrackerMount.module_height)
+
+            return SingleAxisTrackerMount(axis_azimuth=module_azimuth,
+                                          axis_tilt=module_tilt,
+                                          max_angle=max_angle,
+                                          backtrack=backtrack,
+                                          gcr=ground_coverage,
+                                          cross_axis_tilt=cross_tilt,
+                                          racking_model=racking_model,
+                                          module_height=module_height)
+        else:
+            return FixedMount(surface_azimuth=module_azimuth,
+                              surface_tilt=module_tilt,
+                              module_height=configs.get('Mounting', 'module_height', fallback=FixedMount.module_height),
+                              racking_model=configs.get('Mounting', 'racking_model', fallback=FixedMount.racking_model))
 
     @staticmethod
     def _infer_params(configs: Configurations, **kwargs) -> Dict[str, Any]:
@@ -391,6 +458,12 @@ class PVArray(Configurable, pv.pvsystem.Array):
         shading_losses = shading_losses.fillna(0)[self.shading_losses_parameters.keys()].max(axis=1)
         shading_losses.name = 'shading'
         return shading_losses
+
+
+class Orientation(Enum):
+
+    PORTRAIT = 'portrait'
+    LANDSCAPE = 'landscape'
 
 
 def _update_parameters(parameters: dict, update: dict):
