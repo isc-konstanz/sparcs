@@ -24,7 +24,7 @@ class Model(ModelCore, ModelChain):
 
     # noinspection SpellCheckingInspection, PyTypeChecker, PyShadowingBuiltins
     @classmethod
-    def read(cls, pvsystem: PVSystem, override_file: str = 'forecast.cfg') -> Model:
+    def read(cls, pvsystem: PVSystem, override_file: str = 'model.cfg') -> Model:
         configs = deepcopy(pvsystem.configs)
         configs_override = os.path.join(configs.dirs.conf, pvsystem.id+'.d', override_file)
         if os.path.isfile(configs_override):
@@ -69,7 +69,10 @@ class Model(ModelCore, ModelChain):
 
     @staticmethod
     def _infer_params(configs: Configurations, section: str, **kwargs) -> Dict[str, Any]:
-        params = dict(configs.items(section))
+        params = dict()
+
+        if configs.has_section(section):
+            params.update(configs.items(section))
         params.update(kwargs)
 
         return params
