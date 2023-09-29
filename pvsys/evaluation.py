@@ -11,6 +11,7 @@ import os
 import json
 import logging
 import pandas as pd
+import calendar
 import traceback
 
 # noinspection PyProtectedMember
@@ -18,7 +19,7 @@ from corsys.io._var import COLUMNS
 from corsys.io import DatabaseUnavailableException
 from corsys.cmpt import Photovoltaic
 from corsys import Configurations, Configurable, System
-from scisys.io import write_csv, write_excel
+from scisys.io import excel, plot
 from scisys import Results
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,10 @@ class Evaluation(Configurable):
         self._results_dir = os.path.join(data_dir, 'results')
         if not os.path.exists(self._results_dir):
             os.makedirs(self._results_dir)
+
+        self._plots_dir = os.path.join(data_dir, 'plots')
+        if not os.path.exists(self._plots_dir):
+            os.makedirs(self._plots_dir)
 
     # noinspection PyProtectedMember
     def __call__(self, *args, **kwargs) -> Results:
@@ -139,10 +144,10 @@ class Evaluation(Configurable):
                         results_name = f"{results_name.strip()} {results_suffix.strip()}".title()
                         summary_data[results_name] = prepare_data(results[cmpt_key])
 
-            write_csv(self.system, summary, self._results_csv)
-            write_excel(summary, summary_data, file=self._results_excel)
+            excel.write(summary, summary_data, file=self._results_excel)
 
-            with open(self._results_json, 'w', encoding='utf-8') as f:
+            summary.to_csv(self._results_csv, encoding='utf-8-sig')
+            with open(self._results_json, 'w', encoding='utf-8-sig') as f:
                 json.dump(summary_json, f, ensure_ascii=False, indent=4)
 
         except Exception as e:
@@ -190,6 +195,19 @@ class Evaluation(Configurable):
         results['dc_energy'] = results['dc_power'] / 1000. * hours
 
         results.dropna(axis='index', how='all', inplace=True)
+
+        plot_data = results[['pv_energy']].groupby(results.index.month).sum()
+        plot.bar(x=plot_data.index, y='pv_energy', data=plot_data,
+                 xlabel='Month', ylabel='Energy [kWh]', title='Monthly Yield',
+                 colors=list(reversed(plot.COLORS)), file=os.path.join(self._plots_dir, 'yield_months.png'))
+
+        plot_data = pd.concat([pd.Series(data=results.loc[results.index.month == m, 'pv_power']/1000.,
+                                         name=calendar.month_name[m]) for m in range(1, 13)], axis='columns')
+        plot_data['hour'] = plot_data.index.hour + plot_data.index.minute/60.
+        plot_melt = plot_data.melt(id_vars='hour', var_name='Months')
+        plot.line(x='hour', y='value', data=plot_melt,
+                  xlabel='Hour of the Day', ylabel='Power [kW]', title='Yield Profile', hue='Months',  # style='Months',
+                  colors=list(reversed(plot.COLORS)), file=os.path.join(self._plots_dir, 'yield_months_profile.png'))
 
         yield_specific = round(results['pv_yield'].sum(), 2)
         yield_energy = round(results['pv_energy'].sum(), 2)
