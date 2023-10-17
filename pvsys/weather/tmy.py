@@ -38,7 +38,7 @@ class TMYWeather(Weather):
             os.makedirs(dir, exist_ok=True)
 
         if self.version == 3:
-            self.data, self.meta = read_tmy3(filename=self.file, coerce_year=self.year)
+            self.data, self.meta = read_tmy3(filename=self.file, coerce_year=self.year, map_variables=True)
 
         elif self.version == 2:
             self.data, self.meta = read_tmy2(self.file)
