@@ -73,12 +73,12 @@ class System(core.System):
     # noinspection PyShadowingBuiltins
     def __call__(self) -> pd.DataFrame:
         input = self._get_input()
-        result = pd.DataFrame(columns=['pv_power', 'dc_power'], index=input.index).fillna(0)
+        result = pd.DataFrame(columns=[PVSystem.POWER, PVSystem.POWER_DC], index=input.index).fillna(0)
         result.index.name = 'time'
         for cmpt in self.values():
-            if cmpt.type == 'pv':
+            if cmpt.type == PVSystem.TYPE:
                 result_pv = self._get_solar_yield(cmpt, input)
-                result[['pv_power', 'dc_power']] += result_pv[['pv_power', 'dc_power']].abs()
+                result[[PVSystem.POWER, PVSystem.POWER_DC]] += result_pv[[PVSystem.POWER, PVSystem.POWER_DC]].abs()
 
         return pd.concat([result, input], axis=1)
 
@@ -181,8 +181,8 @@ class System(core.System):
     # noinspection PyMethodMayBeStatic
     def _get_solar_yield(self, pv: PVSystem, weather: pd.DataFrame) -> pd.DataFrame:
         model = Model.read(pv)
-        return model(weather).rename(columns={'p_ac': 'pv_power',
-                                              'p_dc': 'dc_power'})
+        return model(weather).rename(columns={'p_ac': PVSystem.POWER,
+                                              'p_dc': PVSystem.POWER_DC})
 
     # noinspection PyShadowingBuiltins
     def evaluate(self, **kwargs):

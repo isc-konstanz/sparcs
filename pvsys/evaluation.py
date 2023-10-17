@@ -17,10 +17,10 @@ import traceback
 # noinspection PyProtectedMember
 from corsys.io._var import COLUMNS
 from corsys.io import DatabaseUnavailableException
-from corsys.cmpt import Photovoltaic
 from corsys import Configurations, Configurable, System
 from scisys.io import excel, plot
-from scisys import Results
+from scisys import Results, Progress
+from .pv import PVSystem
 
 logger = logging.getLogger(__name__)
 
@@ -31,16 +31,17 @@ CMPTS = {
     'pv': 'Photovoltaics'
 }
 
-AC_E = 'Energy yield [kWh]'
 AC_Y = 'Specific yield [kWh/kWp]'
+AC_E = 'Energy yield [kWh]'
 DC_E = 'Energy yield (DC) [kWh]'
 
 
 class Evaluation(Configurable):
 
-    def __init__(self, system: System) -> None:
+    def __init__(self, system: System, name: str = 'Evaluation') -> None:
         super().__init__(system.configs)
         self.system = system
+        self.name = name
 
     def __configure__(self, configs: Configurations) -> None:
         super().__configure__(configs)
@@ -63,7 +64,7 @@ class Evaluation(Configurable):
     # noinspection PyProtectedMember
     def __call__(self, *args, **kwargs) -> Results:
         logger.info("Starting evaluation for system: %s", self.system.name)
-        progress = Progress(len(self.system) + 1, file=self._results_json)
+        progress = Progress(desc=self.name, total=len(self.system.get_type(PVSystem.TYPE))*2+1, file=self._results_json)
 
         results = Results(self.system)
         results.durations.start('Evaluation')
@@ -74,14 +75,16 @@ class Evaluation(Configurable):
                 input = _get(results, f"{self.system.id}/input", self.system._get_input, *args, **kwargs)
                 progress.update()
 
-                result = pd.DataFrame(columns=['pv_power', 'dc_power'], index=input.index).fillna(0)
+                result = pd.DataFrame()
                 result.index.name = 'time'
-                for cmpt in self.system.values():
-                    if cmpt.type == 'pv':
-                        cmpt_key = f"{self.system.id}/{cmpt.id}/output"
-                        result_pv = _get(results, cmpt_key, self.system._get_solar_yield, cmpt, input)
-                        result[['pv_power', 'dc_power']] += result_pv[['pv_power', 'dc_power']].abs()
-                        # result[f'{cmpt.id}_power'] = result_pv['pv_power']
+                for cmpt in self.system.get_type(PVSystem.TYPE):
+                    cmpt_key = f"{self.system.id}/{cmpt.id}/output"
+                    result_pv = _get(results, cmpt_key, self.system._get_solar_yield, cmpt, input)
+                    if result.empty:
+                        result = result_pv
+                    else:
+                        result += result_pv
+                    # result[f'{cmpt.id}_power'] = result_pv[PVSystem.POWER]
 
                     progress.update()
 
@@ -109,7 +112,7 @@ class Evaluation(Configurable):
                         results.data[f'{type}_{unit}_err'] = (results.data[f'{type}_{unit}'] -
                                                               results.data[f'{type}_{unit}_ref'])
 
-                add_reference(Photovoltaic.TYPE)
+                add_reference(PVSystem.TYPE)
 
             except DatabaseUnavailableException as e:
                 reference = None
@@ -121,6 +124,19 @@ class Evaluation(Configurable):
                 data.rename(columns=COLUMNS, inplace=True)
                 data.index.name = 'Time'
                 return data
+
+            hours = pd.Series(results.data.index, index=results.data.index)
+            hours = (hours - hours.shift(1)).fillna(method='bfill').dt.total_seconds() / 3600.
+
+            if PVSystem.ENERGY not in results.data and PVSystem.POWER in results.data:
+                results.data[PVSystem.ENERGY] = results.data[PVSystem.POWER] / 1000. * hours
+            if f'{PVSystem.ENERGY}_ref' not in results.data and f'{PVSystem.POWER}_ref' in results.data:
+                results.data[f'{PVSystem.ENERGY}_ref'] = results.data[f'{PVSystem.POWER}_ref'] / 1000. * hours
+                results.data[f'{PVSystem.ENERGY}_err'] = (results.data[PVSystem.ENERGY] -
+                                                          results.data[f'{PVSystem.ENERGY}_ref'])
+
+            if PVSystem.ENERGY_DC not in results.data and PVSystem.POWER_DC in results.data:
+                results.data[PVSystem.ENERGY_DC] = results.data[PVSystem.POWER_DC] / 1000. * hours
 
             summary = pd.DataFrame(columns=pd.MultiIndex.from_tuples((), names=['System', '']))
             summary_json = {
@@ -144,25 +160,19 @@ class Evaluation(Configurable):
                         results_name = f"{results_name.strip()} {results_suffix.strip()}".title()
                         summary_data[results_name] = prepare_data(results[cmpt_key])
 
-            excel.write(summary, summary_data, file=self._results_excel)
-
             summary.to_csv(self._results_csv, encoding='utf-8-sig')
-            with open(self._results_json, 'w', encoding='utf-8-sig') as f:
-                json.dump(summary_json, f, ensure_ascii=False, indent=4)
+            excel.write(summary, summary_data, file=self._results_excel, index=False)
+            progress.complete(summary_json)
 
         except Exception as e:
             logger.error("Error evaluating system %s: %s", self.system.name, str(e))
             logger.debug("%s: %s", type(e).__name__, traceback.format_exc())
-
-            with open(self._results_json, 'w', encoding='utf-8') as f:
-                results_json = {
+            progress.complete({
                     'status': 'error',
                     'message': str(e),
                     'error': type(e).__name__,
                     'trace': traceback.format_exc()
-                }
-                json.dump(results_json, f, ensure_ascii=False, indent=4)
-
+                })
             raise e
 
         finally:
@@ -183,25 +193,20 @@ class Evaluation(Configurable):
         summary_json.update(self._evaluate_weather(summary, results))
 
     def _evaluate_yield(self, summary: pd.DataFrame, results: pd.DataFrame, reference: pd.DataFrame = None) -> Dict:
-        hours = pd.Series(results.index, index=results.index)
-        hours = (hours - hours.shift(1)).fillna(method='bfill').dt.total_seconds() / 3600.
         results_kwp = 0
         for system in self.system.values():
             results_kwp += system.power_max / 1000.
 
-        results['pv_energy'] = results['pv_power'] / 1000. * hours
-        results['pv_yield'] = results['pv_energy'] / results_kwp
+        results[PVSystem.YIELD_SPECIFIC] = results[PVSystem.ENERGY] / results_kwp
 
-        results['dc_energy'] = results['dc_power'] / 1000. * hours
+        results = results.dropna(axis='index', how='all')
 
-        results.dropna(axis='index', how='all', inplace=True)
-
-        plot_data = results[['pv_energy']].groupby(results.index.month).sum()
-        plot.bar(x=plot_data.index, y='pv_energy', data=plot_data,
+        plot_data = results[[PVSystem.ENERGY]].groupby(results.index.month).sum()
+        plot.bar(x=plot_data.index, y=PVSystem.ENERGY, data=plot_data,
                  xlabel='Month', ylabel='Energy [kWh]', title='Monthly Yield',
                  colors=list(reversed(plot.COLORS)), file=os.path.join(self._plots_dir, 'yield_months.png'))
 
-        plot_data = pd.concat([pd.Series(data=results.loc[results.index.month == m, 'pv_power']/1000.,
+        plot_data = pd.concat([pd.Series(data=results.loc[results.index.month == m, PVSystem.POWER]/1000.,
                                          name=calendar.month_name[m]) for m in range(1, 13)], axis='columns')
         plot_data['hour'] = plot_data.index.hour + plot_data.index.minute/60.
         plot_melt = plot_data.melt(id_vars='hour', var_name='Months')
@@ -209,14 +214,22 @@ class Evaluation(Configurable):
                   xlabel='Hour of the Day', ylabel='Power [kW]', title='Yield Profile', hue='Months',  # style='Months',
                   colors=list(reversed(plot.COLORS)), file=os.path.join(self._plots_dir, 'yield_months_profile.png'))
 
-        yield_specific = round(results['pv_yield'].sum(), 2)
-        yield_energy = round(results['pv_energy'].sum(), 2)
+        yield_specific = round(results[PVSystem.YIELD_SPECIFIC].sum(), 2)
+        yield_energy = round(results[PVSystem.ENERGY].sum(), 2)
 
-        summary.loc[self.system.name, ('Yield', AC_E)] = yield_energy
         summary.loc[self.system.name, ('Yield', AC_Y)] = yield_specific
+        summary.loc[self.system.name, ('Yield', AC_E)] = yield_energy
 
-        return {'yield_energy': yield_energy,
-                'yield_specific': yield_specific}
+        summary_dict = {'yield_specific': yield_specific,
+                        'yield_energy': yield_energy}
+
+        if PVSystem.ENERGY_DC in results:
+            dc_energy = round(results[PVSystem.ENERGY_DC].sum(), 2)
+
+            summary.loc[self.system.name, ('Yield', DC_E)] = dc_energy
+            summary_dict['yield_energy_dc'] = dc_energy
+
+        return summary_dict
 
     def _evaluate_weather(self, summary: pd.DataFrame, results: pd.DataFrame) -> Dict:
         hours = pd.Series(results.index, index=results.index)
@@ -239,28 +252,3 @@ def _get(results, key: str, func: Callable, *args, **kwargs) -> pd.DataFrame:
         return result
 
     return results.get(key)
-
-
-class Progress:
-
-    def __init__(self, total, value=0, file=None):
-        self._file = file
-        self._total = total
-        self._value = value
-
-    def complete(self):
-        self._update(self._total)
-
-    def update(self):
-        self._value += 1
-        self._update(self._value)
-
-    def _update(self, value):
-        progress = value / self._total * 100
-        if progress % 1 <= 1 / self._total * 100 and self._file is not None:
-            with open(self._file, 'w', encoding='utf-8') as f:
-                results = {
-                    'status': 'running',
-                    'progress': int(progress)
-                }
-                json.dump(results, f, ensure_ascii=False, indent=4)
