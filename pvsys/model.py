@@ -6,7 +6,7 @@
     
 """
 from __future__ import annotations
-from typing import Dict, Any
+
 import os
 import logging
 import pandas as pd
@@ -19,29 +19,41 @@ from . import PVSystem
 
 logger = logging.getLogger(__name__)
 
+# noinspection SpellCheckingInspection
+DEFAULTS = dict(
+    # ac_model='pvwatts',
+    # dc_model='pvwatts',
+    temperature_model='sapm',
+    aoi_model='physical',
+    spectral_model='no_loss',
+    dc_ohmic_model='no_loss',
+    losses_model='pvwatts'
+)
 
+
+# noinspection SpellCheckingInspection, PyAbstractClass
 class Model(ModelCore, ModelChain):
 
-    # noinspection SpellCheckingInspection, PyTypeChecker, PyShadowingBuiltins
     @classmethod
-    def read(cls, pvsystem: PVSystem, override_file: str = 'model.cfg') -> Model:
+    def read(cls, pvsystem: PVSystem, override_file: str = 'model.cfg', section: str = 'Model') -> Model:
         configs = deepcopy(pvsystem.configs)
         configs_override = os.path.join(configs.dirs.conf, pvsystem.id+'.d', override_file)
         if os.path.isfile(configs_override):
             configs.read(configs_override)
 
-        return cls(pvsystem, pvsystem.system.location, configs)
+        params = DEFAULTS
+        if configs.has_section(section):
+            params.update(configs.items(section))
 
-    # noinspection SpellCheckingInspection
-    def __init__(self, pvsystem: PVSystem, location: Location, configs: Configurations, section: str = 'Model', **kwargs):
-        super().__init__(configs, pvsystem, location, **self._infer_params(configs, section, **kwargs))
+        return cls(configs, pvsystem, pvsystem.system.location, **params)
+
+    def __init__(self, configs: Configurations, pvsystem: PVSystem, location: Location, **kwargs):
+        super().__init__(configs, pvsystem, location, **kwargs)
 
     def __call__(self, weather, **_):
         self.run_model(weather)
 
         results = self.results
-        losses = self.results.losses
-
         if isinstance(results.dc, tuple):
             results_dc = pd.concat([dc['p_mp'] for dc in results.dc], axis='columns').sum(axis='columns')
         elif isinstance(results.dc, pd.DataFrame):
@@ -59,6 +71,7 @@ class Model(ModelCore, ModelChain):
 
         results.loc[:, results.columns.str.startswith(('p_', 'i_'))] *= self.system.inverters_per_system
 
+        losses = self.results.losses
         if not isinstance(losses, float) and not \
                 (isinstance(losses, tuple) and any([isinstance(loss, float) for loss in losses])):
             if isinstance(losses, tuple):
@@ -67,20 +80,6 @@ class Model(ModelCore, ModelChain):
             results = pd.concat([results, losses], axis='columns')
         return results
 
-    @staticmethod
-    def _infer_params(configs: Configurations, section: str, **kwargs) -> Dict[str, Any]:
-        params = dict()
-
-        if configs.has_section(section):
-            params.update(configs.items(section))
-        params.update(kwargs)
-
-        return params
-
-    def infer_losses_model(self):
-        return 'pvwatts'
-
-    # noinspection SpellCheckingInspection
     def pvwatts_losses(self):
         if isinstance(self.results.dc, tuple):
             self.results.losses = tuple((100 - losses) / 100. for losses in
