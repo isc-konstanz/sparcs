@@ -8,7 +8,6 @@
 from __future__ import annotations
 from typing import Dict
 import os
-import json
 import logging
 import pandas as pd
 import calendar
@@ -64,7 +63,9 @@ class Evaluation(Configurable):
     # noinspection PyProtectedMember
     def __call__(self, *args, **kwargs) -> Results:
         logger.info("Starting evaluation for system: %s", self.system.name)
-        progress = Progress(desc=self.name, total=len(self.system.get_type(PVSystem.TYPE))*2+1, file=self._results_json)
+        progress = Progress.instance(desc=f"{self.name}: {self.system.name}",
+                                     total=len(self.system)*2+1,
+                                     file=self._results_json)
 
         results = Results(self.system)
         results.durations.start('Evaluation')
@@ -178,6 +179,7 @@ class Evaluation(Configurable):
         finally:
             results.durations.stop('Evaluation')
             results.close()
+            progress.reset()
 
         logger.info("Evaluation complete")
         logger.debug('Evaluation complete in %i minutes', results.durations['Evaluation'])
