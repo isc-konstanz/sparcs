@@ -217,6 +217,8 @@ class PVArray(Configurable, pv.pvsystem.Array):
                 self.mount.gcr == SingleAxisTrackerMount.gcr:
             self.mount.gcr = self.module_length / self.row_pitch
 
+        # Infer temperature model parameters again, with complete module parameters now
+        self.temperature_model_parameters = self._infer_temperature_model_params()
         self.shading_losses_parameters = self._infer_shading_losses_params()
 
     @staticmethod
@@ -436,6 +438,19 @@ class PVArray(Configurable, pv.pvsystem.Array):
             for key, value in configs['Losses'].items():
                 if key in temperature_model_keys:
                     params[key] = float(value)
+
+        return params
+
+    def _infer_temperature_model_params(self) -> dict:
+        params = super()._infer_temperature_model_params()
+
+        if len(params) == 0 and len(self.module_parameters) > 0:
+            if 'noct' in self.module_parameters.keys():
+                params['noct'] = self.module_parameters['noct']
+
+            if 'module_efficiency' in self.module_parameters.keys():
+                params['module_efficiency'] = self.module_parameters['module_efficiency']
+
         return params
 
     @staticmethod
