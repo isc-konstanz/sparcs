@@ -37,7 +37,7 @@ class PVSystem(Photovoltaic, pv.pvsystem.PVSystem):
     POWER_DC = 'pv_dc_power'
     ENERGY_DC = 'pv_dc_energy'
 
-    YIELD_SPECIFIC = 'specific_yield'
+    YIELD_SPECIFIC = 'pv_specific_yield'
 
     def __init__(self, system: System, configs: Configurations) -> None:
         super().__init__(system, configs, arrays=self.__arrays__(configs), name=configs.get('General', 'id'))
