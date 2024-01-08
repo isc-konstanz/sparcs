@@ -10,7 +10,6 @@ from typing import Dict
 import os
 import logging
 import pandas as pd
-import calendar
 import traceback
 
 # noinspection PyProtectedMember
@@ -37,6 +36,13 @@ DC_E = 'Energy yield (DC) [kWh]'
 
 class Evaluation(Configurable):
 
+    PV_SPECIFIC_YIELD = PVSystem.YIELD_SPECIFIC
+    PV_ENERGY_YIELD = f"{PVSystem.ENERGY}_yield"
+    PV_ENERGY_DC_YIELD = f"{PVSystem.ENERGY_DC}_yield"
+    PV_ENERGY_MONTHS = f"{PVSystem.ENERGY}_months"
+    GHI_TOTAL = f"{Weather.GHI}_total"
+    DHI_TOTAL = f"{Weather.DHI}_total"
+
     def __init__(self, system: System, name: str = 'Evaluation') -> None:
         super().__init__(system.configs)
         self.system = system
@@ -51,7 +57,6 @@ class Evaluation(Configurable):
         self._results_json = os.path.join(data_dir, 'results.json')
         self._results_excel = os.path.join(data_dir, 'results.xlsx')
         self._results_csv = os.path.join(data_dir, 'results.csv')
-        self._results_pdf = os.path.join(data_dir, 'results.pdf')
         self._results_dir = os.path.join(data_dir, 'results')
         if not os.path.exists(self._results_dir):
             os.makedirs(self._results_dir)
@@ -140,10 +145,8 @@ class Evaluation(Configurable):
                 results.data[PVSystem.ENERGY_DC] = results.data[PVSystem.POWER_DC] / 1000. * hours
 
             summary = pd.DataFrame(columns=pd.MultiIndex.from_tuples((), names=['System', '']))
-            summary_json = {
-                'status': 'success'
-            }
-            self._evaluate(summary_json, summary, results.data, reference)
+
+            self._evaluate(summary, results.summary, results.images, results.data, reference)
 
             summary_data = {
                 self.system.name: prepare_data(results.data)
@@ -163,7 +166,10 @@ class Evaluation(Configurable):
 
             summary.to_csv(self._results_csv, encoding='utf-8-sig')
             excel.write(summary, summary_data, file=self._results_excel, index=False)
-            progress.complete(summary_json)
+
+            results.durations.complete('Evaluation')
+            results.summary['status'] = 'success'
+            progress.complete(results.summary)
 
         except Exception as e:
             logger.error("Error evaluating system %s: %s", self.system.name, str(e))
@@ -187,14 +193,20 @@ class Evaluation(Configurable):
         return results
 
     def _evaluate(self,
-                  summary_json: Dict,
-                  summary: pd.DataFrame,
+                  summary_frame: pd.DataFrame,
+                  summary: Dict[str, str | float | int],
+                  images: Dict[str, str],
                   results: pd.DataFrame,
                   reference: pd.DataFrame = None) -> None:
-        summary_json.update(self._evaluate_yield(summary, results, reference))
-        summary_json.update(self._evaluate_weather(summary, results))
+        self._evaluate_yield(summary_frame, summary, images, results, reference)
+        self._evaluate_weather(summary_frame, summary, images, results, reference)
 
-    def _evaluate_yield(self, summary: pd.DataFrame, results: pd.DataFrame, reference: pd.DataFrame = None) -> Dict:
+    def _evaluate_yield(self,
+                        summary_frame: pd.DataFrame,
+                        summary_dict: Dict[str, str | float | int],
+                        images_dict: Dict[str, str],
+                        results: pd.DataFrame,
+                        reference: pd.DataFrame = None) -> None:
         results_kwp = 0
         for system in self.system.values():
             results_kwp += system.power_max / 1000.
@@ -203,46 +215,54 @@ class Evaluation(Configurable):
 
         results = results.dropna(axis='index', how='all')
 
+        # profile_months = os.path.join(self._image_dir, 'pv_profile_months.png')
+        # plot_data = pd.concat([pd.Series(data=results.loc[results.index.month == m, PVSystem.POWER]/1000.,
+        #                                  name=calendar.month_name[m]) for m in range(1, 13)], axis='columns')
+        # plot_data['hour'] = plot_data.index.hour + plot_data.index.minute/60.
+        # plot_melt = plot_data.melt(id_vars='hour', var_name='Months')
+        # plot.line(x='hour', y='value', data=plot_melt,
+        #           xlabel='Hour of the Day', ylabel='Power [kW]', title='Yield Profile', hue='Months',
+        #           colors=list(reversed(plot.COLORS)), file=profile_months)
+        # images_dict["pv_profile_months"] = profile_months
+
+        yield_months = os.path.join(self._plots_dir, f"{Evaluation.PV_ENERGY_MONTHS}.png")
         plot_data = results[[PVSystem.ENERGY]].groupby(results.index.month).sum()
         plot.bar(x=plot_data.index, y=PVSystem.ENERGY, data=plot_data,
                  xlabel='Month', ylabel='Energy [kWh]', title='Monthly Yield',
-                 colors=list(reversed(plot.COLORS)), file=os.path.join(self._plots_dir, 'yield_months.png'))
-
-        plot_data = pd.concat([pd.Series(data=results.loc[results.index.month == m, PVSystem.POWER]/1000.,
-                                         name=calendar.month_name[m]) for m in range(1, 13)], axis='columns')
-        plot_data['hour'] = plot_data.index.hour + plot_data.index.minute/60.
-        plot_melt = plot_data.melt(id_vars='hour', var_name='Months')
-        plot.line(x='hour', y='value', data=plot_melt,
-                  xlabel='Hour of the Day', ylabel='Power [kW]', title='Yield Profile', hue='Months',  # style='Months',
-                  colors=list(reversed(plot.COLORS)), file=os.path.join(self._plots_dir, 'yield_months_profile.png'))
+                 colors=list(reversed(plot.COLORS)), file=yield_months)
+        images_dict[Evaluation.PV_ENERGY_MONTHS] = yield_months
 
         yield_specific = round(results[PVSystem.YIELD_SPECIFIC].sum(), 2)
         yield_energy = round(results[PVSystem.ENERGY].sum(), 2)
 
-        summary.loc[self.system.name, ('Yield', AC_Y)] = yield_specific
-        summary.loc[self.system.name, ('Yield', AC_E)] = yield_energy
+        summary_frame.loc[self.system.name, ('Yield', AC_Y)] = yield_specific
+        summary_dict[Evaluation.PV_SPECIFIC_YIELD] = yield_specific
 
-        summary_dict = {'yield_specific': yield_specific,
-                        'yield_energy': yield_energy}
+        summary_frame.loc[self.system.name, ('Yield', AC_E)] = yield_energy
+        summary_dict[Evaluation.PV_ENERGY_YIELD] = yield_energy
 
         if PVSystem.ENERGY_DC in results:
             dc_energy = round(results[PVSystem.ENERGY_DC].sum(), 2)
 
-            summary.loc[self.system.name, ('Yield', DC_E)] = dc_energy
-            summary_dict['yield_energy_dc'] = dc_energy
+            summary_frame.loc[self.system.name, ('Yield', DC_E)] = dc_energy
+            summary_dict[Evaluation.PV_ENERGY_DC_YIELD] = dc_energy
 
-        return summary_dict
-
-    def _evaluate_weather(self, summary: pd.DataFrame, results: pd.DataFrame) -> Dict:
+    def _evaluate_weather(self,
+                          summary_frame: pd.DataFrame,
+                          summary_dict: Dict[str, str | float | int],
+                          images_dict: Dict[str, str],
+                          results: pd.DataFrame,
+                          reference: pd.DataFrame = None) -> None:
         hours = pd.Series(results.index, index=results.index)
         hours = (hours - hours.shift(1)).fillna(method='bfill').dt.total_seconds() / 3600.
         ghi = round((results['ghi'] / 1000. * hours).sum(), 2)
         dhi = round((results['dhi'] / 1000. * hours).sum(), 2)
 
-        summary.loc[self.system.name, ('Weather', 'GHI [kWh/m^2]')] = ghi
-        summary.loc[self.system.name, ('Weather', 'DHI [kWh/m^2]')] = dhi
+        summary_frame.loc[self.system.name, ('Weather', 'GHI [kWh/m^2]')] = ghi
+        summary_dict[Evaluation.GHI_TOTAL] = ghi
 
-        return {}
+        summary_frame.loc[self.system.name, ('Weather', 'DHI [kWh/m^2]')] = dhi
+        summary_dict[Evaluation.DHI_TOTAL] = dhi
 
 
 # noinspection PyUnresolvedReferences
