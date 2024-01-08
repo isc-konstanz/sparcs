@@ -6,26 +6,26 @@
 
 """
 from __future__ import annotations
-import logging
 
-from corsys import Configurations, Configurable, System
+import logging
+import scisys as core
+from scisys import Results
 
 logger = logging.getLogger(__name__)
 
 
-class Report(Configurable):
+class Report(core.Report):
 
-    @classmethod
-    def read(cls, system, conf_file: str = 'report.cfg') -> Report:
-        return cls(Configurations.from_configs(system.configs, conf_file))
+    def build(self, pdf, results: Results) -> None:
+        super().build(pdf, results)
 
-    def __init__(self, system: System, name: str = 'Report') -> None:
-        super().__init__(system.configs)
-        self.system = system
-        self.name = name
+        pdf.add_header('Page 1 Header Test', level=1)
+        pdf.add_paragraph('Page 1 Content Test')
 
-    def __configure__(self, configs: Configurations) -> None:
-        super().__configure__(configs)
+        pdf.add_header('Page 1 Subheader Test', level=2)
+        pdf.add_paragraph('Page 1 Subcontent Test')
 
-    def __call__(self, *args, **kwargs) -> None:
-        pass
+        pdf.add_page_break()
+
+        pdf.add_header('Page 2 Header Test')
+        pdf.add_paragraph('Page 2 Content Test')

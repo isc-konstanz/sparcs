@@ -64,8 +64,17 @@ def eval(systems, **kwargs):
 
     evaluation = Evaluation.read(settings)
     evaluation(results)
+    report(results)
 
     logger.info("Finished PV system evaluation")
+
+
+# noinspection PyShadowingNames
+def report(results) -> None:
+    from pvsys.report import Report
+
+    report = Report.read(settings)
+    report(results)
 
 
 def build(systems, clean: bool = False, **kwargs):
