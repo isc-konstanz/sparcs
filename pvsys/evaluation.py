@@ -17,6 +17,7 @@ import traceback
 from corsys.io._var import COLUMNS
 from corsys.io import DatabaseUnavailableException
 from corsys import Configurations, Configurable, System
+from corsys.weather import Weather
 from scisys.io import excel, plot
 from scisys import Results, Progress
 from .pv import PVSystem
@@ -122,12 +123,12 @@ class Evaluation(Configurable):
             def prepare_data(data: pd.DataFrame) -> pd.DataFrame:
                 data = data.tz_convert(self.system.location.timezone).tz_localize(None)
                 data = data[[column for column in COLUMNS.keys() if column in data.columns]]
-                data.rename(columns=COLUMNS, inplace=True)
+                data = data.rename(columns=COLUMNS)
                 data.index.name = 'Time'
                 return data
 
             hours = pd.Series(results.data.index, index=results.data.index)
-            hours = (hours - hours.shift(1)).fillna(method='bfill').dt.total_seconds() / 3600.
+            hours = (hours - hours.shift(1)).bfill().dt.total_seconds() / 3600.
 
             if PVSystem.ENERGY not in results.data and PVSystem.POWER in results.data:
                 results.data[PVSystem.ENERGY] = results.data[PVSystem.POWER] / 1000. * hours
@@ -155,7 +156,7 @@ class Evaluation(Configurable):
                         results_suffix = cmpt.name
                         for cmpt_type in self.system.get_types():
                             results_suffix = results_suffix.replace(cmpt_type, '')
-                        if len(results_suffix) < 1 and len(self.system.get_type(cmpt.type)) > 1:
+                        if len(results_suffix) < 1 < len(self.system.get_type(cmpt.type)):
                             results_suffix += str(list(self.system.values()).index(cmpt) + 1)
                         results_name = CMPTS[cmpt.type] if cmpt.type in CMPTS else cmpt.type.upper()
                         results_name = f"{results_name.strip()} {results_suffix.strip()}".title()
@@ -177,7 +178,6 @@ class Evaluation(Configurable):
             raise e
 
         finally:
-            results.durations.stop('Evaluation')
             results.close()
             progress.reset()
 
@@ -235,9 +235,9 @@ class Evaluation(Configurable):
 
     def _evaluate_weather(self, summary: pd.DataFrame, results: pd.DataFrame) -> Dict:
         hours = pd.Series(results.index, index=results.index)
-        hours = (hours - hours.shift(1)).fillna(method='bfill').dt.total_seconds() / 3600.
-        ghi = round((results['ghi'] / 1000. * hours).sum(), 2)
-        dhi = round((results['dhi'] / 1000. * hours).sum(), 2)
+        hours = (hours - hours.shift(1)).bfill().dt.total_seconds() / 3600.
+        ghi = round((results[Weather.GHI] / 1000. * hours).sum(), 2)
+        dhi = round((results[Weather.DHI] / 1000. * hours).sum(), 2)
 
         summary.loc[self.system.name, ('Weather', 'GHI [kWh/m^2]')] = ghi
         summary.loc[self.system.name, ('Weather', 'DHI [kWh/m^2]')] = dhi
