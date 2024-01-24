@@ -20,6 +20,7 @@ import pvlib as pv
 # noinspection PyProtectedMember
 from pvlib.tools import _build_kwargs
 from pvlib.pvsystem import FixedMount, SingleAxisTrackerMount
+from pvlib import temperature
 from enum import Enum
 from copy import deepcopy
 from corsys.io import DatabaseException
@@ -65,7 +66,7 @@ class PVSystem(Photovoltaic, pv.pvsystem.PVSystem):
         array_dir = os.path.join(configs.dirs.conf,
                                  configs.get('General', 'id') + '.d')
 
-        if 'Mounting' in configs.sections():
+        if 'Mounting' in configs.sections() and len(configs['Mounting']) > 0:
             # TODO: verify parameter availability in 'General' by keys
             array_configs = deepcopy(configs)
             array_configs.set(Configurations.GENERAL, 'override_dir', array_dir)
@@ -224,7 +225,8 @@ class PVArray(Configurable, pv.pvsystem.Array):
             self.mount.gcr = self.module_length / self.row_pitch
 
         # Infer temperature model parameters again, with complete module parameters now
-        self.temperature_model_parameters = self._infer_temperature_model_params()
+        if len(self.temperature_model_parameters) == 0:
+            self.temperature_model_parameters = self._infer_temperature_model_params()
         self.shading_losses_parameters = self._infer_shading_losses_params()
 
     @staticmethod
@@ -382,7 +384,8 @@ class PVArray(Configurable, pv.pvsystem.Array):
                 elif all(k in params.keys() for k in params_desoto):
                     params_fit, params_fit_result = pv.ivtools.sdm.fit_desoto(*param_values(params_desoto))
                 elif 'gamma_pdc' not in params and 'gamma_mp' in params:
-                    params['gamma_pdc'] = params['gamma_mp'] / 100.
+                    params_iv.append('gamma_pdc')
+                    params_fit = {'gamma_pdc': params['gamma_mp'] / 100.}
                 else:
                     raise RuntimeError("Unable to estimate parameters due to incomplete variables")
 
@@ -447,9 +450,24 @@ class PVArray(Configurable, pv.pvsystem.Array):
 
         return params
 
+    # noinspection PyProtectedMember
     def _infer_temperature_model_params(self) -> dict:
         params = super()._infer_temperature_model_params()
 
+        # try to infer temperature model parameters from from racking_model
+        # and module_type
+        if self.mount.racking_model is not None:
+            param_set = self.mount.racking_model.lower()
+            if param_set in ['open_rack', 'close_mount', 'insulated_back']:
+                param_set += f'_{self.module_type}'
+            if param_set in temperature.TEMPERATURE_MODEL_PARAMETERS['sapm']:
+                params.update(temperature._temperature_model_params('sapm', param_set))
+            elif 'freestanding' in param_set:
+                params.update(temperature._temperature_model_params('pvsyst',
+                                                                    'freestanding'))
+            elif 'insulated' in param_set:  # after SAPM to avoid confusing keys
+                params.update(temperature._temperature_model_params('pvsyst',
+                                                                    'insulated'))
         if len(params) == 0 and len(self.module_parameters) > 0:
             if 'noct' in self.module_parameters.keys():
                 params['noct'] = self.module_parameters['noct']
