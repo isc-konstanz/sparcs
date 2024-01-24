@@ -172,17 +172,26 @@ class Evaluation(Configurable):
                 for cmpt in self.system.values():
                     cmpt_key = f"{self.system.id}/{cmpt.id}/output"
                     if cmpt_key in results:
-                        results_suffix = cmpt.name
+                        results_name = cmpt.name
+                        results_prefix = ''
                         for cmpt_type in self.system.get_types():
-                            results_suffix = results_suffix.replace(cmpt_type, '')
-                        if len(results_suffix) < 1 < len(self.system.get_type(cmpt.type)):
-                            results_suffix += str(list(self.system.values()).index(cmpt) + 1)
-                        results_name = CMPTS[cmpt.type] if cmpt.type in CMPTS else cmpt.type.upper()
-                        results_name = f"{results_name.strip()} {results_suffix.strip()}".title()
+                            if results_name.startswith(cmpt_type):
+                                results_prefix = cmpt_type
+                                break
+
+                        if len(results_prefix) > 0 or len(np.unique([c.type for c in self.system.values()])) > 1:
+                            if len(results_prefix) > 0:
+                                results_name = results_name.replace(results_prefix, '')
+                            if len(results_name) < 1 < len(self.system.get_type(cmpt.type)):
+                                results_name += str(list(self.system.get_type(cmpt.type)).index(cmpt) + 1)
+
+                            results_prefix = CMPTS[cmpt.type] if cmpt.type in CMPTS else cmpt.type.upper()
+                            results_name = f"{results_prefix.strip()} {results_name}".strip().title()
+
                         summary_data[results_name] = prepare_data(results[cmpt_key])
 
             summary.to_csv(self._results_csv, encoding='utf-8-sig')
-            excel.write(summary, summary_data, file=self._results_excel, index=False)
+            excel.write(summary, summary_data, file=self._results_excel)
             progress.complete(summary_json)
 
         except Exception as e:
