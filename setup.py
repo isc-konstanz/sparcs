@@ -34,11 +34,11 @@ URL = 'https://github.com/isc-konstanz/pvsys'
 INSTALL_REQUIRES = [
     'pvlib >= 0.10.1',
     'NREL-PySAM >= 4.0',
-    'corsys @ git+https://github.com/isc-konstanz/corsys.git@v0.8.4'
+    'corsys @ git+https://github.com/isc-konstanz/corsys.git@v0.8.6'
 ]
 
 EXTRAS_REQUIRE = {
-    'eval': ['scisys @ git+https://github.com/isc-konstanz/scisys.git@v0.2.10']
+    'eval': ['scisys @ git+https://github.com/isc-konstanz/scisys.git@v0.2.12']
 }
 
 SCRIPTS = ['bin/pvsys']
