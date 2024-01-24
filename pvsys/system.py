@@ -182,7 +182,11 @@ class System(core.System):
     def _get_solar_yield(self, pv: PVSystem, weather: pd.DataFrame) -> pd.DataFrame:
         model = Model.read(pv)
         return model(weather).rename(columns={'p_ac': PVSystem.POWER,
-                                              'p_dc': PVSystem.POWER_DC})
+                                              'p_dc': PVSystem.POWER_DC,
+                                              'i_sc': PVSystem.CURRENT_DC_SC,
+                                              'v_oc': PVSystem.VOLTAGE_DC_OC,
+                                              'i_mp': PVSystem.CURRENT_DC_MP,
+                                              'v_mp': PVSystem.VOLTAGE_DC_MP})
 
     # noinspection PyShadowingBuiltins
     def evaluate(self, **kwargs):

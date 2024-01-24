@@ -37,6 +37,12 @@ class PVSystem(Photovoltaic, pv.pvsystem.PVSystem):
     POWER_DC = 'pv_dc_power'
     ENERGY_DC = 'pv_dc_energy'
 
+    CURRENT_DC_SC = 'pv_dc_i_sc'
+    CURRENT_DC_MP = 'pv_dc_i_mp'
+
+    VOLTAGE_DC_OC = 'pv_dc_v_oc'
+    VOLTAGE_DC_MP = 'pv_dc_v_mp'
+
     YIELD_SPECIFIC = 'pv_specific_yield'
 
     def __init__(self, system: System, configs: Configurations) -> None:

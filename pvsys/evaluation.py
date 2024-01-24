@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Dict, Tuple
 import os
 import logging
+import numpy as np
 import pandas as pd
 import calendar
 import traceback
@@ -23,6 +24,17 @@ from scisys import Results, Progress
 from .pv import PVSystem
 
 logger = logging.getLogger(__name__)
+
+COLUMNS_DC = {
+    PVSystem.POWER_DC: 'Generated PV DC Power [W]'
+}
+
+COLUMNS_IV = {
+    PVSystem.CURRENT_DC_MP: 'Current at MPP (A)',
+    PVSystem.VOLTAGE_DC_MP: 'Voltage at MPP (V)',
+    PVSystem.CURRENT_DC_SC: 'Short-circuit current (A)',
+    PVSystem.VOLTAGE_DC_OC: 'Open-circuit voltage (V)'
+}
 
 CMPTS = {
     'tes': 'Buffer Storage',
@@ -40,8 +52,13 @@ class Evaluation(Configurable):
 
     def __init__(self, system: System, name: str = 'Evaluation') -> None:
         super().__init__(system.configs)
+        self._columns = self.__columns__()
         self.system = system
         self.name = name
+
+    @staticmethod
+    def __columns__() -> Dict[str, str]:
+        return {**COLUMNS, **COLUMNS_DC, **COLUMNS_IV}
 
     def __configure__(self, configs: Configurations) -> None:
         super().__configure__(configs)
@@ -87,10 +104,9 @@ class Evaluation(Configurable):
                     cmpt_key = f"{self.system.id}/{cmpt.id}/output"
                     result_pv = _get(results, cmpt_key, self.system._get_solar_yield, cmpt, input)
                     if result.empty:
-                        result = result_pv
+                        result = result_pv.loc[:, result_pv.columns.str.contains('pv.*_power')]
                     else:
-                        result += result_pv
-                    # result[f'{cmpt.id}_power'] = result_pv[PVSystem.POWER]
+                        result += result_pv.loc[:, result_pv.columns.str.contains('pv.*_power')]
 
                     progress.update()
 
