@@ -6,7 +6,7 @@
 
 """
 from __future__ import annotations
-from typing import Dict
+from typing import Dict, Tuple
 import os
 import logging
 import pandas as pd
@@ -61,9 +61,13 @@ class Evaluation(Configurable):
         if not os.path.exists(self._plots_dir):
             os.makedirs(self._plots_dir)
 
-    # noinspection PyProtectedMember
+        self._targets = {
+            PVSystem.TYPE: configs.get('References', PVSystem.TYPE, fallback=PVSystem.POWER)
+        }
+
+    # noinspection PyProtectedMember, PyTypeChecker, PyShadowingBuiltins
     def __call__(self, *args, **kwargs) -> Results:
-        logger.info("Starting evaluation for system: %s", self.system.name)
+        logger.debug("Starting evaluation for system: %s", self.system.name)
         progress = Progress.instance(desc=f"{self.name}: {self.system.name}",
                                      total=len(self.system)*2+1,
                                      file=self._results_json)
@@ -98,45 +102,60 @@ class Evaluation(Configurable):
                 results.load(results_key)
                 progress.complete()
             try:
-                reference = _get(results, f"{self.system.id}/reference", self.system.database.read, **kwargs)
+                references = _get(results, f"{self.system.id}/reference", self.system.database.read, **kwargs)
 
-                # noinspection PyShadowingBuiltins, PyShadowingNames
-                def add_reference(type: str, unit: str = 'power'):
-                    cmpts = self.system.get_type(type)
+                # noinspection PyTypeChecker, PyShadowingBuiltins, PyShadowingNames
+                def add_reference(cmpt_type: str, target: str):
+                    cmpts = self.system.get_type(cmpt_type)
                     if len(cmpts) > 0:
-                        if all([f'{cmpt.id}_{unit}' in reference.columns for cmpt in cmpts]):
-                            results.data[f'{type}_{unit}_ref'] = 0
-                            for cmpt in self.system.get_type(f'{type}'):
-                                results.data[f'{type}_{unit}_ref'] += reference[f'{cmpt.id}_{unit}']
-                        elif f'{type}_{unit}' in reference.columns:
-                            results.data[f'{type}_{unit}_ref'] = reference[f'{type}_{unit}']
+                        if all([target.replace(cmpt_type, cmpt.id) in references.columns or
+                                f'{target.replace(cmpt_type, cmpt.id)}_ref' in references.columns
+                                for cmpt in cmpts]):
+                            results.data[f'{cmpt_type}_ref'] = 0
+                            for cmpt in self.system.get_type(f'{cmpt_type}'):
+                                cmpt_target = target.replace(cmpt_type, cmpt.id)
+                                cmpt_reference = (references[f'{cmpt_target}'] if cmpt_target in references.columns else
+                                                  references[f'{cmpt_target}_ref'])
+                                results.data[f'{target}_ref'] += cmpt_reference
 
-                        results.data[f'{type}_{unit}_err'] = (results.data[f'{type}_{unit}'] -
-                                                              results.data[f'{type}_{unit}_ref'])
+                        elif target in references.columns:
+                            results.data[f'{target}_ref'] = references[target]
 
-                add_reference(PVSystem.TYPE)
+                        elif f'{target}_ref' in references.columns:
+                            results.data[f'{target}_ref'] = references[f'{target}_ref']
+
+                        results.data[f'{target}_err'] = (results.data[target] -
+                                                         results.data[f'{target}_ref'])
+
+                for cmpt_type, target in self._targets.items():
+                    add_reference(cmpt_type, target)
 
             except DatabaseUnavailableException as e:
-                reference = None
+                references = None
                 logger.debug("Unable to retrieve reference values for system %s: %s", self.system.name, str(e))
 
             def prepare_data(data: pd.DataFrame) -> pd.DataFrame:
                 data = data.tz_convert(self.system.location.timezone).tz_localize(None)
-                data = data[[column for column in COLUMNS.keys() if column in data.columns]]
-                data = data.rename(columns=COLUMNS)
+                data = data[[column for column in self._columns.keys() if column in data.columns]]
+                data = data.rename(columns=self._columns)
                 data.index.name = 'Time'
                 return data
 
             hours = pd.Series(results.data.index, index=results.data.index)
             hours = (hours - hours.shift(1)).bfill().dt.total_seconds() / 3600.
 
+            if '_power' in self._targets[PVSystem.TYPE]:
+                pv_power_target = self._targets[PVSystem.TYPE]
+                pv_energy_target = pv_power_target.replace('_power', '_energy')
+                if pv_energy_target not in results.data and pv_power_target in results.data:
+                    results.data[pv_energy_target] = results.data[pv_power_target] / 1000. * hours
+                if f'{pv_energy_target}_ref' not in results.data and f'{pv_power_target}_ref' in results.data:
+                    results.data[f'{pv_energy_target}_ref'] = results.data[f'{pv_power_target}_ref'] / 1000. * hours
+                    results.data[f'{pv_energy_target}_err'] = (results.data[pv_energy_target] -
+                                                               results.data[f'{pv_energy_target}_ref'])
+
             if PVSystem.ENERGY not in results.data and PVSystem.POWER in results.data:
                 results.data[PVSystem.ENERGY] = results.data[PVSystem.POWER] / 1000. * hours
-            if f'{PVSystem.ENERGY}_ref' not in results.data and f'{PVSystem.POWER}_ref' in results.data:
-                results.data[f'{PVSystem.ENERGY}_ref'] = results.data[f'{PVSystem.POWER}_ref'] / 1000. * hours
-                results.data[f'{PVSystem.ENERGY}_err'] = (results.data[PVSystem.ENERGY] -
-                                                          results.data[f'{PVSystem.ENERGY}_ref'])
-
             if PVSystem.ENERGY_DC not in results.data and PVSystem.POWER_DC in results.data:
                 results.data[PVSystem.ENERGY_DC] = results.data[PVSystem.POWER_DC] / 1000. * hours
 
@@ -144,7 +163,7 @@ class Evaluation(Configurable):
             summary_json = {
                 'status': 'success'
             }
-            self._evaluate(summary_json, summary, results.data, reference)
+            self._evaluate(summary_json, summary, results.data, references)
 
             summary_data = {
                 self.system.name: prepare_data(results.data)
@@ -181,7 +200,6 @@ class Evaluation(Configurable):
             results.close()
             progress.reset()
 
-        logger.info("Evaluation complete")
         logger.debug('Evaluation complete in %i minutes', results.durations['Evaluation'])
 
         return results
@@ -195,6 +213,9 @@ class Evaluation(Configurable):
         summary_json.update(self._evaluate_weather(summary, results))
 
     def _evaluate_yield(self, summary: pd.DataFrame, results: pd.DataFrame, reference: pd.DataFrame = None) -> Dict:
+        if PVSystem.ENERGY not in results.columns:
+            return {}
+
         results_kwp = 0
         for system in self.system.values():
             results_kwp += system.power_max / 1000.
