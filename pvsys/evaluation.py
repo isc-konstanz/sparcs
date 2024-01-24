@@ -217,18 +217,18 @@ class Evaluation(Configurable):
                   colors=list(reversed(plot.COLORS)), file=os.path.join(self._plots_dir, 'yield_months_profile.png'))
 
         yield_specific = round(results[PVSystem.YIELD_SPECIFIC].sum(), 2)
-        yield_energy = round(results[PVSystem.ENERGY].sum(), 2)
+        yield_energy, yield_energy_column = self._scale_yield(results[PVSystem.ENERGY].sum(), AC_E)
 
         summary.loc[self.system.name, ('Yield', AC_Y)] = yield_specific
-        summary.loc[self.system.name, ('Yield', AC_E)] = yield_energy
+        summary.loc[self.system.name, ('Yield', yield_energy_column)] = yield_energy
 
         summary_dict = {'yield_specific': yield_specific,
                         'yield_energy': yield_energy}
 
         if PVSystem.ENERGY_DC in results:
-            dc_energy = round(results[PVSystem.ENERGY_DC].sum(), 2)
+            dc_energy, dc_energy_column = self._scale_yield(results[PVSystem.ENERGY_DC].sum(), DC_E)
 
-            summary.loc[self.system.name, ('Yield', DC_E)] = dc_energy
+            summary.loc[self.system.name, ('Yield', dc_energy_column)] = dc_energy
             summary_dict['yield_energy_dc'] = dc_energy
 
         return summary_dict
@@ -243,6 +243,16 @@ class Evaluation(Configurable):
         summary.loc[self.system.name, ('Weather', 'DHI [kWh/m^2]')] = dhi
 
         return {}
+
+    @staticmethod
+    def _scale_yield(energy: float, column: str) -> Tuple[float, str]:
+        if energy >= 1e7:
+            energy = round(energy / 1e6)
+            column = column.replace('kWh', 'GWh')
+        elif energy >= 1e4:
+            energy = round(energy / 1e3)
+            column = column.replace('kWh', 'MWh')
+        return round(energy, 2), column
 
 
 # noinspection PyUnresolvedReferences
