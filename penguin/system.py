@@ -8,12 +8,13 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 
 from pvlib import solarposition
 
 import loris
 import pandas as pd
-from loris import Configurations, components
+from loris import Configurations, components, connectors
 from penguin import ElectricalEnergyStorage, ElectricVehicle, Location, PVArray, PVSystem, ThermalEnergyStorage, Weather
 from penguin.input import (
     direct_diffuse_from_global_irradiance,
@@ -23,12 +24,23 @@ from penguin.input import (
     relative_humidity_from_dewpoint,
 )
 
+logger = logging.getLogger(__name__)
+
 components.register(Weather, Weather.TYPE, factory=Weather.load, replace=True)
 components.register(PVArray, PVArray.TYPE)
 components.register(PVSystem, PVSystem.TYPE, *PVSystem.ALIAS)
 components.register(ElectricVehicle, ElectricVehicle.TYPE)
 components.register(ElectricalEnergyStorage, ElectricalEnergyStorage.TYPE)
 components.register(ThermalEnergyStorage, ThermalEnergyStorage.TYPE)
+
+try:
+    logger.debug("Registering Papendorf connector")
+    from penguin.connectors.papendorf import PapendorfParser
+
+    connectors.register(PapendorfParser, PapendorfParser.TYPE)
+
+except ImportError as e:
+    logger.debug(f"Failed registering Papendorf connector: {e}")
 
 
 class System(loris.System):
