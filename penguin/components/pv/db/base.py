@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-    pvsys.pv.db
+    penguin.pv.db
     ~~~~~~~~~~~
     
     
@@ -12,11 +12,10 @@ import json
 import shutil
 import time
 
-from corsys.io import DatabaseException
-from corsys import Configurations
+from loris import Configurations
 
 
-class ModelDatabase(ABC):
+class PVDatabase(ABC):
 
     # noinspection PyShadowingBuiltins
     def __init__(self, configs: Configurations, type):
@@ -37,7 +36,7 @@ class ModelDatabase(ABC):
     def _read(path, file):
         file_path = os.path.join(path, file)
         if not os.path.isfile(file_path):
-            raise DatabaseException("Unable to locate module file %s".format(file_path))
+            raise IOError("Unable to locate module file %s".format(file_path))
 
         with open(file_path, encoding='utf-8') as file:
             return json.load(file)

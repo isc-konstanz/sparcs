@@ -1,23 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-    pvsys.model
-    ~~~~~~~~~~~
+    penguin.model
+    ~~~~~~~~~~~~~
     
     
 """
 from __future__ import annotations
 
 import os
-import logging
 import pandas as pd
 
-from copy import deepcopy
 from pvlib.modelchain import ModelChain
-from corsys import Model as ModelCore
-from corsys import Location, Configurations
-from . import PVSystem
+from loris import Location, Configurations, Configurable
+from penguin import PVSystem
 
-logger = logging.getLogger(__name__)
 
 # noinspection SpellCheckingInspection
 DEFAULTS = dict(
@@ -32,20 +28,25 @@ DEFAULTS = dict(
 
 
 # noinspection SpellCheckingInspection, PyAbstractClass
-class Model(ModelCore, ModelChain):
+class Model(Configurable, ModelChain):
 
     @classmethod
-    def read(cls, pvsystem: PVSystem, override_file: str = 'model.cfg', section: str = 'Model') -> Model:
-        configs = deepcopy(pvsystem.configs)
-        configs_override = os.path.join(configs.dirs.conf, pvsystem.id+'.d', override_file)
-        if os.path.isfile(configs_override):
-            configs.read(configs_override)
+    def load(cls, pvsystem: PVSystem, override_file: str = 'model.conf', section: str = 'model') -> Model:
+        override_dir = os.path.join(pvsystem.configs.dirs.conf, pvsystem.id+'.d')
+        configs_dirs = pvsystem.configs.dirs.encode()
+        configs_dirs["conf_dir"] = override_dir
 
+        configs = Configurations.load(
+            override_file,
+            **configs_dirs,
+            **pvsystem.configs,
+            require=False
+        )
         params = DEFAULTS
-        if configs.has_section(section):
-            params.update(configs.items(section))
+        if section in configs:
+            params.update(configs.get(section))
 
-        return cls(configs, pvsystem, pvsystem.system.location, **params)
+        return cls(configs, pvsystem, pvsystem.context.location, **params)
 
     def __init__(self, configs: Configurations, pvsystem: PVSystem, location: Location, **kwargs):
         super().__init__(configs, pvsystem, location, **kwargs)

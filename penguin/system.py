@@ -1,24 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-    pvsys.system
-    ~~~~~~~~~~~~
+    penguin.system
+    ~~~~~~~~~~~~~~
     
     
 """
 from __future__ import annotations
-from typing import List
 
-import logging
+import datetime as dt
+import loris
 import pandas as pd
-import corsys as core
-from corsys import Component
-from corsys.weather import Weather
-from corsys.configs import Configurations
 from pvlib import solarposition
-from .pv import PVSystem
-from .model import Model
-from .location import Location
-from .input import (
+from loris import components, Configurations
+from penguin import Location, Weather, PVSystem, PVArray, ElectricVehicle, ElectricalEnergyStorage, ThermalEnergyStorage
+from penguin.input import (
     relative_humidity_from_dewpoint,
     precipitable_water_from_relative_humidity,
     direct_normal_from_global_diffuse_irradiance,
@@ -26,61 +21,60 @@ from .input import (
     global_irradiance_from_cloud_cover
 )
 
-logger = logging.getLogger(__name__)
+components.register(Weather, Weather.TYPE, factory=Weather.load, replace=True)
+components.register(PVArray, PVArray.TYPE)
+components.register(PVSystem, PVSystem.TYPE, *PVSystem.ALIAS)
+components.register(ElectricVehicle, ElectricVehicle.TYPE)
+components.register(ElectricalEnergyStorage, ElectricalEnergyStorage.TYPE)
+components.register(ThermalEnergyStorage, ThermalEnergyStorage.TYPE)
 
 
-class System(core.System):
+class System(loris.System):
 
-    def __location__(self, configs: Configurations) -> Location:
-        # FIXME: location necessary for for weather instantiation, but called afterwards here
-        # if isinstance(self.weather, TMYWeather):
-        #     return Location.from_tmy(self.weather.meta)
-        # elif isinstance(self.weather, EPWWeather):
-        #     return Location.from_epw(self.weather.meta)
+    POWER_EL:     str = 'el_power'
+    POWER_EL_IMP: str = 'el_import_power'
+    POWER_EL_EXP: str = 'el_export_power'
+    POWER_TH:     str = 'th_power'
+    POWER_TH_HT:  str = 'th_ht_power'
+    POWER_TH_DOM: str = 'th_dom_power'
 
-        return Location(configs.getfloat('Location', 'latitude'),
-                        configs.getfloat('Location', 'longitude'),
-                        timezone=configs.get('Location', 'timezone', fallback='UTC'),
-                        altitude=configs.getfloat('Location', 'altitude', fallback=None),
-                        country=configs.get('Location', 'country', fallback=None),
-                        state=configs.get('Location', 'state', fallback=None),
-                        name=configs.get('Location', 'name', fallback=self.name))
+    ENERGY_EL:     str = 'el_energy'
+    ENERGY_EL_IMP: str = 'el_import_energy'
+    ENERGY_EL_EXP: str = 'el_export_energy'
+    ENERGY_TH:     str = 'th_energy'
+    ENERGY_TH_HT:  str = 'th_ht_energy'
+    ENERGY_TH_DOM: str = 'th_dom_energy'
 
-    # noinspection PyShadowingBuiltins
-    def __weather__(self, configs: Configurations) -> Weather:
-        conf_file = 'weather.cfg'
-        configs = Configurations.from_configs(self.configs, conf_file)
-        type = configs.get('General', 'type', fallback='default').lower()
-        if type == 'tmy':
-            from .weather.tmy import TMYWeather
-            return TMYWeather(self, configs)
-        elif type == 'epw':
-            from .weather.epw import EPWWeather
-            return EPWWeather(self, configs)
-
-        return Weather.read(self, conf_file)
-
-    def __cmpt_types__(self, *args: str) -> List[str]:
-        return super().__cmpt_types__('solar', 'array', *args)
-
-    # noinspection PyShadowingBuiltins
-    def __cmpt__(self, configs: Configurations, type: str) -> Component:
-        if type in ['pv', 'solar', 'array']:
-            return PVSystem(self, configs)
-
-        return super().__cmpt__(configs, type)
+    # noinspection PyMethodMayBeStatic
+    def __localize__(self, configs: Configurations) -> None:
+        if configs.has_section(Location.SECTION):
+            location_configs = configs.get_section(Location.SECTION)
+            self._location = Location(
+                location_configs.get_float("latitude"),
+                location_configs.get_float("longitude"),
+                timezone=location_configs.get("timezone", default="UTC"),
+                altitude=location_configs.get_float("altitude", default=None),
+                country=location_configs.get("country", default=None),
+                state=location_configs.get("state", default=None),
+            )
 
     # noinspection PyShadowingBuiltins
-    def __call__(self) -> pd.DataFrame:
-        input = self._get_input()
-        result = pd.DataFrame(columns=[PVSystem.POWER, PVSystem.POWER_DC], index=input.index).fillna(0)
+    def run(
+        self,
+        start: pd.Timestamp | dt.datetime = None,
+        end: pd.Timestamp | dt.datetime = None,
+        **kwargs
+    ) -> pd.DataFrame:
+        # if start is None:
+        #     start = pd.Timestamp.now(tz=self.location.timezone)
+        input = self._get_input(start, end, **kwargs)
+        result = pd.DataFrame(columns=[PVSystem.POWER, PVSystem.POWER_DC], index=input.index).fillna(0.0)
         result.index.name = 'time'
-        for cmpt in self.values():
-            if cmpt.type == PVSystem.TYPE:
-                result_pv = self._get_solar_yield(cmpt, input)
-                result[[PVSystem.POWER, PVSystem.POWER_DC]] += result_pv[[PVSystem.POWER, PVSystem.POWER_DC]].abs()
+        for pv in self.get_all(PVSystem.TYPE):
+            result_pv = pv.run(input)
+            result[[PVSystem.POWER, PVSystem.POWER_DC]] += result_pv[[PVSystem.POWER, PVSystem.POWER_DC]].abs()
 
-        return pd.concat([result, input], axis=1)
+        return pd.concat([result, input], axis='columns')
 
     # noinspection PyUnresolvedReferences, PyTypeChecker
     def _validate_input(self, weather: pd.DataFrame) -> pd.DataFrame:
@@ -174,22 +168,12 @@ class System(core.System):
             data.columns = ['solar_azimuth', 'solar_zenith', 'solar_elevation']
 
         except ImportError as e:
-            logger.warning("Unable to generate solar position: {}".format(str(e)))
+            self._logger.warning("Unable to generate solar position: {}".format(str(e)))
 
         return data
 
-    # noinspection PyMethodMayBeStatic
-    def _get_solar_yield(self, pv: PVSystem, weather: pd.DataFrame) -> pd.DataFrame:
-        model = Model.read(pv)
-        return model(weather).rename(columns={'p_ac': PVSystem.POWER,
-                                              'p_dc': PVSystem.POWER_DC,
-                                              'i_sc': PVSystem.CURRENT_DC_SC,
-                                              'v_oc': PVSystem.VOLTAGE_DC_OC,
-                                              'i_mp': PVSystem.CURRENT_DC_MP,
-                                              'v_mp': PVSystem.VOLTAGE_DC_MP})
-
-    # noinspection PyShadowingBuiltins
-    def evaluate(self, **kwargs):
-        from .evaluation import Evaluation
-        eval = Evaluation(self)
-        return eval(**kwargs)
+    # # noinspection PyShadowingBuiltins
+    # def evaluate(self, **kwargs):
+    #     from .evaluation import Evaluation
+    #     eval = Evaluation(self)
+    #     return eval(**kwargs)

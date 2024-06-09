@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-    pvsys.pv.module
-    ~~~~~~~~~~~~~~~
+    penguin.components.pv.db.cec
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     
     
 """
@@ -12,10 +12,8 @@ import numpy as np
 
 from pvlib import pvsystem
 from collections import OrderedDict
-from corsys.configs import Configurations
-from .db import ModelDatabase
-
-logger = logging.getLogger(__name__)
+from loris import Configurations
+from .base import PVDatabase
 
 SAM_CEC_MODULES_CSV = 'sam-library-cec-modules-2019-03-05.csv'
 SAM_CEC_INVERTERS_CSV = 'sam-library-cec-inverters-2019-03-05.csv'
@@ -24,7 +22,7 @@ CEC_MODULES_XLSX = 'https://solarequipment.energy.ca.gov/Home/DownloadtoExcel?fi
 CEC_INVERTERS_XLSX = 'https://solarequipment.energy.ca.gov/Home/DownloadtoExcel?filename=InvertersList'
 
 
-class ModuleDatabase(ModelDatabase):
+class ModuleDatabase(PVDatabase):
 
     def __init__(self, configs: Configurations):
         super().__init__(configs, 'modules')
@@ -149,7 +147,7 @@ class ModuleDatabase(ModelDatabase):
         return meta, data
 
 
-class InverterDatabase(ModelDatabase):
+class InverterDatabase(PVDatabase):
 
     def __init__(self, configs: Configurations):
         super().__init__(configs, 'inverters')
