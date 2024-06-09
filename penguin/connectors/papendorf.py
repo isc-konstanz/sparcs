@@ -22,7 +22,7 @@ class PapendorfParser(Connector):
     _database: MySqlConnector = None
 
     def __init__(self, context, configs: Configurations, channels: Channels = None, *args, **kwargs) -> None:
-        super().__init__(configs, *args, **kwargs)
+        super().__init__(context, configs, channels, *args, **kwargs)
         # TODO: Implement papendorf initialisation
         # self._database = MySqlConnector(context, configs)
 
@@ -32,7 +32,7 @@ class PapendorfParser(Connector):
 
     def __connect__(self, channels: Channels) -> None:
         super().__connect__(channels)
-        self._database.connect(channels)
+        # self._database.connect(channels)
         # TODO: Implement papendorf database connections
 
     @property
