@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import os
+import re
 from copy import deepcopy
 from enum import Enum
 from typing import Any, Dict, List, Mapping, Optional
@@ -256,8 +257,8 @@ class PVArray(pv.pvsystem.Array, Component):
         return params
 
     def _read_module_params(self, params: dict) -> bool:
-        if self.configs.has_section("Module"):
-            module_params = dict(self.configs["Module"])
+        if self.configs.has_section("module"):
+            module_params = dict(self.configs["module"])
             _update_parameters(params, module_params)
             self._logger.debug("Extracted module from config file")
             return True
@@ -277,10 +278,10 @@ class PVArray(pv.pvsystem.Array, Component):
         return False
 
     def _read_module_configs(self, params: dict) -> bool:
-        module_file = os.path.join(self.configs.dirs.conf, self.name.replace("array", "module") + ".conf")
-        if not os.path.isfile(module_file):
-            module_file = os.path.join(self.configs.dirs.conf, "module.conf")
-        if os.path.exists(module_file):
+        module_file = self.name.replace(re.split(r"[^a-zA-Z0-9\s]", self.id)[0], "module") + ".conf"
+        if not os.path.isfile(os.path.join(self.configs.dirs.conf, module_file)):
+            module_file = "module.conf"
+        if os.path.isfile(os.path.join(self.configs.dirs.conf, module_file)):
             _update_parameters(params, Configurations.load(module_file, **self.configs.dirs.encode()))
             self._logger.debug("Read module file: %s", module_file)
             return True
