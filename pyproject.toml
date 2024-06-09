@@ -65,3 +65,20 @@ tag_prefix = "v"
 
 [project.scripts]
 penguin = "penguin.__main__:main"
+
+[tool.autoflake]
+expand-star-imports = true
+remove-unused-variables = true
+ignore-init-module-imports = true
+remove-all-unused-imports = true
+
+[tool.isort]
+profile = "black"
+line_length = 120
+src_paths = ["penguin"]
+known_first_party = ["penguin", "loris", "numpy", "pandas", "pytz"]
+extra_standard_library = ["dateutil"]
+
+[tool.black]
+target-version = ["py39"]
+line-length = 120

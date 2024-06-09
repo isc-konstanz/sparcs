@@ -14,13 +14,13 @@ from penguin import Location
 
 
 class Weather(loris.Weather):
-
     # noinspection PyShadowingBuiltins
     @classmethod
     def load(cls, context: ComponentContext, configs: Configurations) -> Weather:
         type = configs.get("type", default="default").lower()
         if type == "epw":
             from penguin.components.weather.epw import EPWWeather
+
             return EPWWeather(context, configs)
         elif type == "tmy":
             return None

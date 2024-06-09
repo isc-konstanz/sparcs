@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import datetime as dt
 import os
-import pandas as pd
-
 from typing import Dict
+
 from pvlib.iotools import read_tmy2, read_tmy3
+
+import pandas as pd
 from loris import Configurations
 from penguin import Location
 from penguin.components.weather import Weather
@@ -25,7 +26,7 @@ class TMYWeather(Weather):
     def __configure__(self, configs: Configurations) -> None:
         super().__configure__(configs)
         section = configs.get_section("epw", default={})
-        self.version = section.get_int('version', default=3)
+        self.version = section.get_int("version", default=3)
 
         self.year = section.get_int("year", default=None)
         self.file = section.get("file", default="weather.csv")
@@ -40,7 +41,7 @@ class TMYWeather(Weather):
         elif self.version == 2:
             self._data, self._meta = read_tmy2(self.file)
         else:
-            raise ValueError('Invalid TMY version: {}'.format(self.version))
+            raise ValueError("Invalid TMY version: {}".format(self.version))
 
         self.location = Location.from_epw(self._meta)
 

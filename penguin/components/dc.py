@@ -5,14 +5,14 @@
 
 
 """
-from loris import Configurations, Component
+from loris import Component, Configurations
 
 
 class DirectCurrent(Component):
-    TYPE: str = 'dc'
+    TYPE: str = "dc"
 
-    POWER_DC:  str = 'dc_power'
-    ENERGY_DC:  str = 'dc_energy'
+    POWER_DC: str = "dc_power"
+    ENERGY_DC: str = "dc_energy"
 
     # noinspection PyProtectedMember
     def __configure__(self, configs: Configurations) -> None:

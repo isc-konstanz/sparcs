@@ -7,11 +7,11 @@
 """
 from __future__ import annotations
 
+from pvlib import atmosphere
+from pvlib.irradiance import dirint, disc, dni
+
 import numpy as np
 import pandas as pd
-from pvlib import atmosphere
-from pvlib.location import Location
-from pvlib.irradiance import dni, disc, dirint
 
 
 def precipitable_water_from_relative_humidity(temperature: pd.Series, relative_humidity: pd.Series) -> pd.Series:
@@ -77,9 +77,7 @@ def _saturation_vapor_pressure(temperature: pd.Series) -> pd.Series:
     equivalent potential temperature for T in degrees Celsius:
     .. math:: 6.112 e^\frac{17.67T}{T + 243.5}
     """
-    return 6.112 * np.exp(
-        17.67 * (temperature - 273.15) / (temperature - 29.65)
-    )
+    return 6.112 * np.exp(17.67 * (temperature - 273.15) / (temperature - 29.65))
 
 
 def direct_normal_from_global_diffuse_irradiance(solar_position, ghi, dhi):
@@ -108,7 +106,7 @@ def direct_normal_from_global_diffuse_irradiance(solar_position, ghi, dhi):
     """
 
     # Use true (not refraction-corrected) zenith angles in decimal
-    irr = dni(ghi, dhi, solar_position['zenith'])
+    irr = dni(ghi, dhi, solar_position["zenith"])
     return _fill_irradiance(irr)
 
 
@@ -131,21 +129,19 @@ def direct_diffuse_from_global_irradiance(solar_position, ghi, **kwargs):
     dhi, dni : Series
         Estimated DHI and DNI.
     """
-    if 'pressure' in kwargs or \
-       'temp_dew' in kwargs:
-
-        dni = dirint(ghi, solar_position['zenith'], ghi.index, **kwargs).fillna(0)
+    if "pressure" in kwargs or "temp_dew" in kwargs:
+        dni = dirint(ghi, solar_position["zenith"], ghi.index, **kwargs).fillna(0)
     else:
-        dni = disc(ghi, solar_position['zenith'], ghi.index, **kwargs)['dni']
+        dni = disc(ghi, solar_position["zenith"], ghi.index, **kwargs)["dni"]
 
-    dhi = ghi - dni * np.cos(np.radians(solar_position['zenith']))
+    dhi = ghi - dni * np.cos(np.radians(solar_position["zenith"]))
 
     return (_fill_irradiance(dhi),
             _fill_irradiance(dni))
 
 
 # noinspection PyShadowingNames
-def global_irradiance_from_cloud_cover(location, cloud_cover, solar_position=None, method='linear', **kwargs):
+def global_irradiance_from_cloud_cover(location, cloud_cover, solar_position=None, method="linear", **kwargs):
     """
     Estimates irradiance from cloud cover in the following steps:
     1. Determine clear sky GHI using Ineichen model and
@@ -173,13 +169,13 @@ def global_irradiance_from_cloud_cover(location, cloud_cover, solar_position=Non
     """
     if solar_position is None:
         solar_position = location.get_solarposition(cloud_cover.index)
-    cs = location.get_clearsky(cloud_cover.index, model='ineichen', solar_position=solar_position)
+    cs = location.get_clearsky(cloud_cover.index, model="ineichen", solar_position=solar_position)
 
     method = method.lower()
-    if method == 'linear':
-        ghi = _cloud_cover_to_ghi_linear(cloud_cover, cs['ghi'], **kwargs)
+    if method == "linear":
+        ghi = _cloud_cover_to_ghi_linear(cloud_cover, cs["ghi"], **kwargs)
     else:
-        raise ValueError('invalid method argument')
+        raise ValueError("invalid method argument")
 
     return _fill_irradiance(ghi)
 
@@ -209,14 +205,14 @@ def _cloud_cover_to_ghi_linear(cloud_cover, ghi_clear, offset=35):
     photovoltaic plants in the American Southwest" Renewable Energy
     91, 11-20 (2016).
     """
-    offset = offset / 100.
-    cloud_cover = cloud_cover / 100.
+    offset = offset / 100.0
+    cloud_cover = cloud_cover / 100.0
     ghi = (offset + (1 - offset) * (1 - cloud_cover)) * ghi_clear
     return ghi
 
 
 def _fill_irradiance(irradiance):
     if irradiance.isna().any():
-        irradiance = irradiance.interpolate(method='akima')
+        irradiance = irradiance.interpolate(method="akima")
         irradiance[irradiance < 1e-3] = 0
     return irradiance.abs()

@@ -10,11 +10,12 @@ from __future__ import annotations
 import datetime as dt
 import os
 import re
+from typing import Dict
+
+from pvlib.iotools import read_epw
+
 import numpy as np
 import pandas as pd
-
-from typing import Dict
-from pvlib.iotools import read_epw
 from loris import Configurations
 from penguin import Location
 from penguin.components.weather import Weather
@@ -50,38 +51,40 @@ class EPWWeather(Weather):
         import requests
         import urllib3
         from urllib3.exceptions import InsecureRequestWarning
+
         urllib3.disable_warnings(InsecureRequestWarning)
 
         headers = {
-            'User-Agent': "Magic Browser",
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+            "User-Agent": "Magic Browser",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
 
-        response = requests.get('https://github.com/NREL/EnergyPlus/raw/develop/weather/master.geojson', verify=False)
+        response = requests.get("https://github.com/NREL/EnergyPlus/raw/develop/weather/master.geojson", verify=False)
         data = response.json()  # metadata for available files
         # download lat/lon and url details for each .epw file into a dataframe
 
-        locations = [{'url': [], 'lat': [], 'lon': [], 'name': []}]
-        for features in data['features']:
-            match = re.search(r'href=[\'"]?([^\'" >]+)', features['properties']['epw'])
+        locations = [{"url": [], "lat": [], "lon": [], "name": []}]
+        for features in data["features"]:
+            match = re.search(r'href=[\'"]?([^\'" >]+)', features["properties"]["epw"])
             if match:
                 url = match.group(1)
-                name = url[url.rfind('/') + 1:]
-                longitude = features['geometry']['coordinates'][0]
-                latitude = features['geometry']['coordinates'][1]
-                locations.append({'name': name, 'url': url, 'latitude': float(latitude), 'longitude': float(longitude)})
+                name = url[url.rfind("/") + 1 :]
+                longitude = features["geometry"]["coordinates"][0]
+                latitude = features["geometry"]["coordinates"][1]
+                locations.append({"name": name, "url": url, "latitude": float(latitude), "longitude": float(longitude)})
 
         locations = pd.DataFrame(locations)
-        errorvec = np.sqrt(np.square(locations.latitude - location.latitude) +
-                           np.square(locations.longitude - location.longitude))
+        errorvec = np.sqrt(
+            np.square(locations.latitude - location.latitude) + np.square(locations.longitude - location.longitude)
+        )
         index = errorvec.idxmin()
-        url = locations['url'][index]
+        url = locations["url"][index]
         # name = locations['name'][index]
 
         response = requests.get(url, verify=False, headers=headers)
         if response.ok:
-            with open(self.path, 'wb') as file:
-                file.write(response.text.encode('ascii', 'ignore'))
+            with open(self.path, "wb") as file:
+                file.write(response.text.encode("ascii", "ignore"))
         else:
             self._logger.warning("Connection error status code: %s" % response.status_code)
             response.raise_for_status()

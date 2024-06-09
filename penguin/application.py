@@ -7,12 +7,6 @@
 """
 from __future__ import annotations
 
-from threading import Event, Thread
-from typing import Type
-
-import pandas as pd
-import pytz as tz
-
 import loris
 from loris import Settings
 from penguin import System
@@ -24,7 +18,6 @@ def load(name: str = "Penguin", **kwargs) -> Application:
 
 
 class Application(loris.Application):
-
     def _run(self, *args, **kwargs) -> None:
         for system in self.components.get_all(System):
             try:

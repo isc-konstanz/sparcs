@@ -2,34 +2,32 @@
 """
     penguin.pv.db
     ~~~~~~~~~~~
-    
-    
-"""
-from abc import ABC, abstractmethod
 
-import os
+
+"""
 import json
+import os
 import shutil
 import time
+from abc import ABC, abstractmethod
 
 from loris import Configurations
 
 
 class PVDatabase(ABC):
-
     # noinspection PyShadowingBuiltins
     def __init__(self, configs: Configurations, type):
         self._lib_dir = os.path.join(configs.dirs.lib, type)
 
-    def _parse_file(self, key: str, sub_dir: str = ''):
-        file = key + '.json'
+    def _parse_file(self, key: str, sub_dir: str = ""):
+        file = key + ".json"
         file_dir = os.path.join(self._lib_dir, sub_dir)
         return file_dir, file
 
-    def exists(self, key: str, sub_dir: str = ''):
+    def exists(self, key: str, sub_dir: str = ""):
         return os.path.isfile(os.path.join(*self._parse_file(key, sub_dir)))
 
-    def read(self, key: str, sub_dir: str = ''):
+    def read(self, key: str, sub_dir: str = ""):
         return self._read(*self._parse_file(key, sub_dir))
 
     @staticmethod
@@ -38,10 +36,10 @@ class PVDatabase(ABC):
         if not os.path.isfile(file_path):
             raise IOError("Unable to locate module file %s".format(file_path))
 
-        with open(file_path, encoding='utf-8') as file:
+        with open(file_path, encoding="utf-8") as file:
             return json.load(file)
 
-    def write(self, key, data, sub_dir=''):
+    def write(self, key, data, sub_dir=""):
         file_dir, file = self._parse_file(key, sub_dir)
         if not os.path.isdir(file_dir):
             os.makedirs(file_dir)
@@ -54,8 +52,8 @@ class PVDatabase(ABC):
         if os.path.isfile(file_path):
             return
 
-        with open(file_path, 'w', encoding='utf-8') as file:
-            file.write(json.dumps(data, separators=(',', ':'), indent=4))
+        with open(file_path, "w", encoding="utf-8") as file:
+            file.write(json.dumps(data, separators=(",", ":"), indent=4))
 
     @abstractmethod
     def build(self):
@@ -66,6 +64,6 @@ class PVDatabase(ABC):
             shutil.rmtree(self._lib_dir)
 
             while os.path.exists(self._lib_dir):
-                time.sleep(.1)
+                time.sleep(0.1)
 
         os.makedirs(self._lib_dir)
