@@ -95,7 +95,7 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
         if "mounting" in configs and len(configs.get_section("mounting")) > 0:
             # TODO: verify parameter availability in 'General' by keys
 
-            array_file = os.path.join(array_dir, "array.conf")
+            array_file = "array.conf"
             array_configs = Configurations.load(
                 array_file,
                 **array_dirs,
@@ -117,7 +117,7 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
             array_defaults.update(arrays_section)
 
             for array_id, array_section in arrays_configs.items():
-                array_file = os.path.join(array_dir, f"{array_id}.conf")
+                array_file = f"{array_id}.conf"
                 array_configs = Configurations.load(
                     array_file,
                     **array_dirs,
