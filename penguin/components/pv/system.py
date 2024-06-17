@@ -14,7 +14,7 @@ from typing import Dict, List, Mapping, Tuple
 import pvlib as pv
 
 import pandas as pd
-from loris import Configurations
+from loris import Configurations, ConfigurationException
 from loris.components import ComponentContext
 from loris.util import parse_id
 from penguin.components.dc import DirectCurrent
@@ -51,23 +51,26 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
         self.arrays = self._load_arrays(self._context, configs)
         for array in self.arrays:
             array.configure()
+        try:
+            inverter = configs.get_section("inverter", default={})
+            self.inverter = inverter.get("model", default=None)
+            self.inverter_parameters = self._infer_inverter_params()
+            self.inverter_parameters = self._fit_inverter_params()
+            self.inverters_per_system = inverter.get_int("count", default=1)
 
-        inverter = configs.get_section("inverter", default={})
-        self.inverter = inverter.get("model", default=None)
-        self.inverters_per_system = inverter.get_int("count", default=1)
-        self.inverter_parameters = self._infer_inverter_params()
-        self.inverter_parameters = self._fit_inverter_params()
+            self.modules_per_inverter = sum([array.modules_per_string * array.strings for array in self.arrays])
 
-        self.modules_per_inverter = sum([array.modules_per_string * array.strings for array in self.arrays])
+            if all(["pdc0" in a.module_parameters for a in self.arrays]):
+                self.power_max = round(sum(
+                    [
+                        array.modules_per_string * array.strings * array.module_parameters["pdc0"] for array in self.arrays
+                    ]
+                )) * self.inverters_per_system
 
-        if all(["pdc0" in a.module_parameters for a in self.arrays]):
-            self.power_max = round(sum(
-                [
-                    array.modules_per_string * array.strings * array.module_parameters["pdc0"] for array in self.arrays
-                ]
-            )) * self.inverters_per_system
+            self.losses_parameters = configs.get("losses", default={})
 
-        self.losses_parameters = configs.get("losses", default={})
+        except ConfigurationException as e:
+            self._logger.warning(f"Unable to configure inverter for system '{self.id}': ", e)
 
         def _add_channel(channel_id: str):
             from penguin import COLUMNS

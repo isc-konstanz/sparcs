@@ -32,11 +32,23 @@ from penguin.components.pv.db import ModuleDatabase
 class PVArray(pv.pvsystem.Array, Component):
     TYPE: str = "pv_array"
 
-    row_pitch: Optional[float] = None
+    mount: pv.pvsystem.AbstractMount
 
+    albedo: float
+
+    modules_stacked: int = 1
     module_stack_gap: float = 0
     module_row_gap: float = 0
     module_transmission: Optional[float] = None
+    module_parameters: dict = {}
+    modules_per_string: int = 1
+    strings: int = 1
+
+    row_pitch: Optional[float] = None
+
+    array_losses_parameters: dict = {}
+    shading_losses_parameters: dict = {}
+    temperature_model_parameters: dict = {}
 
     def __init__(self, context: ComponentContext, configs: Configurations) -> None:
         super(pv.pvsystem.Array, self).__init__(context, configs)
@@ -51,88 +63,78 @@ class PVArray(pv.pvsystem.Array, Component):
         else:
             self.albedo = configs.get_float("albedo")
 
-        self.strings = configs.get_int("strings", default=configs.get_int("count", default=1))
-        self.modules_per_string = configs.get_int("modules_per_string", default=1)
+        try:
+            self.module = configs.get("module", default=None)
+            self.module_type = configs.get("module_type", default=configs.get("construct_type"))
+            self.module_parameters = self._infer_module_params()
+            self.module_parameters = self._fit_module_params()
+            self.modules_per_string = configs.get_int("modules_per_string", default=PVArray.modules_per_string)
+            self.strings = configs.get_int("strings", default=configs.get_int("count", default=PVArray.strings))
 
-        self.module = configs.get("module", default=None)
-        self.module_type = configs.get("module_type", default=configs.get("construct_type"))
-        self.module_parameters = self._infer_module_params()
-        self.module_parameters = self._fit_module_params()
+            rows = configs.get_section("rows", default={})
+            self.modules_stacked = rows.get_int("stack", default=PVArray.modules_stacked)
+            self.module_stack_gap = rows.get_float("stack_gap", default=PVArray.module_stack_gap)
+            self.module_row_gap = rows.get_float("row_gap", default=PVArray.module_row_gap)
 
-        rows = configs.get_section("rows", default={})
-        self.modules_stacked = rows.get_int("stack", default=1)
-        self.module_stack_gap = rows.get_float("stack_gap", default=PVArray.module_stack_gap)
-        self.module_row_gap = rows.get_float("row_gap", default=PVArray.module_row_gap)
+            self.module_transmission = rows.get_float("module_transmission", default=PVArray.module_transmission)
 
-        self.module_transmission = rows.get_float("module_transmission", default=PVArray.module_transmission)
+            _module_orientation = configs.get("orientation", default="portrait").upper()
+            self.module_orientation = Orientation[_module_orientation]
+            if self.module_orientation == Orientation.PORTRAIT:
+                self.module_width = self.module_parameters["Width"] + self.module_row_gap
+                self.module_length = (self.module_parameters["Length"] * self.modules_stacked +
+                                      self.module_stack_gap * (self.modules_stacked - 1))
 
-        _module_orientation = configs.get("orientation", default="portrait").upper()
-        self.module_orientation = Orientation[_module_orientation]
-        if self.module_orientation == Orientation.PORTRAIT:
-            self.module_width = self.module_parameters["Width"] + self.module_row_gap
-            self.module_length = (self.module_parameters["Length"] * self.modules_stacked +
-                                  self.module_stack_gap * (self.modules_stacked - 1))
+            elif self.module_orientation == Orientation.LANDSCAPE:
+                self.module_width = self.module_parameters["Length"] + self.module_row_gap
+                self.module_length = (self.module_parameters["Width"] * self.modules_stacked +
+                                      self.module_stack_gap * (self.modules_stacked - 1))
+            else:
+                raise ValueError(f"Invalid module orientation to calculate length: {str(self.module_orientation)}")
 
-        elif self.module_orientation == Orientation.LANDSCAPE:
-            self.module_width = self.module_parameters["Length"] + self.module_row_gap
-            self.module_length = (self.module_parameters["Width"] * self.modules_stacked +
-                                  self.module_stack_gap * (self.modules_stacked - 1))
-        else:
-            raise ValueError(f"Invalid module orientation to calculate length: {str(self.module_orientation)}")
+            if self.module_transmission is None:
+                self.module_transmission = ((self.module_row_gap + self.module_stack_gap * (self.modules_stacked - 1)) /
+                                            (self.module_length * self.module_width))
 
-        if self.module_transmission is None:
-            self.module_transmission = (self.module_row_gap + self.module_stack_gap * (self.modules_stacked - 1)) / \
-                                       (self.module_length * self.module_width)
+            self.row_pitch = rows.get_float("pitch", default=PVArray.row_pitch)
+            if (self.row_pitch and isinstance(self.mount, SingleAxisTrackerMount) and
+                    self.mount.gcr == SingleAxisTrackerMount.gcr):
+                self.mount.gcr = self.module_length / self.row_pitch
 
-        self.row_pitch = rows.get_float("pitch", default=PVArray.row_pitch)
-        if (self.row_pitch and isinstance(self.mount, SingleAxisTrackerMount) and
-                self.mount.gcr == SingleAxisTrackerMount.gcr):
-            self.mount.gcr = self.module_length / self.row_pitch
+            self.array_losses_parameters = self._infer_array_losses_params()
+            self.shading_losses_parameters = self._infer_shading_losses_params()
+            self.temperature_model_parameters = self._infer_temperature_model_params()
 
-        self.array_losses_parameters = self._infer_array_losses_params()
-        self.shading_losses_parameters = self._infer_shading_losses_params()
-        self.temperature_model_parameters = self._infer_temperature_model_params()
+        except ConfigurationException as e:
+            self._logger.warning(f"Unable to configure array '{self.id}': ", e)
 
     @staticmethod
     def _new_mount(configs: Configurations) -> pv.pvsystem.AbstractMount:
-        mounting = configs.get_section("mounting")
-        module_azimuth = mounting.get_float("module_azimuth")
-        module_tilt = mounting.get_float("module_tilt")
-
+        mounting = configs.get_section("mounting", default={})
         tracking = configs.get_section("tracking", default={"enabled": False})
         if tracking.enabled:
-            max_angle = tracking.get_float("max_angle", default=SingleAxisTrackerMount.max_angle)
-            backtrack = tracking.get("backtrack", default=SingleAxisTrackerMount.backtrack)
-            ground_coverage = tracking.get_float("ground_coverage", default=SingleAxisTrackerMount.gcr)
-
             cross_tilt = tracking.get("cross_axis_tilt", default=SingleAxisTrackerMount.cross_axis_tilt)
             # TODO: Implement cross_axis_tilt for sloped ground surface
             # if cross_tilt == SingleAxisTrackerMount.cross_axis_tilt:
             #     from pvlib.tracking import calc_cross_axis_tilt
             #     cross_tilt = calc_cross_axis_tilt(slope_azimuth, slope_tilt, axis_azimuth, axis_tilt)
 
-            racking_model = mounting.get("racking_model", default=SingleAxisTrackerMount.racking_model)
-            module_height = mounting.get_float("module_height", default=SingleAxisTrackerMount.module_height)
-
             return SingleAxisTrackerMount(
-                axis_azimuth=module_azimuth,
-                axis_tilt=module_tilt,
-                max_angle=max_angle,
-                backtrack=backtrack,
-                gcr=ground_coverage,
+                axis_azimuth=mounting.get_float("module_azimuth", default=SingleAxisTrackerMount.axis_azimuth),
+                axis_tilt=mounting.get_float("module_tilt", default=SingleAxisTrackerMount.axis_tilt),
+                max_angle=tracking.get_float("max_angle", default=SingleAxisTrackerMount.max_angle),
+                backtrack=tracking.get("backtrack", default=SingleAxisTrackerMount.backtrack),
+                gcr=tracking.get_float("ground_coverage", default=SingleAxisTrackerMount.gcr),
                 cross_axis_tilt=cross_tilt,
-                racking_model=racking_model,
-                module_height=module_height,
+                racking_model=mounting.get("racking_model", default=SingleAxisTrackerMount.racking_model),
+                module_height=mounting.get_float("module_height", default=SingleAxisTrackerMount.module_height),
             )
         else:
-            racking_model = mounting.get("racking_model", default=FixedMount.racking_model)
-            module_height = mounting.get_float("module_height", default=FixedMount.module_height)
-
             return FixedMount(
-                surface_azimuth=module_azimuth,
-                surface_tilt=module_tilt,
-                racking_model=racking_model,
-                module_height=module_height,
+                surface_azimuth=mounting.get_float("module_azimuth", default=FixedMount.surface_azimuth),
+                surface_tilt=mounting.get_float("module_tilt", default=FixedMount.surface_tilt),
+                racking_model=mounting.get("racking_model", default=FixedMount.racking_model),
+                module_height=mounting.get_float("module_height", default=FixedMount.module_height),
             )
 
     def _infer_module_params(self) -> dict:
@@ -166,17 +168,21 @@ class PVArray(pv.pvsystem.Array, Component):
             else:
                 params["noct"] = 45
 
-        if "pdc0" not in params and all(p in params for p in ["I_mp_ref", "V_mp_ref"]):
-            params["pdc0"] = params["I_mp_ref"] * params["V_mp_ref"]
+        if "pdc0" not in params:
+            if all(p in params for p in ["I_mp_ref", "V_mp_ref"]):
+                params["pdc0"] = params["I_mp_ref"] * params["V_mp_ref"]
+            else:
+                params["pdc0"] = 0
 
         if "module_efficiency" not in params.keys():
             if "Efficiency" in params.keys():
                 params["module_efficiency"] = params["Efficiency"]
                 del params["Efficiency"]
-            else:
+            elif all([k in self.module_parameters for k in ["pdc0", "Width", "Length"]]):
                 params["module_efficiency"] = float(self.module_parameters["pdc0"]) / (
                     float(self.module_parameters["Width"]) * float(self.module_parameters["Length"]) * 1000.0
                 )
+
         if params["module_efficiency"] > 1:
             params["module_efficiency"] /= 100.0
             self._logger.debug(
