@@ -23,17 +23,23 @@ class TMYWeather(Weather):
     _data: pd.DataFrame
     _meta: Dict
 
-    def __configure__(self, configs: Configurations) -> None:
-        super().__configure__(configs)
-        section = configs.get_section("epw", default={})
+    version: int
+
+    year: int
+    file: str
+    path: str
+
+    def configure(self, configs: Configurations) -> None:
+        super().configure(configs)
+        section = configs.get_section("epw", defaults={})
         self.version = section.get_int("version", default=3)
 
         self.year = section.get_int("year", default=None)
         self.file = section.get("file", default="weather.csv")
         self.path = self.file if os.path.isabs(self.file) else os.path.join(self.configs.dirs.data, self.file)
 
-    def __activate__(self) -> None:
-        super().__activate__()
+    def activate(self) -> None:
+        super().activate()
 
         if self.version == 3:
             self._data, self._meta = read_tmy3(filename=self.file, coerce_year=self.year, map_variables=True)
@@ -43,7 +49,7 @@ class TMYWeather(Weather):
         else:
             raise ValueError("Invalid TMY version: {}".format(self.version))
 
-        self.location = Location.from_epw(self._meta)
+        self._location = Location.from_epw(self._meta)
 
     def get(
         self,

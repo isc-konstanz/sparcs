@@ -5,4 +5,4 @@
 
 
 """
-from .weather import Weather
+from ._load import load

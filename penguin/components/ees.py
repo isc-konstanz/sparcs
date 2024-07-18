@@ -20,9 +20,8 @@ class ElectricalEnergyStorage(Component):
     ENERGY_CHARGE = "ees_charge_energy"
     ENERGY_DISCHARGE = "ees_discharge_energy"
 
-    # noinspection PyProtectedMember
-    def __configure__(self, configs: Configurations) -> None:
-        super().__configure__(configs)
+    def configure(self, configs: Configurations) -> None:
+        super().configure(configs)
         self.capacity = configs.get_float("capacity")
         self.efficiency = configs.get_float("efficiency")
 
@@ -31,7 +30,14 @@ class ElectricalEnergyStorage(Component):
         self.grid_power_max = configs.get_float("grid_power_max", default=0) * 1000
         self.grid_power_min = configs.get_float("grid_power_min", default=self.grid_power_max) * 1000
 
-    def get_type(self) -> str:
+    def activate(self) -> None:
+        super().activate()
+
+    def deactivate(self) -> None:
+        super().deactivate()
+
+    @property
+    def type(self) -> str:
         return self.TYPE
 
     def percent_to_energy(self, percent) -> float:

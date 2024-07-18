@@ -71,9 +71,15 @@ class AlternatingCurrent(Component):
 
     FREQUENCY: str = "frequency"
 
-    # noinspection PyProtectedMember
-    def __configure__(self, configs: Configurations) -> None:
-        super().__configure__(configs)
+    def configure(self, configs: Configurations) -> None:
+        super().configure(configs)
 
-    def get_type(self) -> str:
+    def activate(self) -> None:
+        super().activate()
+
+    def deactivate(self) -> None:
+        super().deactivate()
+
+    @property
+    def type(self) -> str:
         return self.TYPE

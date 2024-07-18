@@ -26,14 +26,21 @@ class PapendorfParser(Connector):
         # TODO: Implement papendorf initialisation
         # self._database = MySqlConnector(context, configs)
 
-    def __configure__(self, configs: Configurations) -> None:
-        super().__configure__(configs)
+    @property
+    def type(self) -> str:
+        return self.TYPE
+
+    def configure(self, configs: Configurations) -> None:
+        super().configure(configs)
         # TODO: Implement papendorf configurations
 
-    def __connect__(self, channels: Channels) -> None:
-        super().__connect__(channels)
+    def connect(self, channels: Channels) -> None:
+        super().connect(channels)
         # self._database.connect(channels)
         # TODO: Implement papendorf database connections
+
+    def disconnect(self) -> None:
+        super().disconnect()
 
     @property
     def database(self):
