@@ -45,13 +45,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    # "penguin[doc]",
     "pre-commit",
     "ruff"
 ]
 
 [tool.setuptools.package-data]
-loris = []
+penguin = []
 
 [tool.setuptools.packages.find]
 namespaces = false
