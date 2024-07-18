@@ -25,15 +25,19 @@ class EPWWeather(Weather):
     _data: pd.DataFrame
     _meta: Dict
 
-    def __configure__(self, configs: Configurations) -> None:
-        super().__configure__(configs)
-        section = configs.get_section("epw", default={})
+    year: int
+    file: str
+    path: str
+
+    def configure(self, configs: Configurations) -> None:
+        super().configure(configs)
+        section = configs.get_section("epw", defaults={})
         self.year = section.get_int("year", default=None)
         self.file = section.get("file", default="weather.epw")
         self.path = self.file if os.path.isabs(self.file) else os.path.join(self.configs.dirs.data, self.file)
 
-    def __activate__(self) -> None:
-        super().__activate__()
+    def activate(self) -> None:
+        super().activate()
         if not os.path.isfile(self.path):
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
             self._download(self.location)
@@ -44,7 +48,7 @@ class EPWWeather(Weather):
             if self._data[column].sum() == 0:
                 self._data.drop(column, axis=1, inplace=True)
 
-        self.location = Location.from_epw(self._meta)
+        self._location = Location.from_epw(self._meta)
 
     # noinspection PyPackageRequirements
     def _download(self, location: Location) -> None:

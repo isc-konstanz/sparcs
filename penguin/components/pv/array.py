@@ -23,23 +23,40 @@ from pvlib.pvsystem import FixedMount, SingleAxisTrackerMount
 from pvlib.tools import _build_kwargs
 
 import pandas as pd
-from loris import ConfigurationException, Configurations
-from loris.components import Component, ComponentContext
+from loris import Component, ConfigurationException, Configurations, Configurator
 from penguin.components.pv.db import ModuleDatabase
+
+
+class Orientation(Enum):
+    PORTRAIT = "portrait"
+    LANDSCAPE = "landscape"
 
 
 # noinspection SpellCheckingInspection
 class PVArray(pv.pvsystem.Array, Component):
     TYPE: str = "pv_array"
 
+    POWER_AC: str = "p_ac"
+    POWER_DC: str = "p_dc"
+
+    CURRENT_SC: str = "i_sc"
+    CURRENT_MP: str = "i_mp"
+
+    VOLTAGE_OC: str = "v_oc"
+    VOLTAGE_MP: str = "v_mp"
+
     mount: pv.pvsystem.AbstractMount
 
-    albedo: float
+    albedo: float = 0.25
 
+    _module_configured: bool = False
     modules_stacked: int = 1
     module_stack_gap: float = 0
     module_row_gap: float = 0
     module_transmission: Optional[float] = None
+    module_orientation: Orientation = Orientation.PORTRAIT
+    module_width: Optional[int] = None
+    module_length: Optional[int] = None
     module_parameters: dict = {}
     modules_per_string: int = 1
     strings: int = 1
@@ -50,69 +67,84 @@ class PVArray(pv.pvsystem.Array, Component):
     shading_losses_parameters: dict = {}
     temperature_model_parameters: dict = {}
 
-    def __init__(self, context: ComponentContext, configs: Configurations) -> None:
+    def __init__(self, context, configs: Configurations) -> None:
         super(pv.pvsystem.Array, self).__init__(context, configs)
 
-    def __configure__(self, configs: Configurations) -> None:
-        super().__configure__(configs)
+    def __repr__(self) -> str:
+        return Configurator.__repr__(self)
+
+    @property
+    def type(self) -> str:
+        return self.TYPE
+
+    def is_configured(self) -> bool:
+        return self._module_configured and super().is_configured()
+
+    def configure(self, configs: Configurations) -> None:
+        super().configure(configs)
         self.mount = self._new_mount(configs)
 
         self.surface_type = configs.get("surface_type", default=configs.get("ground_type", default=None))
         if "albedo" not in configs:
-            self.albedo = pv.irradiance.SURFACE_ALBEDOS.get(self.surface_type, 0.25)
+            self.albedo = pv.albedo.SURFACE_ALBEDOS.get(self.surface_type, PVArray.albedo)
         else:
             self.albedo = configs.get_float("albedo")
 
-        try:
-            self.module = configs.get("module", default=None)
-            self.module_type = configs.get("module_type", default=configs.get("construct_type"))
-            self.module_parameters = self._infer_module_params()
-            self.module_parameters = self._fit_module_params()
-            self.modules_per_string = configs.get_int("modules_per_string", default=PVArray.modules_per_string)
-            self.strings = configs.get_int("strings", default=configs.get_int("count", default=PVArray.strings))
+        self.strings = configs.get_int("strings", default=configs.get_int("count", default=PVArray.strings))
+        self.modules_per_string = configs.get_int("modules_per_string", default=PVArray.modules_per_string)
+        self.module_type = configs.get("module_type", default=configs.get("construct_type"))
+        self.module = configs.get("module", default=None)
 
-            rows = configs.get_section("rows", default={})
-            self.modules_stacked = rows.get_int("stack", default=PVArray.modules_stacked)
-            self.module_stack_gap = rows.get_float("stack_gap", default=PVArray.module_stack_gap)
-            self.module_row_gap = rows.get_float("row_gap", default=PVArray.module_row_gap)
+        self.module_parameters = self._infer_module_params()
+        self._module_configured = self._validate_module_params()
+        if not self._module_configured:
+            # raise ConfigurationException("Unable to configure module parameters")
+            self._logger.debug("Unable to configure module parameters of array ", self.name)
+            return
 
-            self.module_transmission = rows.get_float("module_transmission", default=PVArray.module_transmission)
+        rows = configs.get_section("rows", defaults={})
+        self.modules_stacked = rows.get_int("stack", default=PVArray.modules_stacked)
+        self.module_stack_gap = rows.get_float("stack_gap", default=PVArray.module_stack_gap)
+        self.module_row_gap = rows.get_float("row_gap", default=PVArray.module_row_gap)
 
-            _module_orientation = configs.get("orientation", default="portrait").upper()
-            self.module_orientation = Orientation[_module_orientation]
-            if self.module_orientation == Orientation.PORTRAIT:
-                self.module_width = self.module_parameters["Width"] + self.module_row_gap
-                self.module_length = (self.module_parameters["Length"] * self.modules_stacked +
-                                      self.module_stack_gap * (self.modules_stacked - 1))
+        self.module_transmission = rows.get_float("module_transmission", default=PVArray.module_transmission)
 
-            elif self.module_orientation == Orientation.LANDSCAPE:
-                self.module_width = self.module_parameters["Length"] + self.module_row_gap
-                self.module_length = (self.module_parameters["Width"] * self.modules_stacked +
-                                      self.module_stack_gap * (self.modules_stacked - 1))
-            else:
-                raise ValueError(f"Invalid module orientation to calculate length: {str(self.module_orientation)}")
+        _module_orientation = configs.get("orientation", default="portrait").upper()
+        self.module_orientation = Orientation[_module_orientation]
+        if self.module_orientation == Orientation.PORTRAIT:
+            self.module_width = self.module_parameters["Width"] + self.module_row_gap
+            self.module_length = (self.module_parameters["Length"] * self.modules_stacked +
+                                  self.module_stack_gap * (self.modules_stacked - 1))
 
-            if self.module_transmission is None:
-                self.module_transmission = ((self.module_row_gap + self.module_stack_gap * (self.modules_stacked - 1)) /
-                                            (self.module_length * self.module_width))
+        elif self.module_orientation == Orientation.LANDSCAPE:
+            self.module_width = self.module_parameters["Length"] + self.module_row_gap
+            self.module_length = (self.module_parameters["Width"] * self.modules_stacked +
+                                  self.module_stack_gap * (self.modules_stacked - 1))
+        else:
+            raise ValueError(f"Invalid module orientation to calculate length: {str(self.module_orientation)}")
 
-            self.row_pitch = rows.get_float("pitch", default=PVArray.row_pitch)
-            if (self.row_pitch and isinstance(self.mount, SingleAxisTrackerMount) and
-                    self.mount.gcr == SingleAxisTrackerMount.gcr):
-                self.mount.gcr = self.module_length / self.row_pitch
+        if self.module_transmission is None:
+            self.module_transmission = ((self.module_row_gap + self.module_stack_gap * (self.modules_stacked - 1)) /
+                                        (self.module_length * self.module_width))
 
-            self.array_losses_parameters = self._infer_array_losses_params()
-            self.shading_losses_parameters = self._infer_shading_losses_params()
-            self.temperature_model_parameters = self._infer_temperature_model_params()
+        self.row_pitch = rows.get_float("pitch", default=PVArray.row_pitch)
+        if (
+            self.row_pitch
+            and isinstance(self.mount, SingleAxisTrackerMount)
+            and self.mount.gcr == SingleAxisTrackerMount.gcr
+        ):
+            self.mount.gcr = self.module_length / self.row_pitch
 
-        except ConfigurationException as e:
-            self._logger.warning(f"Unable to configure array '{self.id}': ", e)
+        self.array_losses_parameters = self._infer_array_losses_params()
+        self.shading_losses_parameters = self._infer_shading_losses_params()
+        self.temperature_model_parameters = self._infer_temperature_model_params()
 
     @staticmethod
     def _new_mount(configs: Configurations) -> pv.pvsystem.AbstractMount:
-        mounting = configs.get_section("mounting", default={})
-        tracking = configs.get_section("tracking", default={"enabled": False})
-        if tracking.enabled:
+        mounting = configs.get_section("mounting", defaults={})
+        if configs.has_section("tracking") and configs.get_section("tracking").enabled:
+            tracking = configs.get_section("tracking")
+
             cross_tilt = tracking.get("cross_axis_tilt", default=SingleAxisTrackerMount.cross_axis_tilt)
             # TODO: Implement cross_axis_tilt for sloped ground surface
             # if cross_tilt == SingleAxisTrackerMount.cross_axis_tilt:
@@ -139,67 +171,65 @@ class PVArray(pv.pvsystem.Array, Component):
 
     def _infer_module_params(self) -> dict:
         params = {}
-        self.module_parameters_override = False
+        self._module_parameters_override = False
         if not self._read_module_params(params):
             self._read_module_database(params)
 
         module_params_exist = len(params) > 0
         if self._read_module_configs(params) and module_params_exist:
-            self.module_parameters_override = True
-
-        module_params_exist = len(params) > 0
-        if not module_params_exist:
-            raise ConfigurationException("Unable to find module parameters")
+            self._module_parameters_override = True
 
         return params
 
     # noinspection PyTypeChecker
-    def _fit_module_params(self) -> dict:
-        params = self.module_parameters
+    def _validate_module_params(self) -> bool:
+        if len(self.module_parameters) == 0:
+            return False
 
         def denormalize_coeff(key: str, ref: str) -> float:
             self._logger.debug(f"Denormalized %/C temperature coefficient {key}: ")
-            return params[key] / 100 * params[ref]
+            return self.module_parameters[key] / 100 * self.module_parameters[ref]
 
-        if "noct" not in params.keys():
-            if "T_NOCT" in params.keys():
-                params["noct"] = params["T_NOCT"]
-                del params["T_NOCT"]
+        if "noct" not in self.module_parameters.keys():
+            if "T_NOCT" in self.module_parameters.keys():
+                self.module_parameters["noct"] = self.module_parameters["T_NOCT"]
+                del self.module_parameters["T_NOCT"]
             else:
-                params["noct"] = 45
+                self.module_parameters["noct"] = 45
 
-        if "pdc0" not in params:
-            if all(p in params for p in ["I_mp_ref", "V_mp_ref"]):
-                params["pdc0"] = params["I_mp_ref"] * params["V_mp_ref"]
+        if "pdc0" not in self.module_parameters:
+            if all(p in self.module_parameters for p in ["I_mp_ref", "V_mp_ref"]):
+                self.module_parameters["pdc0"] = self.module_parameters["I_mp_ref"] * self.module_parameters["V_mp_ref"]
             else:
-                params["pdc0"] = 0
+                self.module_parameters["pdc0"] = 0
 
-        if "module_efficiency" not in params.keys():
-            if "Efficiency" in params.keys():
-                params["module_efficiency"] = params["Efficiency"]
-                del params["Efficiency"]
+        if "module_efficiency" not in self.module_parameters.keys():
+            if "Efficiency" in self.module_parameters.keys():
+                self.module_parameters["module_efficiency"] = self.module_parameters["Efficiency"]
+                del self.module_parameters["Efficiency"]
             elif all([k in self.module_parameters for k in ["pdc0", "Width", "Length"]]):
-                params["module_efficiency"] = float(self.module_parameters["pdc0"]) / (
+                self.module_parameters["module_efficiency"] = float(self.module_parameters["pdc0"]) / (
                     float(self.module_parameters["Width"]) * float(self.module_parameters["Length"]) * 1000.0
                 )
 
-        if params["module_efficiency"] > 1:
-            params["module_efficiency"] /= 100.0
+        if self.module_parameters["module_efficiency"] > 1:
+            self.module_parameters["module_efficiency"] /= 100.0
             self._logger.debug(
-                "Module efficiency configured in percent and will be adjusted: " f"{params['module_efficiency']*100.}"
+                "Module efficiency configured in percent and will be adjusted: "
+                f"{self.module_parameters['module_efficiency']*100.}"
             )
 
-        if "module_transparency" not in params.keys():
-            if "Transparency" in params.keys():
-                params["module_transparency"] = params["Transparency"]
-                del params["Transparency"]
+        if "module_transparency" not in self.module_parameters.keys():
+            if "Transparency" in self.module_parameters.keys():
+                self.module_parameters["module_transparency"] = self.module_parameters["Transparency"]
+                del self.module_parameters["Transparency"]
             else:
-                params["module_transparency"] = 0
-        if params["module_transparency"] > 1:
-            params["module_transparency"] /= 100.0
+                self.module_parameters["module_transparency"] = 0
+        if self.module_parameters["module_transparency"] > 1:
+            self.module_parameters["module_transparency"] /= 100.0
             self._logger.debug(
                 "Module transparency configured in percent and will be adjusted: "
-                f"{params['module_transparency']*100.}"
+                f"{self.module_parameters['module_transparency']*100.}"
             )
 
         try:
@@ -230,37 +260,37 @@ class PVArray(pv.pvsystem.Array, Component):
                 "beta_oc",
                 "N_s"
             ]
-            if self.module_parameters_override or not all(k in params.keys() for k in params_iv):
+            if self._module_parameters_override or not all(k in self.module_parameters.keys() for k in params_iv):
 
                 def param_values(keys) -> List[float | int]:
-                    params_slice = {k: params[k] for k in keys}
+                    params_slice = {k: self.module_parameters[k] for k in keys}
                     params_slice["alpha_sc"] = denormalize_coeff("alpha_sc", "I_sc_ref")
                     params_slice["beta_oc"] = denormalize_coeff("beta_oc", "V_oc_ref")
 
                     return list(params_slice.values())
 
-                if all(k in params.keys() for k in params_cec):
+                if all(k in self.module_parameters.keys() for k in params_cec):
                     params_iv.append("Adjust")
                     params_cec.remove("Technology")
                     params_fit_result = pv.ivtools.sdm.fit_cec_sam(self._infer_cell_type(), *param_values(params_cec))
                     params_fit = dict(zip(params_iv, params_fit_result))
-                elif all(k in params.keys() for k in params_desoto):
+                elif all(k in self.module_parameters.keys() for k in params_desoto):
                     params_fit, params_fit_result = pv.ivtools.sdm.fit_desoto(*param_values(params_desoto))
-                elif "gamma_pdc" not in params and "gamma_mp" in params:
+                elif "gamma_pdc" not in self.module_parameters and "gamma_mp" in self.module_parameters:
                     params_iv.append("gamma_pdc")
-                    params_fit = {"gamma_pdc": params["gamma_mp"] / 100.0}
+                    params_fit = {"gamma_pdc": self.module_parameters["gamma_mp"] / 100.0}
                 else:
                     raise RuntimeError("Unable to estimate parameters due to incomplete variables")
 
-                params.update({k: v for k, v in params_fit.items() if k in params_iv})
+                self.module_parameters.update({k: v for k, v in params_fit.items() if k in params_iv})
 
         except RuntimeError as e:
             self._logger.warning(str(e))
 
-            if "gamma_pdc" not in params and "gamma_mp" in params:
-                params["gamma_pdc"] = params["gamma_mp"] / 100.0
+            if "gamma_pdc" not in self.module_parameters and "gamma_mp" in self.module_parameters:
+                self.module_parameters["gamma_pdc"] = self.module_parameters["gamma_mp"] / 100.0
 
-        return params
+        return True
 
     def _read_module_params(self, params: dict) -> bool:
         if self.configs.has_section("module"):
@@ -296,9 +326,9 @@ class PVArray(pv.pvsystem.Array, Component):
     @staticmethod
     def _read_temperature_model_params(configs: Configurations) -> Optional[Dict[str, Any]]:
         params = {}
-        if configs.has_section("Losses"):
+        if configs.has_section("losses"):
             temperature_model_keys = ["u_c", "u_v"]
-            for key, value in configs["Losses"].items():
+            for key, value in configs["losses"].items():
                 if key in temperature_model_keys:
                     params[key] = float(value)
 
@@ -337,7 +367,7 @@ class PVArray(pv.pvsystem.Array, Component):
     def _read_array_losses_params(configs: Configurations) -> Optional[Dict[str, Any]]:
         params = {}
         if "losses" in configs:
-            losses_configs = dict(configs["Losses"])
+            losses_configs = dict(configs["losses"])
             for param in [
                 "soiling",
                 "shading",
@@ -379,6 +409,12 @@ class PVArray(pv.pvsystem.Array, Component):
         if os.path.isfile(shading_file):
             shading = Configurations.load(shading_file, **self.configs.dirs.encode())
         return shading
+
+    def activate(self) -> None:
+        super().activate()
+
+    def deactivate(self) -> None:
+        super().activate()
 
     def pvwatts_losses(self, solar_position: pd.DataFrame) -> dict:
         params = _build_kwargs(
@@ -424,24 +460,6 @@ class PVArray(pv.pvsystem.Array, Component):
         shading_losses = shading_losses.fillna(0)[self.shading_losses_parameters.keys()].max(axis=1)
         shading_losses.name = "shading"
         return shading_losses
-
-    @property
-    def name(self):
-        return self._name
-
-    @name.setter
-    def name(self, name: str) -> None:
-        if name is None:
-            return
-        self._name = name
-
-    def get_type(self) -> str:
-        return self.TYPE
-
-
-class Orientation(Enum):
-    PORTRAIT = "portrait"
-    LANDSCAPE = "landscape"
 
 
 def _update_parameters(parameters: Dict, update: Mapping):

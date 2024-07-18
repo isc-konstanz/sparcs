@@ -12,7 +12,7 @@ import os
 from pvlib.modelchain import ModelChain
 
 import pandas as pd
-from loris import Configurable, Configurations, Location
+from loris import Configurations, Configurator, Location
 from penguin import PVSystem
 
 # noinspection SpellCheckingInspection
@@ -28,7 +28,7 @@ DEFAULTS = dict(
 
 
 # noinspection SpellCheckingInspection, PyAbstractClass
-class Model(Configurable, ModelChain):
+class Model(Configurator, ModelChain):
     @classmethod
     def load(cls, pvsystem: PVSystem, override_file: str = "model.conf", section: str = "model") -> Model:
         override_dir = os.path.join(pvsystem.configs.dirs.conf, pvsystem.id + ".d")
@@ -43,12 +43,23 @@ class Model(Configurable, ModelChain):
         )
         params = DEFAULTS
         if section in configs:
-            params.update(configs.get(section))
+            params.update(configs.get_section(section))
 
         return cls(configs, pvsystem, pvsystem.context.location, **params)
 
     def __init__(self, configs: Configurations, pvsystem: PVSystem, location: Location, **kwargs):
         super().__init__(configs, pvsystem, location, **kwargs)
+
+    def configure(self, configs: Configurations) -> None:
+        super().configure(configs)
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @name.setter
+    def name(self, name) -> None:
+        self._name = name
 
     def __call__(self, weather, **_):
         self.run_model(weather)

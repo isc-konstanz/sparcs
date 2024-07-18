@@ -5,10 +5,13 @@
 
 
 """
-from penguin.components import (AlternatingCurrent, DirectCurrent,
-                                ElectricalEnergyStorage, ThermalEnergyStorage,
-                                PVSystem)
-
+from penguin.components import (
+    AlternatingCurrent,
+    DirectCurrent,
+    ElectricalEnergyStorage,
+    PVSystem,
+    ThermalEnergyStorage,
+)
 
 STORAGE_POWER = {
     ElectricalEnergyStorage.POWER_CHARGE: "EES Charging Power [W]",
@@ -21,13 +24,15 @@ STORAGE_ENERGY = {
 }
 
 PV_POWER = {
-    PVSystem.POWER:     "Generated PV Power [W]",
-    PVSystem.POWER_EXP: "Exported PV Power [W]"
+    PVSystem.POWER:      "Generated PV Power [W]",
+    PVSystem.POWER_CALC: "Calculated PV Power [W]",
+    PVSystem.POWER_EXP:  "Exported PV Power [W]"
 }
 
 PV_ENERGY = {
-    PVSystem.ENERGY:     "Generated PV Energy [kWh]",
-    PVSystem.ENERGY_EXP: "Exported PV Energy [kWh]"
+    PVSystem.ENERGY:      "Generated PV Energy [kWh]",
+    PVSystem.ENERGY_CALC: "Calculated PV Energy [kWh]",
+    PVSystem.ENERGY_EXP:  "Exported PV Energy [kWh]"
 }
 
 PV = {
