@@ -8,14 +8,14 @@ from __future__ import annotations
 
 from functools import wraps
 
-from loris import Configurations, LocationUnavailableException
-from loris.components import ComponentContext, Weather
+from loris import Configurations, Context, LocationUnavailableException
+from loris.components import Weather
 from loris.components.weather import WeatherException
 from penguin import Location
 
 
 # noinspection PyShadowingBuiltins
-def load(context: ComponentContext, configs: Configurations) -> Weather:
+def load(context: Context, configs: Configurations) -> Weather:
     type = configs.get("type", default="default").lower()
     if type == "epw":
         from penguin.components.weather.epw import EPWWeather

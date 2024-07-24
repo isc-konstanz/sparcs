@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from typing import Optional
 
 from pvlib import solarposition
 
@@ -39,6 +40,15 @@ class System(loris.System):
     ENERGY_TH_HT:   str = "th_ht_energy"
     ENERGY_TH_DOM:  str = "th_dom_energy"
 
+    _location: Optional[Location] = None
+
+    def configure(self, configs: Configurations) -> None:
+        super().configure(configs)
+        if self.has_type(PVSystem.TYPE):
+            from penguin.constants import COLUMNS
+
+            self.data.add(id=PVSystem.POWER_EST, name=COLUMNS[PVSystem.POWER_EST], connector=None, value_type=float)
+
     def localize(self, configs: Configurations) -> None:
         if configs.enabled:
             self._location = Location(
@@ -51,13 +61,6 @@ class System(loris.System):
             )
         else:
             self._location = None
-
-    def _on_configure(self, configs: Configurations) -> None:
-        super()._on_configure(configs)
-        if self.has_type(PVSystem.TYPE):
-            from penguin import COLUMNS
-
-            self.data.add(id=PVSystem.POWER_CALC, name=COLUMNS[PVSystem.POWER_CALC], connector=None, value_type=float)
 
     # # noinspection PyShadowingBuiltins
     # def evaluate(self, **kwargs):
@@ -79,7 +82,7 @@ class System(loris.System):
                     pv_result = pv.run(input)
                     result[[PVSystem.POWER, PVSystem.POWER_DC]] += pv_result[[PVSystem.POWER, PVSystem.POWER_DC]].abs()
 
-                pv_power_channel = self.data[PVSystem.POWER_CALC]
+                pv_power_channel = self.data[PVSystem.POWER_EST]
                 pv_power = result[PVSystem.POWER]
                 if not pv_power.empty:
                     pv_power_channel.set(pv_power.index[0], pv_power)

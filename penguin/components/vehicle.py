@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.components.ev
-    ~~~~~~~~~~~~~~~~~~~~~
+    penguin.components.vehicle
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 """
@@ -14,12 +14,6 @@ class ElectricVehicle(Component):
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
         self.capacity = configs.get_float("capacity")
-
-    def activate(self) -> None:
-        super().activate()
-
-    def deactivate(self) -> None:
-        super().deactivate()
 
     @property
     def type(self) -> str:

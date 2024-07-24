@@ -23,7 +23,7 @@ from pvlib.pvsystem import FixedMount, SingleAxisTrackerMount
 from pvlib.tools import _build_kwargs
 
 import pandas as pd
-from loris import Component, ConfigurationException, Configurations, Configurator
+from loris import Component, ConfigurationException, Configurations, Context
 from penguin.components.pv.db import ModuleDatabase
 
 
@@ -67,11 +67,14 @@ class PVArray(pv.pvsystem.Array, Component):
     shading_losses_parameters: dict = {}
     temperature_model_parameters: dict = {}
 
-    def __init__(self, context, configs: Configurations) -> None:
+    def __init__(self, context: Component | Context, configs: Configurations) -> None:
         super(pv.pvsystem.Array, self).__init__(context, configs)
 
     def __repr__(self) -> str:
-        return Configurator.__repr__(self)
+        return Component.__repr__(self)
+
+    def __str__(self) -> str:
+        return Component.__str__(self)
 
     @property
     def type(self) -> str:
@@ -409,12 +412,6 @@ class PVArray(pv.pvsystem.Array, Component):
         if os.path.isfile(shading_file):
             shading = Configurations.load(shading_file, **self.configs.dirs.encode())
         return shading
-
-    def activate(self) -> None:
-        super().activate()
-
-    def deactivate(self) -> None:
-        super().activate()
 
     def pvwatts_losses(self, solar_position: pd.DataFrame) -> dict:
         params = _build_kwargs(

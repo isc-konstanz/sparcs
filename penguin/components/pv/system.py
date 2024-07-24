@@ -9,15 +9,15 @@ from __future__ import annotations
 
 import glob
 import os
-from typing import Collection, Dict, List, Mapping
+from typing import Dict, List, Mapping
 
 import pvlib as pv
 
 import pandas as pd
-from loris import ChannelState, ConfigurationException, Configurations, Configurator
-from loris.components import Activator, ComponentException
+from loris import ChannelState, ConfigurationException, Configurations, Context
+from loris.components import Component, ComponentException
 from loris.util import parse_id
-from penguin.components.dc import DirectCurrent
+from penguin.components.current import DirectCurrent
 from penguin.components.pv.array import PVArray
 from penguin.components.pv.db import InverterDatabase
 
@@ -28,11 +28,11 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
     ALIAS: List[str] = ["solar"]  # , 'array']
 
     POWER: str = f"{TYPE}_power"
-    POWER_CALC: str = f"{TYPE}_calc_power"
+    POWER_EST: str = f"{TYPE}_est_power"
     POWER_EXP: str = f"{TYPE}_exp_power"
 
     ENERGY: str = f"{TYPE}_energy"
-    ENERGY_CALC: str = f"{TYPE}_calc_energy"
+    ENERGY_EST: str = f"{TYPE}_est_energy"
     ENERGY_EXP: str = f"{TYPE}_exp_energy"
 
     CURRENT_SC: str = f"{TYPE}_current_sc"
@@ -55,12 +55,15 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
 
     losses_parameters: dict = {}
 
-    def __init__(self, context, configs: Configurations) -> None:
+    def __init__(self, context: Context, configs: Configurations) -> None:
         super(pv.pvsystem.PVSystem, self).__init__(context, configs)
         self.arrays = []
 
     def __repr__(self) -> str:
-        return Configurator.__repr__(self)
+        return Component.__repr__(self)
+
+    def __str__(self) -> str:
+        return Component.__str__(self)
 
     @property
     def type(self) -> str:
@@ -69,7 +72,7 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
     # noinspection PyProtectedMembers
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
-        self._do_load_arrays(configs)
+        self._load_arrays(configs)
         for array in self.arrays:
             array._do_configure()
         try:
@@ -100,7 +103,7 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
             self._logger.warning(f"Unable to configure inverter for system '{self.id}': ", e)
 
         def _add_channel(channel_id: str):
-            from penguin import COLUMNS
+            from penguin.constants import COLUMNS
             channel = {}
             if channel_id in COLUMNS:
                 channel["name"] = COLUMNS[channel_id]
@@ -117,11 +120,7 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
         _add_channel(PVSystem.CURRENT_SC)
         _add_channel(PVSystem.VOLTAGE_OC)
 
-    def _do_configure_members(self, configurators: Collection[Configurator]) -> None:
-        configurators = [c for c in configurators if c not in self.arrays]
-        super()._do_configure_members(configurators)
-
-    def _do_load_arrays(self, configs: Configurations):
+    def _load_arrays(self, configs: Configurations):
         array_dir = configs.path.replace(".conf", ".d")
         array_dirs = configs.dirs.encode()
         array_dirs["conf_dir"] = array_dir
@@ -270,20 +269,12 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
         return False
 
     def activate(self) -> None:
-        pass
-
-    def _do_activate_members(self, activators: Collection[Activator]) -> None:
-        activators = list(activators)
-        activators.extend([a for a in self.arrays if a not in activators and a.is_configured()])
-        super()._do_activate_members(activators)
+        for array in self.arrays:
+            array._do_activate()
 
     def deactivate(self) -> None:
-        pass
-
-    def _do_deactivate_members(self, activators: Collection[Activator]) -> None:
-        activators = list(activators)
-        activators.extend([a for a in self.arrays if a not in activators and a.is_configured()])
-        super()._do_deactivate_members(activators)
+        for array in self.arrays:
+            array._do_deactivate()
 
     # noinspection PyMethodOverriding
     def pvwatts_losses(self, solar_position: pd.DataFrame):

@@ -41,10 +41,6 @@ class Location(loris.Location, pv.location.Location):
         if self._altitude is None:
             self._altitude = pv.location.lookup_altitude(self.latitude, self.longitude)
 
-    def __repr__(self):
-        attrs = ["name", "latitude", "longitude", "altitude", "timezone"]
-        return "Location:\n\t" + "\n\t".join(f"{attr}: {str(getattr(self, attr))}" for attr in attrs)
-
     # noinspection PyUnresolvedReferences
     @property
     def tz(self) -> str:

@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-    penguin._var
-    ~~~~~~~~~~~~
+    penguin.constants
+    ~~~~~~~~~~~~~~~~~
 
 
 """
-from loris.components.weather import WEATHER
+from loris.components.weather.constants import WEATHER
 from penguin.system import System
-from penguin.components import POWER as COMPONENT_POWER, ENERGY as COMPONENT_ENERGY, STATES
+from penguin.components.constants import (
+    POWER as COMPONENT_POWER,
+    ENERGY as COMPONENT_ENERGY,
+    STATES,
+)
 
 
 SYSTEM_POWER = {

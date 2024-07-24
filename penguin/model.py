@@ -7,8 +7,6 @@
 """
 from __future__ import annotations
 
-import os
-
 from pvlib.modelchain import ModelChain
 
 import pandas as pd
@@ -31,7 +29,7 @@ DEFAULTS = dict(
 class Model(Configurator, ModelChain):
     @classmethod
     def load(cls, pvsystem: PVSystem, override_file: str = "model.conf", section: str = "model") -> Model:
-        override_dir = os.path.join(pvsystem.configs.dirs.conf, pvsystem.id + ".d")
+        override_dir = pvsystem.configs.path.replace(".conf", ".d")
         configs_dirs = pvsystem.configs.dirs.encode()
         configs_dirs["conf_dir"] = override_dir
 
@@ -48,7 +46,7 @@ class Model(Configurator, ModelChain):
         return cls(configs, pvsystem, pvsystem.context.location, **params)
 
     def __init__(self, configs: Configurations, pvsystem: PVSystem, location: Location, **kwargs):
-        super().__init__(configs, pvsystem, location, **kwargs)
+        super().__init__(configs=configs, system=pvsystem, location=location, **kwargs)
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
