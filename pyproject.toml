@@ -40,7 +40,7 @@ dynamic = ["version"]
 dependencies = [
     "pvlib >= 0.10.1",
     "NREL-PySAM >= 4.0",
-    "loris @ git+https://github.com/isc-konstanz/loris.git@v0.9.3"
+    "loris @ git+https://github.com/isc-konstanz/loris.git@stable"
 ]
 
 [project.optional-dependencies]
