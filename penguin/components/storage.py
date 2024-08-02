@@ -6,9 +6,11 @@
 
 """
 import pandas as pd
-from loris import Component, Configurations
+from loris.components import Component, register_component_type
+from loris.core import Configurations
 
 
+@register_component_type
 class ElectricalEnergyStorage(Component):
     TYPE = "ees"
 
@@ -29,10 +31,6 @@ class ElectricalEnergyStorage(Component):
 
         self.grid_power_max = configs.get_float("grid_power_max", default=0) * 1000
         self.grid_power_min = configs.get_float("grid_power_min", default=self.grid_power_max) * 1000
-
-    @property
-    def type(self) -> str:
-        return self.TYPE
 
     def percent_to_energy(self, percent) -> float:
         return percent * self.capacity / 100
@@ -86,6 +84,7 @@ class ElectricalEnergyStorage(Component):
         return data
 
 
+@register_component_type
 class ThermalEnergyStorage(Component):
     TYPE: str = "tes"
 
@@ -101,7 +100,3 @@ class ThermalEnergyStorage(Component):
         # resulting in a specific heat capacity of 4.184 J/g*K.
         # TODO: Make tank content and specific heat capacity configurable
         self.capacity = 4.184 * self.volume / 3600
-
-    @property
-    def type(self) -> str:
-        return self.TYPE

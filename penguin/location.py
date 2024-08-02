@@ -14,6 +14,7 @@ import pvlib as pv
 
 import loris
 import pytz
+from loris.location import LocationException, LocationUnavailableException  # noqa: F401
 
 
 class Location(loris.Location, pv.location.Location):

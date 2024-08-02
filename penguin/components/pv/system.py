@@ -15,17 +15,17 @@ import pvlib as pv
 
 import pandas as pd
 from loris import ChannelState, ConfigurationException, Configurations, Context
-from loris.components import Component, ComponentException
+from loris.components import Component, ComponentException, register_component_type
 from loris.util import parse_id
 from penguin.components.current import DirectCurrent
 from penguin.components.pv.array import PVArray
 from penguin.components.pv.db import InverterDatabase
 
 
+@register_component_type("pv", "solar")
 # noinspection SpellCheckingInspection
 class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
     TYPE: str = "pv"
-    ALIAS: List[str] = ["solar"]  # , 'array']
 
     POWER: str = f"{TYPE}_power"
     POWER_EST: str = f"{TYPE}_est_power"
@@ -64,10 +64,6 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
 
     def __str__(self) -> str:
         return Component.__str__(self)
-
-    @property
-    def type(self) -> str:
-        return self.TYPE
 
     # noinspection PyProtectedMembers
     def configure(self, configs: Configurations) -> None:

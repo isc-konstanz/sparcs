@@ -23,7 +23,8 @@ from pvlib.pvsystem import FixedMount, SingleAxisTrackerMount
 from pvlib.tools import _build_kwargs
 
 import pandas as pd
-from loris import Component, ConfigurationException, Configurations, Context
+from loris import ConfigurationException, Configurations, Context
+from loris.components import Component, register_component_type
 from penguin.components.pv.db import ModuleDatabase
 
 
@@ -33,6 +34,7 @@ class Orientation(Enum):
 
 
 # noinspection SpellCheckingInspection
+@register_component_type
 class PVArray(pv.pvsystem.Array, Component):
     TYPE: str = "pv_array"
 
@@ -75,10 +77,6 @@ class PVArray(pv.pvsystem.Array, Component):
 
     def __str__(self) -> str:
         return Component.__str__(self)
-
-    @property
-    def type(self) -> str:
-        return self.TYPE
 
     def is_configured(self) -> bool:
         return self._module_configured and super().is_configured()
@@ -317,7 +315,7 @@ class PVArray(pv.pvsystem.Array, Component):
         return False
 
     def _read_module_configs(self, params: dict) -> bool:
-        module_file = self.name.replace(re.split(r"[^a-zA-Z0-9\s]", self.id)[0], "module") + ".conf"
+        module_file = self.id.replace(re.split(r"[^a-zA-Z0-9\s]", self.id)[0], "module") + ".conf"
         if not os.path.isfile(os.path.join(self.configs.dirs.conf, module_file)):
             module_file = "module.conf"
         if os.path.isfile(os.path.join(self.configs.dirs.conf, module_file)):
@@ -406,7 +404,7 @@ class PVArray(pv.pvsystem.Array, Component):
 
     def _infer_shading_losses_params(self) -> Optional[Dict[str, Any]]:
         shading = {}
-        shading_file = os.path.join(self.configs.dirs.conf, self.name.replace("array", "shading") + ".conf")
+        shading_file = os.path.join(self.configs.dirs.conf, self.id.replace("array", "shading") + ".conf")
         if not os.path.isfile(shading_file):
             shading_file = os.path.join(self.configs.dirs.conf, "shading.conf")
         if os.path.isfile(shading_file):

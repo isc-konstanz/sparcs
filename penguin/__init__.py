@@ -20,7 +20,7 @@ from .components import (  # noqa: F401
     ElectricVehicle,
     ElectricalEnergyStorage,
     ThermalEnergyStorage,
-    Weather
+    Weather,
 )
 
 from . import system  # noqa: F401

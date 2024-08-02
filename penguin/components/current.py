@@ -5,20 +5,18 @@
 
 
 """
-from loris import Component
+from loris.components import Component, register_component_type
 
 
+@register_component_type
 class DirectCurrent(Component):
     TYPE: str = "dc"
 
     POWER_DC: str = "dc_power"
     ENERGY_DC: str = "dc_energy"
 
-    @property
-    def type(self) -> str:
-        return self.TYPE
 
-
+@register_component_type
 class AlternatingCurrent(Component):
     TYPE: str = "ac"
 
@@ -81,7 +79,3 @@ class AlternatingCurrent(Component):
     CURRENT_L3: str = "l3_current"
 
     FREQUENCY: str = "frequency"
-
-    @property
-    def type(self) -> str:
-        return self.TYPE
