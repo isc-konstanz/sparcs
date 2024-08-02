@@ -38,7 +38,7 @@ class System(loris.System):
         if self.has_type(PVSystem.TYPE):
             from penguin.constants import COLUMNS
 
-            self.data.add(id=PVSystem.POWER_EST, name=COLUMNS[PVSystem.POWER_EST], connector=None, value_type=float)
+            self.data.add(id=PVSystem.POWER_EST, name=COLUMNS[PVSystem.POWER_EST], connector=None, type=float)
 
     def localize(self, configs: Configurations) -> None:
         if configs.enabled:
