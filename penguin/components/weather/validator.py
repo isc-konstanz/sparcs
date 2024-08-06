@@ -11,6 +11,8 @@ import datetime as dt
 import types
 from typing import Optional, Type
 
+from pvlib import atmosphere
+
 import pandas as pd
 from loris.components import register_component_type
 from loris.components.weather import Weather, WeatherException, WeatherMeta
@@ -84,7 +86,10 @@ class WeatherValidator(Weather, metaclass=WeatherValidatorMeta):
                 weather[column] = weather[column].combine_first(data)
 
         if not assert_columns(Weather.PRESSURE_SEA):
-            insert_column(Weather.PRESSURE_SEA, atmosphere.alt2pres(self.location.altitude))
+            insert_column(Weather.PRESSURE_SEA, pd.Series(
+                index=weather.index,
+                data=atmosphere.alt2pres(self.location.altitude)
+            ))
 
         solar_position = self.location.get_solarposition(weather.index, pressure=weather[Weather.PRESSURE_SEA])
 
