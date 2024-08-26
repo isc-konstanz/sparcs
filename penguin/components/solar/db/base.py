@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.pv.db
-    ~~~~~~~~~~~
+    penguin.solar.db
+    ~~~~~~~~~~~~~~~~
 
 
 """
@@ -14,7 +14,7 @@ from abc import ABC, abstractmethod
 from loris import Configurations
 
 
-class PVDatabase(ABC):
+class SolarDatabase(ABC):
     # noinspection PyShadowingBuiltins
     def __init__(self, configs: Configurations, type):
         self._lib_dir = os.path.join(configs.dirs.lib, type)

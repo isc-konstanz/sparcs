@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.components.pv.db
-    ~~~~~~~~~~~~~~~~~~~~~~~~
+    penguin.components.solar.db
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 """

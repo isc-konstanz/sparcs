@@ -13,7 +13,7 @@ from typing import Optional
 import loris
 import pandas as pd
 from loris import ComponentException, Configurations
-from penguin import Location, PVSystem
+from penguin import Location, SolarSystem
 
 
 class System(loris.System):
@@ -35,10 +35,10 @@ class System(loris.System):
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
-        if self.has_type(PVSystem.TYPE):
+        if self.has_type(SolarSystem.TYPE):
             from penguin.constants import COLUMNS
 
-            self.data.add(key=PVSystem.POWER_EST, name=COLUMNS[PVSystem.POWER_EST], connector=None, type=float)
+            self.data.add(key=SolarSystem.POWER_EST, name=COLUMNS[SolarSystem.POWER_EST], connector=None, type=float)
 
     def localize(self, configs: Configurations) -> None:
         if configs.enabled:
@@ -70,14 +70,14 @@ class System(loris.System):
             weather = self.weather.get(start, end, validate=True, **kwargs)
             result = pd.DataFrame(columns=[], index=weather.index)
             result.index.name = "timestamp"
-            if self.has_type(PVSystem.TYPE):
-                result.loc[:, [PVSystem.POWER, PVSystem.POWER_DC]] = 0.0
-                for pv in self.get_all(PVSystem.TYPE):
+            if self.has_type(SolarSystem.TYPE):
+                result.loc[:, [SolarSystem.POWER, SolarSystem.POWER_DC]] = 0.0
+                for pv in self.get_all(SolarSystem.TYPE):
                     pv_result = pv.run(weather)
-                    result[[PVSystem.POWER, PVSystem.POWER_DC]] += pv_result[[PVSystem.POWER, PVSystem.POWER_DC]].abs()
+                    result[[SolarSystem.POWER, SolarSystem.POWER_DC]] += pv_result[[SolarSystem.POWER, SolarSystem.POWER_DC]].abs()
 
-                pv_power_channel = self.data[PVSystem.POWER_EST]
-                pv_power = result[PVSystem.POWER]
+                pv_power_channel = self.data[SolarSystem.POWER_EST]
+                pv_power = result[SolarSystem.POWER]
                 if not pv_power.empty:
                     pv_power_channel.set(pv_power.index[0], pv_power)
                 else:

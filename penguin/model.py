@@ -11,7 +11,7 @@ from pvlib.modelchain import ModelChain
 
 import pandas as pd
 from loris import Configurations, Configurator, Location
-from penguin import PVSystem
+from penguin import SolarSystem
 
 # noinspection SpellCheckingInspection
 DEFAULTS = dict(
@@ -28,7 +28,7 @@ DEFAULTS = dict(
 # noinspection SpellCheckingInspection, PyAbstractClass
 class Model(Configurator, ModelChain):
     @classmethod
-    def load(cls, pvsystem: PVSystem, override_file: str = "model.conf", section: str = "model") -> Model:
+    def load(cls, pvsystem: SolarSystem, override_file: str = "model.conf", section: str = "model") -> Model:
         override_dir = pvsystem.configs.path.replace(".conf", ".d")
         configs_dirs = pvsystem.configs.dirs.encode()
         configs_dirs["conf_dir"] = override_dir
@@ -45,7 +45,7 @@ class Model(Configurator, ModelChain):
 
         return cls(configs, pvsystem, pvsystem.context.location, **params)
 
-    def __init__(self, configs: Configurations, pvsystem: PVSystem, location: Location, **kwargs):
+    def __init__(self, configs: Configurations, pvsystem: SolarSystem, location: Location, **kwargs):
         super().__init__(configs=configs, system=pvsystem, location=location, **kwargs)
 
     def configure(self, configs: Configurations) -> None:
