@@ -96,18 +96,18 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
             self.losses_parameters = configs.get("losses", default=PVSystem.losses_parameters)
 
         except ConfigurationException as e:
-            self._logger.warning(f"Unable to configure inverter for system '{self.id}': ", e)
+            self._logger.warning(f"Unable to configure inverter for system '{self.key}': ", e)
 
-        def _add_channel(channel_id: str):
+        def _add_channel(key: str):
             from penguin.constants import COLUMNS
             channel = {}
-            if channel_id in COLUMNS:
-                channel["name"] = COLUMNS[channel_id]
-            channel["column"] = channel_id.replace(f"{PVSystem.TYPE}_", self.id)
+            if key in COLUMNS:
+                channel["name"] = COLUMNS[key]
+            channel["column"] = key.replace(f"{PVSystem.TYPE}_", self.key)
             channel["value_type"] = float
             channel["connector"] = None
 
-            self.data.add(id=channel_id, **channel)
+            self.data.add(key=key, **channel)
 
         _add_channel(PVSystem.POWER)
         _add_channel(PVSystem.POWER_DC)
@@ -130,9 +130,9 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
                 **configs,
                 require=False
             )
-            array_configs.set("id", "array")
+            array_configs.set("key", "array")
             if "name" not in array_configs:
-                array_configs.set("name", self.id)
+                array_configs.set("name", self.key)
 
             array = self._new_array(array_configs)
             self._add_array(array)
@@ -140,17 +140,17 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
         array_defaults = {}
         if "arrays" in configs:
             arrays_section = configs.get_section("arrays")
-            array_ids = [
+            array_keys = [
                 i
                 for i in arrays_section.keys()
                 if (isinstance(arrays_section[i], Mapping) and i not in ["data", "mounting"])
             ]
-            arrays_configs = {i: arrays_section.pop(i) for i in array_ids}
+            arrays_configs = {i: arrays_section.pop(i) for i in array_keys}
             array_defaults.update(arrays_section)
 
-            for array_id, array_section in arrays_configs.items():
-                array_id = parse_id(array_id)
-                array_file = f"{array_id}.conf"
+            for array_key, array_section in arrays_configs.items():
+                array_key = parse_id(array_key)
+                array_file = f"{array_key}.conf"
                 array_configs = Configurations.load(
                     array_file,
                     **array_dirs,
@@ -158,17 +158,17 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
                     require=False
                 )
                 array_configs.update(arrays_section)
-                array_configs.set("id", array_id)
+                array_configs.set("key", array_key)
                 if "name" not in array_configs:
-                    array_configs.set("name", f"{self.id}_{array_id}")
+                    array_configs.set("name", f"{self.key}_{array_key}")
 
                 array = self._new_array(array_configs)
                 self._add_array(array)
 
         for array_path in glob.glob(os.path.join(array_dir, "array*.conf")):
             array_file = os.path.basename(array_path)
-            array_id = parse_id(array_file.rsplit(".", maxsplit=1)[0])
-            if any([array_id == a.id for a in self.arrays]):
+            array_key = parse_id(array_file.rsplit(".", maxsplit=1)[0])
+            if any([array_key == a.key for a in self.arrays]):
                 continue
 
             array_configs = Configurations.load(
@@ -176,9 +176,9 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
                 **array_dirs,
                 **array_defaults
             )
-            array_configs.set("id", array_id)
+            array_configs.set("key", array_key)
             if "name" not in array_configs:
-                array_configs.set("name", f"{self.id}_{array_id}")
+                array_configs.set("name", f"{self.key}_{array_key}")
 
             array = self._new_array(array_configs)
             self._add_array(array)
@@ -248,7 +248,7 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
         return False
 
     def _read_inverter_configs(self, params: dict) -> bool:
-        inverter_file = os.path.join(self.configs.dirs.conf, f"{self.id}.d", "inverter.conf")
+        inverter_file = os.path.join(self.configs.dirs.conf, f"{self.key}.d", "inverter.conf")
         if os.path.exists(inverter_file):
             with open(inverter_file) as f:
                 inverter_str = "[Inverter]\n" + f.read()
@@ -308,11 +308,11 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
     def run(self, weather: pd.DataFrame) -> pd.DataFrame:
         data = self._run(weather)
 
-        for channel in self.data.values():
-            if channel.id not in data.columns or data[channel.id].empty:
+        for channel in self.data.channels:
+            if channel.key not in data.columns or data[channel.key].empty:
                 channel.state = ChannelState.NOT_AVAILABLE
                 continue
-            channel_data = data[channel.id]
+            channel_data = data[channel.key]
             channel.set(channel_data.index[0], channel_data)
 
         return data

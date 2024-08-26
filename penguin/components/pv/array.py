@@ -315,7 +315,7 @@ class PVArray(pv.pvsystem.Array, Component):
         return False
 
     def _read_module_configs(self, params: dict) -> bool:
-        module_file = self.id.replace(re.split(r"[^a-zA-Z0-9\s]", self.id)[0], "module") + ".conf"
+        module_file = self.key.replace(re.split(r"[^a-zA-Z0-9\s]", self.key)[0], "module") + ".conf"
         if not os.path.isfile(os.path.join(self.configs.dirs.conf, module_file)):
             module_file = "module.conf"
         if os.path.isfile(os.path.join(self.configs.dirs.conf, module_file)):
@@ -404,7 +404,7 @@ class PVArray(pv.pvsystem.Array, Component):
 
     def _infer_shading_losses_params(self) -> Optional[Dict[str, Any]]:
         shading = {}
-        shading_file = os.path.join(self.configs.dirs.conf, self.id.replace("array", "shading") + ".conf")
+        shading_file = os.path.join(self.configs.dirs.conf, self.key.replace("array", "shading") + ".conf")
         if not os.path.isfile(shading_file):
             shading_file = os.path.join(self.configs.dirs.conf, "shading.conf")
         if os.path.isfile(shading_file):
