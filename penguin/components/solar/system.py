@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.components.pv.system
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    penguin.components.solar.system
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 """
@@ -18,13 +18,13 @@ from loris import ChannelState, ConfigurationException, Configurations, Context
 from loris.components import Component, ComponentException, register_component_type
 from loris.util import parse_id
 from penguin.components.current import DirectCurrent
-from penguin.components.pv.array import PVArray
-from penguin.components.pv.db import InverterDatabase
+from penguin.components.solar.array import SolarArray
+from penguin.components.solar.db import InverterDatabase
 
 
-@register_component_type("pv", "solar")
+@register_component_type("solar", "pv")
 # noinspection SpellCheckingInspection
-class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
+class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
     TYPE: str = "pv"
 
     POWER: str = f"{TYPE}_power"
@@ -43,13 +43,13 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
 
     YIELD_SPECIFIC: str = "specific_yield"
 
-    arrays: List[PVArray]
+    arrays: List[SolarArray]
 
     inverter: str = None
     inverter_parameters: dict = {}
     inverters_per_system: int = 1
 
-    modules_per_inverter: int = PVArray.modules_per_string * PVArray.strings
+    modules_per_inverter: int = SolarArray.modules_per_string * SolarArray.strings
 
     power_max: float = 0
 
@@ -73,10 +73,10 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
             array._do_configure()
         try:
             inverter = configs.get_section("inverter", defaults={})
-            self.inverter = inverter.get("model", default=PVSystem.inverter)
+            self.inverter = inverter.get("model", default=SolarSystem.inverter)
             self.inverter_parameters = self._infer_inverter_params()
             self.inverter_parameters = self._fit_inverter_params()
-            self.inverters_per_system = inverter.get_int("count", default=PVSystem.modules_per_inverter)
+            self.inverters_per_system = inverter.get_int("count", default=SolarSystem.modules_per_inverter)
 
             self.modules_per_inverter = sum([array.modules_per_string * array.strings for array in self.arrays])
 
@@ -93,7 +93,7 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
                     * self.inverters_per_system
                 )
 
-            self.losses_parameters = configs.get("losses", default=PVSystem.losses_parameters)
+            self.losses_parameters = configs.get("losses", default=SolarSystem.losses_parameters)
 
         except ConfigurationException as e:
             self._logger.warning(f"Unable to configure inverter for system '{self.key}': ", e)
@@ -103,18 +103,18 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
             channel = {}
             if key in COLUMNS:
                 channel["name"] = COLUMNS[key]
-            channel["column"] = key.replace(f"{PVSystem.TYPE}_", self.key)
+            channel["column"] = key.replace(f"{SolarSystem.TYPE}_", self.key)
             channel["value_type"] = float
             channel["connector"] = None
 
             self.data.add(key=key, **channel)
 
-        _add_channel(PVSystem.POWER)
-        _add_channel(PVSystem.POWER_DC)
-        _add_channel(PVSystem.CURRENT_MP)
-        _add_channel(PVSystem.VOLTAGE_MP)
-        _add_channel(PVSystem.CURRENT_SC)
-        _add_channel(PVSystem.VOLTAGE_OC)
+        _add_channel(SolarSystem.POWER)
+        _add_channel(SolarSystem.POWER_DC)
+        _add_channel(SolarSystem.CURRENT_MP)
+        _add_channel(SolarSystem.VOLTAGE_MP)
+        _add_channel(SolarSystem.CURRENT_SC)
+        _add_channel(SolarSystem.VOLTAGE_OC)
 
     def _load_arrays(self, configs: Configurations):
         array_dir = configs.path.replace(".conf", ".d")
@@ -184,10 +184,10 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
             self._add_array(array)
 
     # noinspection PyMethodMayBeStatic
-    def _new_array(self, configs: Configurations) -> PVArray:
-        return PVArray(self, configs)
+    def _new_array(self, configs: Configurations) -> SolarArray:
+        return SolarArray(self, configs)
 
-    def _add_array(self, array: PVArray) -> None:
+    def _add_array(self, array: SolarArray) -> None:
         self.arrays.append(array)
 
     def _infer_inverter_params(self) -> dict:
@@ -274,7 +274,7 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
 
     # noinspection PyMethodOverriding
     def pvwatts_losses(self, solar_position: pd.DataFrame):
-        def _pvwatts_losses(array: PVArray):
+        def _pvwatts_losses(array: SolarArray):
             return pv.pvsystem.pvwatts_losses(**array.pvwatts_losses(solar_position))
 
         if self.num_arrays > 1:
@@ -296,12 +296,12 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
         model = Model.load(self)
         return model(weather).rename(
             columns={
-                PVArray.POWER_AC: PVSystem.POWER,
-                PVArray.POWER_DC: PVSystem.POWER_DC,
-                PVArray.CURRENT_SC: PVSystem.CURRENT_SC,
-                PVArray.VOLTAGE_OC: PVSystem.VOLTAGE_OC,
-                PVArray.CURRENT_MP: PVSystem.CURRENT_MP,
-                PVArray.VOLTAGE_MP: PVSystem.VOLTAGE_MP,
+                SolarArray.POWER_AC: SolarSystem.POWER,
+                SolarArray.POWER_DC: SolarSystem.POWER_DC,
+                SolarArray.CURRENT_SC: SolarSystem.CURRENT_SC,
+                SolarArray.VOLTAGE_OC: SolarSystem.VOLTAGE_OC,
+                SolarArray.CURRENT_MP: SolarSystem.CURRENT_MP,
+                SolarArray.VOLTAGE_MP: SolarSystem.VOLTAGE_MP,
             }
         )
 

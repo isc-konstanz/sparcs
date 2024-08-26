@@ -19,5 +19,5 @@ from .storage import (  # noqa: F401
 )
 from .vehicle import ElectricVehicle  # noqa: F401
 
-from . import pv  # noqa: F401
-from .pv import PVArray, PVSystem  # noqa: F401
+from . import solar  # noqa: F401
+from .solar import SolarArray, SolarSystem  # noqa: F401

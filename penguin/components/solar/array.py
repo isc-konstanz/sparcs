@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.components.pv.array
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    penguin.components.solar.array
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-    This module provides the :class:`penguin.PVArray`, containing information about orientation
+    This module provides the :class:`penguin.SolarArray`, containing information about orientation
     and datasheet parameters of a specific photovoltaic installation.
 
 """
@@ -25,7 +25,7 @@ from pvlib.tools import _build_kwargs
 import pandas as pd
 from loris import ConfigurationException, Configurations, Context
 from loris.components import Component, register_component_type
-from penguin.components.pv.db import ModuleDatabase
+from penguin.components.solar.db import ModuleDatabase
 
 
 class Orientation(Enum):
@@ -35,8 +35,8 @@ class Orientation(Enum):
 
 # noinspection SpellCheckingInspection
 @register_component_type
-class PVArray(pv.pvsystem.Array, Component):
-    TYPE: str = "pv_array"
+class SolarArray(pv.pvsystem.Array, Component):
+    TYPE: str = "solar_array"
 
     POWER_AC: str = "p_ac"
     POWER_DC: str = "p_dc"
@@ -87,12 +87,12 @@ class PVArray(pv.pvsystem.Array, Component):
 
         self.surface_type = configs.get("surface_type", default=configs.get("ground_type", default=None))
         if "albedo" not in configs:
-            self.albedo = pv.albedo.SURFACE_ALBEDOS.get(self.surface_type, PVArray.albedo)
+            self.albedo = pv.albedo.SURFACE_ALBEDOS.get(self.surface_type, SolarArray.albedo)
         else:
             self.albedo = configs.get_float("albedo")
 
-        self.strings = configs.get_int("strings", default=configs.get_int("count", default=PVArray.strings))
-        self.modules_per_string = configs.get_int("modules_per_string", default=PVArray.modules_per_string)
+        self.strings = configs.get_int("strings", default=configs.get_int("count", default=SolarArray.strings))
+        self.modules_per_string = configs.get_int("modules_per_string", default=SolarArray.modules_per_string)
         self.module_type = configs.get("module_type", default=configs.get("construct_type"))
         self.module = configs.get("module", default=None)
 
@@ -104,11 +104,11 @@ class PVArray(pv.pvsystem.Array, Component):
             return
 
         rows = configs.get_section("rows", defaults={})
-        self.modules_stacked = rows.get_int("stack", default=PVArray.modules_stacked)
-        self.module_stack_gap = rows.get_float("stack_gap", default=PVArray.module_stack_gap)
-        self.module_row_gap = rows.get_float("row_gap", default=PVArray.module_row_gap)
+        self.modules_stacked = rows.get_int("stack", default=SolarArray.modules_stacked)
+        self.module_stack_gap = rows.get_float("stack_gap", default=SolarArray.module_stack_gap)
+        self.module_row_gap = rows.get_float("row_gap", default=SolarArray.module_row_gap)
 
-        self.module_transmission = rows.get_float("module_transmission", default=PVArray.module_transmission)
+        self.module_transmission = rows.get_float("module_transmission", default=SolarArray.module_transmission)
 
         _module_orientation = configs.get("orientation", default="portrait").upper()
         self.module_orientation = Orientation[_module_orientation]
@@ -128,7 +128,7 @@ class PVArray(pv.pvsystem.Array, Component):
             self.module_transmission = ((self.module_row_gap + self.module_stack_gap * (self.modules_stacked - 1)) /
                                         (self.module_length * self.module_width))
 
-        self.row_pitch = rows.get_float("pitch", default=PVArray.row_pitch)
+        self.row_pitch = rows.get_float("pitch", default=SolarArray.row_pitch)
         if (
             self.row_pitch
             and isinstance(self.mount, SingleAxisTrackerMount)

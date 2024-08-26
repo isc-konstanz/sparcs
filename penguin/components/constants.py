@@ -9,7 +9,7 @@ from penguin.components import (
     AlternatingCurrent,
     DirectCurrent,
     ElectricalEnergyStorage,
-    PVSystem,
+    SolarSystem,
     ThermalEnergyStorage,
 )
 
@@ -24,15 +24,15 @@ STORAGE_ENERGY = {
 }
 
 PV_POWER = {
-    PVSystem.POWER:     "Generated PV Power [W]",
-    PVSystem.POWER_EST: "Estimated PV Power [W]",
-    PVSystem.POWER_EXP: "Exported PV Power [W]"
+    SolarSystem.POWER:     "Generated PV Power [W]",
+    SolarSystem.POWER_EST: "Estimated PV Power [W]",
+    SolarSystem.POWER_EXP: "Exported PV Power [W]"
 }
 
 PV_ENERGY = {
-    PVSystem.ENERGY:     "Generated PV Energy [kWh]",
-    PVSystem.ENERGY_EST: "Estimated PV Energy [kWh]",
-    PVSystem.ENERGY_EXP: "Exported PV Energy [kWh]"
+    SolarSystem.ENERGY:     "Generated PV Energy [kWh]",
+    SolarSystem.ENERGY_EST: "Estimated PV Energy [kWh]",
+    SolarSystem.ENERGY_EXP: "Exported PV Energy [kWh]"
 }
 
 PV = {

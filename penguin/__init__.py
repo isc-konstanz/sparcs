@@ -15,8 +15,8 @@ from .location import Location  # noqa: F401
 
 from . import components  # noqa: F401
 from .components import (  # noqa: F401
-    PVSystem,
-    PVArray,
+    SolarSystem,
+    SolarArray,
     ElectricVehicle,
     ElectricalEnergyStorage,
     ThermalEnergyStorage,
