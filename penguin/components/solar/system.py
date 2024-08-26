@@ -140,12 +140,8 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
         array_defaults = {}
         if "arrays" in configs:
             arrays_section = configs.get_section("arrays")
-            array_keys = [
-                i
-                for i in arrays_section.keys()
-                if (isinstance(arrays_section[i], Mapping) and i not in ["data", "mounting"])
-            ]
-            arrays_configs = {i: arrays_section.pop(i) for i in array_keys}
+            array_keys = [k for k in arrays_section.sections if k not in ["data", "mounting"]]
+            arrays_configs = {k: arrays_section.pop(k) for k in array_keys}
             array_defaults.update(arrays_section)
 
             for array_key, array_section in arrays_configs.items():

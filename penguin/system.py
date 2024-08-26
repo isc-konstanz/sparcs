@@ -13,7 +13,7 @@ from typing import Optional
 import loris
 import pandas as pd
 from loris import ComponentException, Configurations
-from penguin import Location, SolarSystem
+from penguin import Location, SolarSystem, IrrigationSystem
 
 
 class System(loris.System):
@@ -59,7 +59,7 @@ class System(loris.System):
     #     eval = Evaluation(self)
     #     return eval(**kwargs)
 
-    # noinspection PyShadowingBuiltins, PyUnresolvedReferences
+    # noinspection PyShadowingBuiltins, PyUnresolvedReferences, SpellCheckingInspection
     def run(
         self,
         start: pd.Timestamp | dt.datetime = None,
@@ -82,7 +82,8 @@ class System(loris.System):
                     pv_power_channel.set(pv_power.index[0], pv_power)
                 else:
                     pv_power_channel.state = ChannelState.NOT_AVAILABLE
-
+            for irrig in self.get_all(IrrigationSystem.TYPE):
+                irrig.run(weather)
             return pd.concat([result, weather], axis="columns")
 
         except ComponentException as e:
