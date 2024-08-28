@@ -19,8 +19,8 @@ from loris.util import parse_id
 from penguin.components.irrigation import IrrigationArray
 
 
-@register_component_type("irrigation", "watering")
 # noinspection SpellCheckingInspection
+@register_component_type("irrigation", "watering")
 class IrrigationSystem(Component):
     TYPE: str = "irrig"
 
