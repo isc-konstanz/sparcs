@@ -27,6 +27,8 @@ from penguin.components.solar.db import InverterDatabase
 class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
     TYPE: str = "pv"
 
+    SECTIONS = ["model", "inverter", "arrays", *SolarArray.SECTIONS]
+
     POWER: str = f"{TYPE}_power"
     POWER_EST: str = f"{TYPE}_est_power"
     POWER_EXP: str = f"{TYPE}_exp_power"
@@ -55,7 +57,7 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
 
     losses_parameters: dict = {}
 
-    def __init__(self, context: Context, configs: Configurations) -> None:
+    def __init__(self, context: Context, configs: Configurations) -> None:  # noqa
         super(pv.pvsystem.PVSystem, self).__init__(context, configs)
         self.arrays = []
 
@@ -69,8 +71,6 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
         self._load_arrays(configs)
-        for array in self.arrays:
-            array._do_configure()
         try:
             inverter = configs.get_section("inverter", defaults={})
             self.inverter = inverter.get("model", default=SolarSystem.inverter)
@@ -130,22 +130,15 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
                 **configs,
                 require=False
             )
-            array_configs.set("key", "array")
-            if "name" not in array_configs:
-                array_configs.set("name", self.key)
-
-            array = self._new_array(array_configs)
-            self._add_array(array)
+            array = SolarArray(self, key="array", name=f"{self.name} Array")
+            array.configure(array_configs)
+            self.arrays.append(array)
 
         array_defaults = {}
         if "arrays" in configs:
             arrays_section = configs.get_section("arrays")
-            array_keys = [
-                i
-                for i in arrays_section.keys()
-                if (isinstance(arrays_section[i], Mapping) and i not in ["data", "mounting"])
-            ]
-            arrays_configs = {i: arrays_section.pop(i) for i in array_keys}
+            array_keys = [k for k in arrays_section.sections if k not in [*Component.SECTIONS, *self.SECTIONS]]
+            arrays_configs = {k: arrays_section.pop(k) for k in array_keys}
             array_defaults.update(arrays_section)
 
             for array_key, array_section in arrays_configs.items():
@@ -157,13 +150,11 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
                     **array_defaults,
                     require=False
                 )
-                array_configs.update(arrays_section)
-                array_configs.set("key", array_key)
-                if "name" not in array_configs:
-                    array_configs.set("name", f"{self.key}_{array_key}")
+                array_configs.update(arrays_section, replace=False)
 
-                array = self._new_array(array_configs)
-                self._add_array(array)
+                array = SolarArray(self, key=array_key, name=f"{self.name} {array_key.title()}")
+                array.configure(array_configs)
+                self.arrays.append(array)
 
         for array_path in glob.glob(os.path.join(array_dir, "array*.conf")):
             array_file = os.path.basename(array_path)
@@ -176,19 +167,9 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
                 **array_dirs,
                 **array_defaults
             )
-            array_configs.set("key", array_key)
-            if "name" not in array_configs:
-                array_configs.set("name", f"{self.key}_{array_key}")
-
-            array = self._new_array(array_configs)
-            self._add_array(array)
-
-    # noinspection PyMethodMayBeStatic
-    def _new_array(self, configs: Configurations) -> SolarArray:
-        return SolarArray(self, configs)
-
-    def _add_array(self, array: SolarArray) -> None:
-        self.arrays.append(array)
+            array = SolarArray(self, key=array_key, name=f"{self.name} {array_key.title()}")
+            array.configure(array_configs)
+            self.arrays.append(array)
 
     def _infer_inverter_params(self) -> dict:
         params = {}
@@ -266,11 +247,11 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
 
     def activate(self) -> None:
         for array in self.arrays:
-            array._do_activate()
+            array.activate()
 
     def deactivate(self) -> None:
         for array in self.arrays:
-            array._do_deactivate()
+            array.deactivate()
 
     # noinspection PyMethodOverriding
     def pvwatts_losses(self, solar_position: pd.DataFrame):
