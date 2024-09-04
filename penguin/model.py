@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.model
-    ~~~~~~~~~~~~~
+penguin.model
+~~~~~~~~~~~~~
 
 
 """
+
 from __future__ import annotations
 
 from pvlib.modelchain import ModelChain
@@ -37,7 +38,7 @@ class Model(Configurator, ModelChain):
             override_file,
             **configs_dirs,
             **pvsystem.configs,
-            require=False
+            require=False,
         )
         params = DEFAULTS
         if section in configs:
@@ -82,8 +83,9 @@ class Model(Configurator, ModelChain):
         results.loc[:, results.columns.str.startswith(("p_", "i_"))] *= self.system.inverters_per_system
 
         losses = self.results.losses
-        if not isinstance(losses, float) and not \
-                (isinstance(losses, tuple) and any([isinstance(loss, float) for loss in losses])):
+        if not isinstance(losses, float) and not (
+            isinstance(losses, tuple) and any([isinstance(loss, float) for loss in losses])
+        ):
             if isinstance(losses, tuple):
                 losses = pd.concat(list(losses), axis="columns").mean(axis="columns")
                 losses.name = "losses"

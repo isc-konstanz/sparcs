@@ -1,12 +1,13 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 """
-    penguin
-    ~~~~~~~
+penguin
+~~~~~~~
 
-    To learn how to use local resource integration systems, see "penguin --help"
+To learn how to use local resource integration systems, see "penguin --help"
 
 """
+
 import os
 from argparse import ArgumentParser, RawTextHelpFormatter
 
