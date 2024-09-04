@@ -36,7 +36,7 @@ class Orientation(Enum):
 # noinspection SpellCheckingInspection
 @register_component_type
 class SolarArray(pv.pvsystem.Array, Component):
-    TYPE: str = "solar_array"
+    TYPE: str = "pv_array"
 
     SECTIONS = ["rows", "mounting", "tracking"]
 
