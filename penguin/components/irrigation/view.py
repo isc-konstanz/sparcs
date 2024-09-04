@@ -33,7 +33,7 @@ class IrrigationPage(ComponentPage[IrrigationSystem]):
     def _build_humidity(self) -> html.Div:
         @callback(
             Output(f"{self.id}-humidity", "children"),
-            Input(f"{self.id}-humidity-update", "n_intervals")
+            Input(f"{self.id}-humidity-update", "n_intervals"),
         )
         def _update_humidity(*_) -> html.P | dbc.Spinner:
             humidity = self.data.humidity_mean
