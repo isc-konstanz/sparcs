@@ -35,30 +35,23 @@ class WeatherPage(ComponentPage[Weather]):
 
         current = self._build_current()
         layout.card.append(current, focus=True)
-        layout.append(
-            dbc.Row(
-                dbc.Col(current, width="auto")
-            )
-        )
+        layout.append(dbc.Row(dbc.Col(current, width="auto")))
 
         if self.has_forecast():
             forecast = self._build_forecast()
             layout.card.append(forecast)
-            layout.append(
-                dbc.Row(
-                    dbc.Col(forecast, width="auto")
-                )
-            )
+            layout.append(dbc.Row(dbc.Col(forecast, width="auto")))
 
     def _build_current(self) -> html.Div:
-
-        @callback(Output(f"{self.id}-current", "children"),
-                  Input(f"{self.id}-current-update", "n_intervals"))
+        @callback(
+            Output(f"{self.id}-current", "children"),
+            Input(f"{self.id}-current-update", "n_intervals"),
+        )
         def _update_current(*_) -> List[html.P] | dbc.Spinner:
             icon = self.data.icon
             if icon.is_valid():
                 return [
-                    html.P(icon.timestamp.strftime('Today, %d. %b %Y from %H:%M')),
+                    html.P(icon.timestamp.strftime("Today, %d. %b %Y from %H:%M")),
                     html.P(str(icon.value).replace("-", " "), style={"fontSize": "4rem"}),
                 ]
             return dbc.Spinner(html.Div(id=f"{self.id}-current-loader"))
@@ -78,10 +71,11 @@ class WeatherPage(ComponentPage[Weather]):
         )
 
     def _build_forecast(self) -> html.Div:
-
-        @callback(Output(f"{self.id}-forecast-graph", "figure"),
-                  Output(f"{self.id}-forecast-icons", 'children'),
-                  Input(f"{self.id}-forecast-update", "n_intervals"))
+        @callback(
+            Output(f"{self.id}-forecast-graph", "figure"),
+            Output(f"{self.id}-forecast-icons", "children"),
+            Input(f"{self.id}-forecast-update", "n_intervals"),
+        )
         def _update_forecast(*_):
             start = floor_date(pd.Timestamp.now(tz.UTC), freq="h")
             end = start + pd.Timedelta(hours=23)
@@ -159,11 +153,7 @@ class WeatherPage(ComponentPage[Weather]):
         for timestamp in self._slice_forecast_index(forecast):
             icon = forecast.loc[timestamp, "icon"]
             if not pd.isna(icon):
-                icons.append(
-                    dbc.Col(
-                        html.Div(icon, style={"fontSize": ".75rem", "text-align": "center"})
-                    )
-                )
+                icons.append(dbc.Col(html.Div(icon, style={"fontSize": ".75rem", "text-align": "center"})))
             else:
                 icons.append(dbc.Col(dbc.Spinner()))
         return icons

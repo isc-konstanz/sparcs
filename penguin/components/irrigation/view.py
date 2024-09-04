@@ -28,26 +28,17 @@ class IrrigationPage(ComponentPage[IrrigationSystem]):
 
         humidity = self._build_humidity()
         layout.card.append(humidity, focus=True)
-        layout.append(
-            dbc.Row(
-                dbc.Col(humidity, width="auto")
-            )
-        )
+        layout.append(dbc.Row(dbc.Col(humidity, width="auto")))
 
     def _build_humidity(self) -> html.Div:
-
-        @callback(Output(f"{self.id}-humidity", "children"),
-                  Input(f"{self.id}-humidity-update", "n_intervals"))
+        @callback(
+            Output(f"{self.id}-humidity", "children"),
+            Input(f"{self.id}-humidity-update", "n_intervals")
+        )
         def _update_humidity(*_) -> html.P | dbc.Spinner:
             humidity = self.data.humidity_mean
             if humidity.is_valid():
-                return html.P(
-                    f"{round(humidity.value, 1)}%",
-                    style={
-                        "color": "#a7c7e7",
-                        "fontSize": "4rem"
-                    }
-                )
+                return html.P(f"{round(humidity.value, 1)}%", style={"color": "#a7c7e7", "fontSize": "4rem"})
             return dbc.Spinner(html.Div(id=f"{self.id}-humidity-loader"))
 
         return html.Div(
