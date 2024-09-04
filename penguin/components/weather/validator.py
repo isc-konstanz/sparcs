@@ -29,8 +29,8 @@ from penguin.location import Location, LocationUnavailableException
 
 class WeatherValidatorMeta(WeatherMeta):
     # noinspection PyTypeChecker
-    def __call__(cls, context: Context, configs: Configurations) -> Weather:
-        weather = super().__call__(context, configs)
+    def __call__(cls, *args, **kwargs) -> Weather:
+        weather = super().__call__(*args, **kwargs)
         weather._get_weather = weather.get
         weather.get = types.MethodType(WeatherValidator.get, weather)
         weather.validate = types.MethodType(WeatherValidator.validate, weather)

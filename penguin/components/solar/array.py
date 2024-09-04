@@ -36,7 +36,9 @@ class Orientation(Enum):
 # noinspection SpellCheckingInspection
 @register_component_type
 class SolarArray(pv.pvsystem.Array, Component):
-    TYPE: str = "solar_array"
+    TYPE: str = "pv_array"
+
+    SECTIONS = ["rows", "mounting", "tracking"]
 
     POWER_AC: str = "p_ac"
     POWER_DC: str = "p_dc"
@@ -69,8 +71,14 @@ class SolarArray(pv.pvsystem.Array, Component):
     shading_losses_parameters: dict = {}
     temperature_model_parameters: dict = {}
 
-    def __init__(self, context: Component | Context, configs: Configurations) -> None:
-        super(pv.pvsystem.Array, self).__init__(context, configs)
+    def __init__(  # noqa
+        self,
+        context: Component | Context,
+        configs: Optional[Configurations] = None,
+        key: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> None:
+        super(pv.pvsystem.Array, self).__init__(context, configs=configs, key=key, name=name)
 
     def __repr__(self) -> str:
         return Component.__repr__(self)
@@ -96,7 +104,7 @@ class SolarArray(pv.pvsystem.Array, Component):
         self.module_type = configs.get("module_type", default=configs.get("construct_type"))
         self.module = configs.get("module", default=None)
 
-        self.module_parameters = self._infer_module_params()
+        self.module_parameters = self._infer_module_params(configs)
         self._module_configured = self._validate_module_params()
         if not self._module_configured:
             # raise ConfigurationException("Unable to configure module parameters")
@@ -136,9 +144,9 @@ class SolarArray(pv.pvsystem.Array, Component):
         ):
             self.mount.gcr = self.module_length / self.row_pitch
 
-        self.array_losses_parameters = self._infer_array_losses_params()
-        self.shading_losses_parameters = self._infer_shading_losses_params()
-        self.temperature_model_parameters = self._infer_temperature_model_params()
+        self.array_losses_parameters = self._infer_array_losses_params(configs)
+        self.shading_losses_parameters = self._infer_shading_losses_params(configs)
+        self.temperature_model_parameters = self._infer_temperature_model_params(configs)
 
     @staticmethod
     def _new_mount(configs: Configurations) -> pv.pvsystem.AbstractMount:
@@ -170,14 +178,14 @@ class SolarArray(pv.pvsystem.Array, Component):
                 module_height=mounting.get_float("module_height", default=FixedMount.module_height),
             )
 
-    def _infer_module_params(self) -> dict:
+    def _infer_module_params(self, configs: Configurations) -> dict:
         params = {}
         self._module_parameters_override = False
-        if not self._read_module_params(params):
-            self._read_module_database(params)
+        if not self._read_module_params(configs, params):
+            self._read_module_database(configs,params)
 
         module_params_exist = len(params) > 0
-        if self._read_module_configs(params) and module_params_exist:
+        if self._read_module_configs(configs, params) and module_params_exist:
             self._module_parameters_override = True
 
         return params
@@ -293,18 +301,18 @@ class SolarArray(pv.pvsystem.Array, Component):
 
         return True
 
-    def _read_module_params(self, params: dict) -> bool:
-        if self.configs.has_section("module"):
-            module_params = dict(self.configs["module"])
+    def _read_module_params(self, configs: Configurations, params: dict) -> bool:
+        if configs.has_section("module"):
+            module_params = dict(configs["module"])
             _update_parameters(params, module_params)
             self._logger.debug("Extracted module from config file")
             return True
         return False
 
-    def _read_module_database(self, params: dict) -> bool:
+    def _read_module_database(self, configs: Configurations, params: dict) -> bool:
         if self.module is not None:
             try:
-                modules = ModuleDatabase(self.configs)
+                modules = ModuleDatabase(configs)
                 module_params = modules.read(self.module)
                 _update_parameters(params, module_params)
             except IOError as e:
@@ -314,12 +322,12 @@ class SolarArray(pv.pvsystem.Array, Component):
             return True
         return False
 
-    def _read_module_configs(self, params: dict) -> bool:
+    def _read_module_configs(self, configs: Configurations, params: dict) -> bool:
         module_file = self.key.replace(re.split(r"[^a-zA-Z0-9\s]", self.key)[0], "module") + ".conf"
-        if not os.path.isfile(os.path.join(self.configs.dirs.conf, module_file)):
+        if not os.path.isfile(os.path.join(configs.dirs.conf, module_file)):
             module_file = "module.conf"
-        if os.path.isfile(os.path.join(self.configs.dirs.conf, module_file)):
-            _update_parameters(params, Configurations.load(module_file, **self.configs.dirs.encode()))
+        if os.path.isfile(os.path.join(configs.dirs.conf, module_file)):
+            _update_parameters(params, Configurations.load(module_file, **configs.dirs.encode()))
             self._logger.debug("Read module file: %s", module_file)
             return True
         return False
@@ -336,8 +344,8 @@ class SolarArray(pv.pvsystem.Array, Component):
         return params
 
     # noinspection PyProtectedMember, PyUnresolvedReferences
-    def _infer_temperature_model_params(self) -> dict:
-        params = self._read_temperature_model_params(self.configs)
+    def _infer_temperature_model_params(self, configs: Configurations) -> dict:  # noqa
+        params = self._read_temperature_model_params(configs)
         if len(params) > 0:
             self._logger.debug("Extracted temperature model parameters from config file")
             return params
@@ -395,20 +403,20 @@ class SolarArray(pv.pvsystem.Array, Component):
         return params
 
     # noinspection PyProtectedMember, PyUnresolvedReferences
-    def _infer_array_losses_params(self) -> dict:
-        params = self._read_array_losses_params(self.configs)
+    def _infer_array_losses_params(self, configs: Configurations) -> dict:
+        params = self._read_array_losses_params(configs)
         if len(params) > 0:
             self._logger.debug("Extracted array losses model parameters from config file")
 
         return params
 
-    def _infer_shading_losses_params(self) -> Optional[Dict[str, Any]]:
+    def _infer_shading_losses_params(self, configs: Configurations) -> Optional[Dict[str, Any]]:
         shading = {}
-        shading_file = os.path.join(self.configs.dirs.conf, self.key.replace("array", "shading") + ".conf")
+        shading_file = os.path.join(configs.dirs.conf, self.key.replace("array", "shading") + ".conf")
         if not os.path.isfile(shading_file):
-            shading_file = os.path.join(self.configs.dirs.conf, "shading.conf")
+            shading_file = os.path.join(configs.dirs.conf, "shading.conf")
         if os.path.isfile(shading_file):
-            shading = Configurations.load(shading_file, **self.configs.dirs.encode())
+            shading = Configurations.load(shading_file, **configs.dirs.encode())
         return shading
 
     def pvwatts_losses(self, solar_position: pd.DataFrame) -> dict:
