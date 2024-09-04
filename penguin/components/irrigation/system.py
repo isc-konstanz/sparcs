@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.components.irrigation.system
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+penguin.components.irrigation.system
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 """
+
 from __future__ import annotations
 
 import glob
@@ -55,7 +56,7 @@ class IrrigationSystem(Component):
                     series_file,
                     **series_dirs,
                     **series_defaults,
-                    require=False
+                    require=False,
                 )
                 series_configs.update(series_section)
                 series_configs.set("key", series_key)
@@ -73,7 +74,7 @@ class IrrigationSystem(Component):
             series_configs = Configurations.load(
                 series_file,
                 **series_dirs,
-                **series_defaults
+                **series_defaults,
             )
             series_configs.set("key", series_key)
 

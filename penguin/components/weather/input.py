@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.input
-    ~~~~~~~~~~~~~
+penguin.input
+~~~~~~~~~~~~~
 
 
 """
+
 from __future__ import annotations
 
 from pvlib import atmosphere
@@ -137,8 +138,10 @@ def direct_diffuse_from_global_irradiance(solar_position, ghi, **kwargs):
 
     dhi = ghi - dni * np.cos(np.radians(solar_position["zenith"]))
 
-    return (_fill_irradiance(dhi),
-            _fill_irradiance(dni))
+    return (
+        _fill_irradiance(dhi),
+        _fill_irradiance(dni),
+    )
 
 
 # noinspection PyShadowingNames
@@ -194,8 +197,6 @@ def _cloud_cover_to_ghi_linear(cloud_cover, ghi_clear, offset=35):
         GHI under clear sky conditions.
     offset: numeric, default 35
         Determines the minimum GHI.
-    kwargs
-        Not used.
     Returns
     -------
     ghi: numeric

@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.components.solar.system
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+penguin.components.solar.system
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 """
+
 from __future__ import annotations
 
 import glob
@@ -100,6 +101,7 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
 
         def _add_channel(key: str):
             from penguin.constants import COLUMNS
+
             channel = {}
             if key in COLUMNS:
                 channel["name"] = COLUMNS[key]
@@ -128,7 +130,7 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
                 array_file,
                 **array_dirs,
                 **configs,
-                require=False
+                require=False,
             )
             array = SolarArray(self, key="array", name=f"{self.name} Array")
             array.configure(array_configs)
@@ -148,7 +150,7 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
                     array_file,
                     **array_dirs,
                     **array_defaults,
-                    require=False
+                    require=False,
                 )
                 array_configs.update(arrays_section, replace=False)
 
@@ -165,7 +167,7 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
             array_configs = Configurations.load(
                 array_file,
                 **array_dirs,
-                **array_defaults
+                **array_defaults,
             )
             array = SolarArray(self, key=array_key, name=f"{self.name} {array_key.title()}")
             array.configure(array_configs)

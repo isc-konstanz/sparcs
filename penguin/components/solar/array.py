@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.components.solar.array
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+penguin.components.solar.array
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-    This module provides the :class:`penguin.SolarArray`, containing information about orientation
-    and datasheet parameters of a specific photovoltaic installation.
+This module provides the :class:`penguin.SolarArray`, containing information about orientation
+and datasheet parameters of a specific photovoltaic installation.
 
 """
+
 from __future__ import annotations
 
 import os
@@ -122,19 +123,23 @@ class SolarArray(pv.pvsystem.Array, Component):
         self.module_orientation = Orientation[_module_orientation]
         if self.module_orientation == Orientation.PORTRAIT:
             self.module_width = self.module_parameters["Width"] + self.module_row_gap
-            self.module_length = (self.module_parameters["Length"] * self.modules_stacked +
-                                  self.module_stack_gap * (self.modules_stacked - 1))
-
+            self.module_length = (
+                self.modules_stacked * self.module_parameters["Length"]
+                + (self.modules_stacked - 1) * self.module_stack_gap
+            )
         elif self.module_orientation == Orientation.LANDSCAPE:
             self.module_width = self.module_parameters["Length"] + self.module_row_gap
-            self.module_length = (self.module_parameters["Width"] * self.modules_stacked +
-                                  self.module_stack_gap * (self.modules_stacked - 1))
+            self.module_length = (
+                self.modules_stacked * self.module_parameters["Width"]
+                + (self.modules_stacked - 1) * self.module_stack_gap
+            )
         else:
             raise ValueError(f"Invalid module orientation to calculate length: {str(self.module_orientation)}")
 
         if self.module_transmission is None:
-            self.module_transmission = ((self.module_row_gap + self.module_stack_gap * (self.modules_stacked - 1)) /
-                                        (self.module_length * self.module_width))
+            module_gaps = self.module_row_gap + self.module_stack_gap * (self.modules_stacked - 1)
+            module_area = self.module_length * self.module_width
+            self.module_transmission = module_gaps / module_area
 
         self.row_pitch = rows.get_float("pitch", default=SolarArray.row_pitch)
         if (
@@ -182,7 +187,7 @@ class SolarArray(pv.pvsystem.Array, Component):
         params = {}
         self._module_parameters_override = False
         if not self._read_module_params(configs, params):
-            self._read_module_database(configs,params)
+            self._read_module_database(configs, params)
 
         module_params_exist = len(params) > 0
         if self._read_module_configs(configs, params) and module_params_exist:
@@ -247,7 +252,7 @@ class SolarArray(pv.pvsystem.Array, Component):
                 "I_o_ref",
                 "R_s",
                 "R_sh_ref",
-                "a_ref"
+                "a_ref",
             ]
             params_cec = [
                 "Technology",
@@ -267,7 +272,7 @@ class SolarArray(pv.pvsystem.Array, Component):
                 "I_sc_ref",
                 "alpha_sc",
                 "beta_oc",
-                "N_s"
+                "N_s",
             ]
             if self._module_parameters_override or not all(k in self.module_parameters.keys() for k in params_iv):
 

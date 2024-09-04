@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.components.weather.tmy
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+penguin.components.weather.tmy
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -55,7 +56,7 @@ class TMYWeather(Weather):
         self,
         start: pd.Timestamp | dt.datetime = None,
         end: pd.Timestamp | dt.datetime = None,
-        **kwargs
+        **kwargs,
     ) -> pd.DataFrame:
         """
         Retrieves the weather data for a specified time interval

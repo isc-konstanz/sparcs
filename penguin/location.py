@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.location
-    ~~~~~~~~~~~~~~~~
+penguin.location
+~~~~~~~~~~~~~~~~
 
 
 """
+
 from __future__ import annotations
 
 import datetime as dt

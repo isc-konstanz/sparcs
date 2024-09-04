@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.components.weather.weather
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+penguin.components.weather.weather
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -16,7 +17,7 @@ from pvlib import atmosphere
 import pandas as pd
 from loris.components import register_component_type
 from loris.components.weather import Weather, WeatherException, WeatherMeta
-from loris.core import Configurations, Context
+from loris.core import Configurations
 from penguin.components.weather.input import (
     direct_diffuse_from_global_irradiance,
     direct_normal_from_global_diffuse_irradiance,
@@ -27,19 +28,20 @@ from penguin.components.weather.input import (
 from penguin.location import Location, LocationUnavailableException
 
 
-class WeatherValidatorMeta(WeatherMeta):
+class ValidatedWeatherMeta(WeatherMeta):
     # noinspection PyTypeChecker
     def __call__(cls, *args, **kwargs) -> Weather:
         weather = super().__call__(*args, **kwargs)
         weather._get_weather = weather.get
-        weather.get = types.MethodType(WeatherValidator.get, weather)
-        weather.validate = types.MethodType(WeatherValidator.validate, weather)
-        weather.localize = types.MethodType(WeatherValidator.localize, weather)
+        weather.get = types.MethodType(ValidatedWeather.get, weather)
+        weather.validate = types.MethodType(ValidatedWeather.validate, weather)
+        weather.localize = types.MethodType(ValidatedWeather.localize, weather)
         return weather
 
     # noinspection PyShadowingBuiltins
     def _get_class(cls: Type[Weather], type: str) -> Type[Weather]:
         from penguin.components.weather.file import EPWWeather, TMYWeather
+
         if type == "epw":
             return EPWWeather
         elif type == "tmy":
@@ -50,7 +52,7 @@ class WeatherValidatorMeta(WeatherMeta):
 
 # noinspection SpellCheckingInspection
 @register_component_type(replace=True)
-class WeatherValidator(Weather, metaclass=WeatherValidatorMeta):
+class ValidatedWeather(Weather, metaclass=ValidatedWeatherMeta):
     # noinspection PyShadowingNames, PyProtectedMember
     def localize(self, configs: Configurations) -> None:
         if configs.enabled and all(k in configs for k in ["latitude", "longitude"]):
@@ -86,10 +88,8 @@ class WeatherValidator(Weather, metaclass=WeatherValidatorMeta):
                 weather[column] = weather[column].combine_first(data)
 
         if not assert_columns(Weather.PRESSURE_SEA):
-            insert_column(Weather.PRESSURE_SEA, pd.Series(
-                index=weather.index,
-                data=atmosphere.alt2pres(self.location.altitude)
-            ))
+            pressure = pd.Series(index=weather.index, data=atmosphere.alt2pres(self.location.altitude))
+            insert_column(Weather.PRESSURE_SEA, pressure)
 
         solar_position = self.location.get_solarposition(weather.index, pressure=weather[Weather.PRESSURE_SEA])
 
