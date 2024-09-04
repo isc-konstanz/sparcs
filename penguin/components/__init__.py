@@ -27,6 +27,6 @@ from .solar import (  # noqa: F401
 
 from . import irrigation  # noqa: F401
 from .irrigation import (  # noqa: F401
-    IrrigationArray,
+    IrrigationSeries,
     IrrigationSystem,
 )

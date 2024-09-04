@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.components.irrigation.array
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    penguin.components.irrigation.series
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 """
@@ -12,8 +12,8 @@ from loris.components import Component
 
 
 # noinspection SpellCheckingInspection
-class IrrigationArray(Component):
-    TYPE: str = "irrig_array"
+class IrrigationSeries(Component):
+    TYPE: str = "irr_series"
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
