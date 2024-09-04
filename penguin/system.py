@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.system
-    ~~~~~~~~~~~~~~
+penguin.system
+~~~~~~~~~~~~~~
 
 
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -12,17 +13,18 @@ from typing import Optional
 
 import loris
 import pandas as pd
-from loris import ComponentException, Configurations
-from penguin import Location, SolarSystem, IrrigationSystem
+from loris import ChannelState, ComponentException, Configurations
+from penguin import IrrigationSystem, Location, SolarSystem
 
 
 class System(loris.System):
-    POWER_EL:      str = "el_power"
-    POWER_EL_IMP:  str = "el_import_power"
-    POWER_EL_EXP:  str = "el_export_power"
-    POWER_TH:      str = "th_power"
-    POWER_TH_HT:   str = "th_ht_power"
-    POWER_TH_DOM:  str = "th_dom_power"
+    # fmt: off
+    POWER_EL:       str = "el_power"
+    POWER_EL_IMP:   str = "el_import_power"
+    POWER_EL_EXP:   str = "el_export_power"
+    POWER_TH:       str = "th_power"
+    POWER_TH_HT:    str = "th_ht_power"
+    POWER_TH_DOM:   str = "th_dom_power"
 
     ENERGY_EL:      str = "el_energy"
     ENERGY_EL_IMP:  str = "el_import_energy"
@@ -30,6 +32,7 @@ class System(loris.System):
     ENERGY_TH:      str = "th_energy"
     ENERGY_TH_HT:   str = "th_ht_energy"
     ENERGY_TH_DOM:  str = "th_dom_energy"
+    # fmt: on
 
     _location: Optional[Location] = None
 
@@ -64,7 +67,7 @@ class System(loris.System):
         self,
         start: pd.Timestamp | dt.datetime = None,
         end: pd.Timestamp | dt.datetime = None,
-        **kwargs
+        **kwargs,
     ) -> pd.DataFrame:
         try:
             weather = self.weather.get(start, end, validate=True, **kwargs)
@@ -74,7 +77,8 @@ class System(loris.System):
                 result.loc[:, [SolarSystem.POWER, SolarSystem.POWER_DC]] = 0.0
                 for pv in self.get_all(SolarSystem.TYPE):
                     pv_result = pv.run(weather)
-                    result[[SolarSystem.POWER, SolarSystem.POWER_DC]] += pv_result[[SolarSystem.POWER, SolarSystem.POWER_DC]].abs()
+                    pv_columns = [SolarSystem.POWER, SolarSystem.POWER_DC]
+                    result[pv_columns] += pv_result[pv_columns].abs()
 
                 pv_power_channel = self.data[SolarSystem.POWER_EST]
                 pv_power = result[SolarSystem.POWER]

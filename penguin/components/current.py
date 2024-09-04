@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.components.current
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~
+penguin.components.current
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 """
+
 from loris.components import Component, register_component_type
 
 

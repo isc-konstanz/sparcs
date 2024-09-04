@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.components.irrigation
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+penguin.components.irrigation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 """
 
-from .array import IrrigationArray  # noqa: F401
+from .series import IrrigationSeries  # noqa: F401
 from .system import IrrigationSystem  # noqa: F401
 
 try:

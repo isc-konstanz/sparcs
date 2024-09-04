@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.components.weather.epw
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+penguin.components.weather.epw
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -97,7 +98,7 @@ class EPWWeather(Weather):
         self,
         start: pd.Timestamp | dt.datetime = None,
         end: pd.Timestamp | dt.datetime = None,
-        **kwargs
+        **kwargs,
     ) -> pd.DataFrame:
         """
         Retrieves the weather data for a specified time interval

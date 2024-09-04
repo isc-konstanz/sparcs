@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.components
-    ~~~~~~~~~~~~~~~~~~
+penguin.components
+~~~~~~~~~~~~~~~~~~
 
 
 """
 
 from . import weather  # noqa: F401
-from .weather import Weather
+from .weather import Weather  # noqa: F401
 
 from .current import (  # noqa: F401
     DirectCurrent,
@@ -27,6 +27,6 @@ from .solar import (  # noqa: F401
 
 from . import irrigation  # noqa: F401
 from .irrigation import (  # noqa: F401
-    IrrigationArray,
+    IrrigationSeries,
     IrrigationSystem,
 )

@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.solar.db
-    ~~~~~~~~~~~~~~~~
+penguin.solar.db
+~~~~~~~~~~~~~~~~
 
 
 """
+
 import json
+import logging
 import os
 import shutil
 import time
@@ -17,6 +19,7 @@ from loris import Configurations
 class SolarDatabase(ABC):
     # noinspection PyShadowingBuiltins
     def __init__(self, configs: Configurations, type):
+        self._logger = logging.getLogger(__name__)
         self._lib_dir = os.path.join(configs.dirs.lib, type)
 
     def _parse_file(self, key: str, sub_dir: str = ""):
@@ -34,7 +37,7 @@ class SolarDatabase(ABC):
     def _read(path, file):
         file_path = os.path.join(path, file)
         if not os.path.isfile(file_path):
-            raise IOError("Unable to locate module file %s".format(file_path))
+            raise IOError(f"Unable to locate module file {file_path}")
 
         with open(file_path, encoding="utf-8") as file:
             return json.load(file)

@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-    penguin
-    ~~~~~~~
+penguin
+~~~~~~~
 
-    This repository provides a set of python functions and scripts to calculate the
-    energy generation and provide further utility for photovoltaic systems.
+This repository provides a set of python functions and scripts to calculate the
+energy generation and provide further utility for photovoltaic systems.
 
 """
+
 from . import _version
+
 __version__ = _version.get_versions().get("version")
 del _version
 
@@ -17,7 +19,7 @@ from . import components  # noqa: F401
 from .components import (  # noqa: F401
     SolarArray,
     SolarSystem,
-    IrrigationArray,
+    IrrigationSeries,
     IrrigationSystem,
     ElectricVehicle,
     ElectricalEnergyStorage,

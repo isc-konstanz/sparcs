@@ -1,12 +1,13 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-    penguin
-    ~~~~~~~
+penguin
+~~~~~~~
 
-    Legacy compatibility setup script for the penguin package.
+Legacy compatibility setup script for the penguin package.
 
 """
+
 import versioneer
 from setuptools import setup
 
