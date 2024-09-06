@@ -31,7 +31,7 @@ class Model(Configurator, ModelChain):
     @classmethod
     def load(cls, pvsystem: SolarSystem, override_file: str = "model.conf", section: str = "model") -> Model:
         override_dir = pvsystem.configs.path.replace(".conf", ".d")
-        configs_dirs = pvsystem.configs.dirs.encode()
+        configs_dirs = pvsystem.configs.dirs.to_dict()
         configs_dirs["conf_dir"] = override_dir
 
         configs = Configurations.load(

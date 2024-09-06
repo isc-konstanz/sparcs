@@ -17,7 +17,7 @@ import pvlib as pv
 import pandas as pd
 from loris import ChannelState, ConfigurationException, Configurations, Context
 from loris.components import Component, ComponentException, register_component_type
-from loris.util import parse_id
+from loris.util import parse_key
 from penguin.components.current import DirectCurrent
 from penguin.components.solar.array import SolarArray
 from penguin.components.solar.db import InverterDatabase
@@ -120,7 +120,7 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
 
     def _load_arrays(self, configs: Configurations):
         array_dir = configs.path.replace(".conf", ".d")
-        array_dirs = configs.dirs.encode()
+        array_dirs = configs.dirs.to_dict()
         array_dirs["conf_dir"] = array_dir
         if "mounting" in configs and len(configs.get_section("mounting")) > 0:
             # TODO: verify parameter availability in 'General' by keys
@@ -144,7 +144,7 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
             array_defaults.update(arrays_section)
 
             for array_key, array_section in arrays_configs.items():
-                array_key = parse_id(array_key)
+                array_key = parse_key(array_key)
                 array_file = f"{array_key}.conf"
                 array_configs = Configurations.load(
                     array_file,
@@ -160,7 +160,7 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
 
         for array_path in glob.glob(os.path.join(array_dir, "array*.conf")):
             array_file = os.path.basename(array_path)
-            array_key = parse_id(array_file.rsplit(".", maxsplit=1)[0])
+            array_key = parse_key(array_file.rsplit(".", maxsplit=1)[0])
             if any([array_key == a.key for a in self.arrays]):
                 continue
 

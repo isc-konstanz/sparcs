@@ -332,7 +332,7 @@ class SolarArray(pv.pvsystem.Array, Component):
         if not os.path.isfile(os.path.join(configs.dirs.conf, module_file)):
             module_file = "module.conf"
         if os.path.isfile(os.path.join(configs.dirs.conf, module_file)):
-            _update_parameters(params, Configurations.load(module_file, **configs.dirs.encode()))
+            _update_parameters(params, Configurations.load(module_file, **configs.dirs.to_dict()))
             self._logger.debug("Read module file: %s", module_file)
             return True
         return False
@@ -421,7 +421,7 @@ class SolarArray(pv.pvsystem.Array, Component):
         if not os.path.isfile(shading_file):
             shading_file = os.path.join(configs.dirs.conf, "shading.conf")
         if os.path.isfile(shading_file):
-            shading = Configurations.load(shading_file, **configs.dirs.encode())
+            shading = Configurations.load(shading_file, **configs.dirs.to_dict())
         return shading
 
     def pvwatts_losses(self, solar_position: pd.DataFrame) -> dict:
