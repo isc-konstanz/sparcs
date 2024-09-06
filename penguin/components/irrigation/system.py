@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 from loris import ChannelState, Configurations, Context
 from loris.components import Component, register_component_type
-from loris.util import parse_id
+from loris.util import parse_key
 from penguin.components.irrigation import IrrigationSeries
 
 
@@ -40,7 +40,7 @@ class IrrigationSystem(Component):
 
     def _load_series(self, configs: Configurations):
         series_dir = configs.path.replace(".conf", ".d")
-        series_dirs = configs.dirs.encode()
+        series_dirs = configs.dirs.to_dict()
         series_dirs["conf_dir"] = series_dir
         series_defaults = {}
         if "series" in configs:
@@ -50,7 +50,7 @@ class IrrigationSystem(Component):
             series_defaults.update(series_section)
 
             for series_key, series_section in series_configs.items():
-                series_key = parse_id(series_key)
+                series_key = parse_key(series_key)
                 series_file = f"{series_key}.conf"
                 series_configs = Configurations.load(
                     series_file,
@@ -67,7 +67,7 @@ class IrrigationSystem(Component):
 
         for series_path in glob.glob(os.path.join(series_dir, "series*.conf")):
             series_file = os.path.basename(series_path)
-            series_key = parse_id(series_file.rsplit(".", maxsplit=1)[0])
+            series_key = parse_key(series_file.rsplit(".", maxsplit=1)[0])
             if any([series_key == a.key for a in self.series]):
                 continue
 
