@@ -6,7 +6,7 @@ penguin.components.current
 
 """
 
-from loris.components import Component, register_component_type
+from lori.components import Component, register_component_type
 
 
 @register_component_type

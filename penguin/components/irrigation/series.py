@@ -8,8 +8,8 @@ penguin.components.irrigation.series
 
 from __future__ import annotations
 
-from loris import Configurations
-from loris.components import Component
+from lori import Configurations
+from lori.components import Component
 
 
 # noinspection SpellCheckingInspection

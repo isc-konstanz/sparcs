@@ -15,9 +15,9 @@ from typing import Dict, List, Mapping
 import pvlib as pv
 
 import pandas as pd
-from loris import ChannelState, ConfigurationException, Configurations, Context
-from loris.components import Component, ComponentException, register_component_type
-from loris.util import parse_key
+from lori import ChannelState, ConfigurationException, Configurations, Context
+from lori.components import Component, ComponentException, register_component_type
+from lori.util import parse_key
 from penguin.components.current import DirectCurrent
 from penguin.components.solar.array import SolarArray
 from penguin.components.solar.db import InverterDatabase

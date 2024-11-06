@@ -15,9 +15,9 @@ from typing import Optional, Type
 from pvlib import atmosphere
 
 import pandas as pd
-from loris.components import register_component_type
-from loris.components.weather import Weather, WeatherException, WeatherMeta
-from loris.core import Configurations
+from lori.components import register_component_type
+from lori.components.weather import Weather, WeatherException, WeatherMeta
+from lori.core import Configurations
 from penguin.components.weather.input import (
     direct_diffuse_from_global_irradiance,
     direct_normal_from_global_diffuse_irradiance,
