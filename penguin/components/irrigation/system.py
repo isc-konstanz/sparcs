@@ -14,9 +14,9 @@ from typing import List
 
 import numpy as np
 import pandas as pd
-from loris import ChannelState, Configurations, Context
-from loris.components import Component, register_component_type
-from loris.util import parse_key
+from lori import ChannelState, Configurations, Context
+from lori.components import Component, register_component_type
+from lori.util import parse_key
 from penguin.components.irrigation import IrrigationSeries
 
 

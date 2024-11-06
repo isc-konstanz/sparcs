@@ -11,13 +11,13 @@ from __future__ import annotations
 import datetime as dt
 from typing import Optional
 
-import loris
+import lori
 import pandas as pd
-from loris import ChannelState, ComponentException, Configurations
+from lori import ChannelState, ComponentException, Configurations
 from penguin import IrrigationSystem, Location, SolarSystem
 
 
-class System(loris.System):
+class System(lori.System):
     # fmt: off
     POWER_EL:       str = "el_power"
     POWER_EL_IMP:   str = "el_import_power"

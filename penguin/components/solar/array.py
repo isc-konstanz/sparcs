@@ -24,8 +24,8 @@ from pvlib.pvsystem import FixedMount, SingleAxisTrackerMount
 from pvlib.tools import _build_kwargs
 
 import pandas as pd
-from loris import ConfigurationException, Configurations, Context
-from loris.components import Component, register_component_type
+from lori import ConfigurationException, Configurations, Context
+from lori.components import Component, register_component_type
 from penguin.components.solar.db import ModuleDatabase
 
 

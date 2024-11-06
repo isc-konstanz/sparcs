@@ -13,7 +13,7 @@ import shutil
 import time
 from abc import ABC, abstractmethod
 
-from loris import Configurations
+from lori import Configurations
 
 
 class SolarDatabase(ABC):

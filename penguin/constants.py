@@ -7,7 +7,7 @@ penguin.constants
 """
 # fmt: off
 
-from loris.components.weather.constants import WEATHER
+from lori.components.weather.constants import WEATHER
 from penguin.components.constants import ENERGY as COMPONENT_ENERGY
 from penguin.components.constants import POWER as COMPONENT_POWER
 from penguin.components.constants import STATES

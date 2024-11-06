@@ -11,7 +11,7 @@ from __future__ import annotations
 from pvlib.modelchain import ModelChain
 
 import pandas as pd
-from loris import Configurations, Configurator, Location
+from lori import Configurations, Configurator, Location
 from penguin import SolarSystem
 
 # noinspection SpellCheckingInspection
