@@ -11,7 +11,7 @@ from __future__ import annotations
 import dash_bootstrap_components as dbc
 from dash import Input, Output, callback, dcc, html
 
-from loris.app.view.pages import (
+from lori.app.view.pages import (
     ComponentGroup,
     ComponentPage,
     PageLayout,
