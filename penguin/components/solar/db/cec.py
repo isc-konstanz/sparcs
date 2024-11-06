@@ -13,7 +13,7 @@ from pvlib import pvsystem
 
 import numpy as np
 import pandas as pd
-from loris import Configurations
+from lori import Configurations
 
 from .base import SolarDatabase
 

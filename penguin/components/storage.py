@@ -7,8 +7,8 @@ penguin.components.storage
 """
 
 import pandas as pd
-from loris.components import Component, register_component_type
-from loris.core import Configurations
+from lori.components import Component, register_component_type
+from lori.core import Configurations
 
 
 @register_component_type

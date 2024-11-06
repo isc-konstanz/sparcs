@@ -31,7 +31,7 @@ from .system import System  # noqa: F401
 from . import model  # noqa: F401
 from .model import Model  # noqa: F401
 
-from loris import Application  # noqa: F401
+from lori import Application  # noqa: F401
 
 
 def load(name: str = "Penguin", factory=System, **kwargs) -> Application:

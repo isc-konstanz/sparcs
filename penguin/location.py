@@ -13,12 +13,12 @@ from typing import Optional
 
 import pvlib as pv
 
-import loris
+import lori
 import pytz
-from loris.location import LocationException, LocationUnavailableException  # noqa: F401
+from lori.location import LocationException, LocationUnavailableException  # noqa: F401
 
 
-class Location(loris.Location, pv.location.Location):
+class Location(lori.Location, pv.location.Location):
     def __init__(
         self,
         latitude: float,

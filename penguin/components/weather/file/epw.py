@@ -17,7 +17,7 @@ from pvlib.iotools import read_epw
 
 import numpy as np
 import pandas as pd
-from loris import Configurations
+from lori import Configurations
 from penguin import Location
 from penguin.components.weather import Weather
 
