@@ -9,8 +9,9 @@ penguin.application
 try:
     from .view import (  # noqa: F401
         IrrigationPage,
-        IrrigationGroup,
         WeatherPage,
     )
 except ImportError:
     pass
+
+from lori import Application  # noqa: F401
