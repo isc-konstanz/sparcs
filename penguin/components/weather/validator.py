@@ -16,8 +16,9 @@ from pvlib import atmosphere
 
 import pandas as pd
 from lori.components import register_component_type
-from lori.components.weather import Weather, WeatherException, WeatherMeta
+from lori.components.weather import WeatherProvider, WeatherProviderMeta
 from lori.core import Configurations
+from lori.weather import Weather, WeatherException
 from penguin.components.weather.input import (
     direct_diffuse_from_global_irradiance,
     direct_normal_from_global_diffuse_irradiance,
@@ -27,19 +28,21 @@ from penguin.components.weather.input import (
 )
 from penguin.location import Location, LocationUnavailableException
 
+TYPE: str = "weather"
 
-class ValidatedWeatherMeta(WeatherMeta):
+
+class WeatherValidatorMeta(WeatherProviderMeta):
     # noinspection PyTypeChecker
-    def __call__(cls, *args, **kwargs) -> Weather:
+    def __call__(cls, *args, **kwargs) -> WeatherProvider:
         weather = super().__call__(*args, **kwargs)
-        weather._get_weather = weather.get
-        weather.get = types.MethodType(ValidatedWeather.get, weather)
-        weather.validate = types.MethodType(ValidatedWeather.validate, weather)
-        weather.localize = types.MethodType(ValidatedWeather.localize, weather)
+        weather._WeatherValidator__get = weather.get
+        weather.get = types.MethodType(WeatherValidator.get, weather)
+        weather.validate = types.MethodType(WeatherValidator.validate, weather)
+        weather.localize = types.MethodType(WeatherValidator.localize, weather)
         return weather
 
     # noinspection PyShadowingBuiltins
-    def _get_class(cls: Type[Weather], type: str) -> Type[Weather]:
+    def _get_class(cls: Type[WeatherProvider], type: str) -> Type[WeatherProvider]:
         from penguin.components.weather.file import EPWWeather, TMYWeather
 
         if type == "epw":
@@ -51,12 +54,22 @@ class ValidatedWeatherMeta(WeatherMeta):
 
 
 # noinspection SpellCheckingInspection
-@register_component_type(replace=True)
-class ValidatedWeather(Weather, metaclass=ValidatedWeatherMeta):
+@register_component_type(TYPE, replace=True)
+class WeatherValidator(WeatherProvider, metaclass=WeatherValidatorMeta):
+    VALIDATED = [
+        Weather.GHI,
+        Weather.DHI,
+        Weather.DNI,
+        Weather.TEMP_AIR,
+        Weather.TEMP_DEW_POINT,
+        Weather.HUMIDITY_REL,
+        Weather.WIND_SPEED,
+    ]
+
     # noinspection PyShadowingNames, PyProtectedMember
     def localize(self, configs: Configurations) -> None:
         if configs.enabled and all(k in configs for k in ["latitude", "longitude"]):
-            self._location = Location(
+            self.location = Location(
                 configs.get_float("latitude"),
                 configs.get_float("longitude"),
                 timezone=configs.get("timezone", default="UTC"),
@@ -66,9 +79,9 @@ class ValidatedWeather(Weather, metaclass=ValidatedWeatherMeta):
             )
         else:
             try:
-                self._location = self.context.location
-                if not isinstance(self._location, Location):
-                    raise WeatherException(f"Invalid location type for weather '{self.key}': {type(self._location)}")
+                self.location = self.context.location
+                if not isinstance(self.location, Location):
+                    raise WeatherException(f"Invalid location type for weather '{self.key}': {type(self.location)}")
             except (LocationUnavailableException, AttributeError):
                 raise WeatherException(f"Missing location for weather '{self.key}'")
 
@@ -167,7 +180,7 @@ class ValidatedWeather(Weather, metaclass=ValidatedWeatherMeta):
         validate: bool = False,
         **kwargs,
     ) -> pd.DataFrame:
-        weather = self._get_weather(start, end, **kwargs)
+        weather = self.__get(start, end, **kwargs)
         if validate:
             self.validate(weather)
 
