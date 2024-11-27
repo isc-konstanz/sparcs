@@ -25,7 +25,7 @@ from pvlib.tools import _build_kwargs
 
 import pandas as pd
 from lori import ConfigurationException, Configurations, Context
-from lori.components import Component, register_component_type
+from lori.components import Component
 from penguin.components.solar.db import ModuleDatabase
 
 
@@ -33,12 +33,19 @@ class Orientation(Enum):
     PORTRAIT = "portrait"
     LANDSCAPE = "landscape"
 
+    @classmethod
+    def from_str(cls, s) -> Orientation:
+        s = s.upper()
+        if s == "PORTRAIT":
+            return cls.PORTRAIT
+        elif s == "LANDSCAPE":
+            return cls.LANDSCAPE
+        else:
+            raise NotImplementedError
+
 
 # noinspection SpellCheckingInspection
-@register_component_type
 class SolarArray(pv.pvsystem.Array, Component):
-    TYPE: str = "pv_array"
-
     SECTIONS = ["rows", "mounting", "tracking"]
 
     POWER_AC: str = "p_ac"
@@ -79,7 +86,7 @@ class SolarArray(pv.pvsystem.Array, Component):
         key: Optional[str] = None,
         name: Optional[str] = None,
     ) -> None:
-        super(pv.pvsystem.Array, self).__init__(context, configs=configs, key=key, name=name)
+        super(pv.pvsystem.Array, self).__init__(context=context, configs=configs, key=key, name=name)
 
     def __repr__(self) -> str:
         return Component.__repr__(self)
@@ -119,8 +126,7 @@ class SolarArray(pv.pvsystem.Array, Component):
 
         self.module_transmission = rows.get_float("module_transmission", default=SolarArray.module_transmission)
 
-        _module_orientation = configs.get("orientation", default="portrait").upper()
-        self.module_orientation = Orientation[_module_orientation]
+        self.module_orientation = Orientation.from_str(configs.get("orientation", default="portrait"))
         if self.module_orientation == Orientation.PORTRAIT:
             self.module_width = self.module_parameters["Width"] + self.module_row_gap
             self.module_length = (

@@ -12,19 +12,16 @@ import glob
 import os
 from typing import List
 
-import numpy as np
 import pandas as pd
 from lori import ChannelState, Configurations, Context
 from lori.components import Component, register_component_type
-from lori.util import parse_key
+from lori.util import validate_key
 from penguin.components.irrigation import IrrigationSeries
 
 
-@register_component_type("irrigation", "watering")
+@register_component_type("irr", "irrigation", "watering")
 # noinspection SpellCheckingInspection
 class IrrigationSystem(Component):
-    TYPE: str = "irr"
-
     series: List[IrrigationSeries]
 
     def __init__(self, context: Context, configs: Configurations) -> None:
@@ -50,7 +47,7 @@ class IrrigationSystem(Component):
             series_defaults.update(series_section)
 
             for series_key, series_section in series_configs.items():
-                series_key = parse_key(series_key)
+                series_key = validate_key(series_key)
                 series_file = f"{series_key}.conf"
                 series_configs = Configurations.load(
                     series_file,
@@ -67,7 +64,7 @@ class IrrigationSystem(Component):
 
         for series_path in glob.glob(os.path.join(series_dir, "series*.conf")):
             series_file = os.path.basename(series_path)
-            series_key = parse_key(series_file.rsplit(".", maxsplit=1)[0])
+            series_key = validate_key(series_file.rsplit(".", maxsplit=1)[0])
             if any([series_key == a.key for a in self.series]):
                 continue
 
@@ -82,14 +79,17 @@ class IrrigationSystem(Component):
             series.configure(series_configs)
             self.series.append(series)
 
-    def run(self, weather: pd.DataFrame) -> pd.DataFrame:
-        series_humidity = [i.data.humidity for i in self.series if i.data.humidity.is_valid()]
-        if len(series_humidity) > 0:
-            self.data.humidity_mean.set(
-                np.array([t.timestamp for t in series_humidity]).max(),
-                np.array([t.value for t in series_humidity]).mean(),
-            )
+    def activate(self) -> None:
+        super().activate()
+        humidity_channels = [s.data.humidity for s in self.series]
+        self.data.register(self._humidity_callback, *humidity_channels, how="all", unique=True)
+
+    def _humidity_callback(self, data: pd.DataFrame) -> None:
+        humidity = data[[c for c in data.columns if "humidity" in c]]
+        if not humidity.empty:
+            humidity_mean = humidity.ffill().bfill().mean(axis="columns")
+            if len(humidity_mean) == 1:
+                humidity_mean = humidity_mean.iloc[0]
+            self.data.humidity_mean.value = humidity_mean
         else:
             self.data.humidity_mean.state = ChannelState.NOT_AVAILABLE
-
-        return pd.DataFrame()

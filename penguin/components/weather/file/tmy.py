@@ -50,7 +50,7 @@ class TMYWeather(Weather):
         else:
             raise ValueError("Invalid TMY version: {}".format(self.version))
 
-        self._location = Location.from_epw(self._meta)
+        self.location = Location.from_epw(self._meta)
 
     def get(
         self,

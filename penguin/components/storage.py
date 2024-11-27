@@ -11,10 +11,8 @@ from lori.components import Component, register_component_type
 from lori.core import Configurations
 
 
-@register_component_type
+@register_component_type("ees")
 class ElectricalEnergyStorage(Component):
-    TYPE = "ees"
-
     STATE_OF_CHARGE = "ees_soc"
 
     POWER_CHARGE = "ees_charge_power"
@@ -85,10 +83,8 @@ class ElectricalEnergyStorage(Component):
         return data
 
 
-@register_component_type
+@register_component_type("tes")
 class ThermalEnergyStorage(Component):
-    TYPE: str = "tes"
-
     TEMPERATURE: str = "tes_temp"
     TEMPERATURE_HEATING: str = "tes_ht_temp"
     TEMPERATURE_DOMESTIC: str = "tes_dom_temp"

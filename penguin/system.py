@@ -13,8 +13,8 @@ from typing import Optional
 
 import lori
 import pandas as pd
-from lori import ChannelState, ComponentException, Configurations
-from penguin import IrrigationSystem, Location, SolarSystem
+from lori import ChannelState, ComponentException, Configurations, WeatherUnavailableException
+from penguin import Location, IrrigationSystem, SolarSystem, Weather
 
 
 class System(lori.System):
@@ -38,7 +38,7 @@ class System(lori.System):
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
-        if self.has_type(SolarSystem.TYPE):
+        if self.has_type(SolarSystem):
             from penguin.constants import COLUMNS
 
             self.data.add(key=SolarSystem.POWER_EST, name=COLUMNS[SolarSystem.POWER_EST], connector=None, type=float)
@@ -56,39 +56,58 @@ class System(lori.System):
         else:
             self._location = None
 
+    def activate(self) -> None:
+        super().activate()
+        if self.has_type(SolarSystem):
+            try:
+                weather_channels = self.weather.data.channels.filter(lambda c: c.key in Weather.VALIDATED)
+                if self.weather.forecast.is_enabled():
+                    weather_channels += self.weather.forecast.data.channels.filter(lambda c: c.key in Weather.VALIDATED)
+                self.data.register(self.predict_solar, *weather_channels, how="all", unique=False)
+
+            except WeatherUnavailableException:
+                pass
+
     # # noinspection PyShadowingBuiltins
     # def evaluate(self, **kwargs):
     #     from .evaluation import Evaluation
     #     eval = Evaluation(self)
     #     return eval(**kwargs)
 
-    # noinspection PyShadowingBuiltins, PyUnresolvedReferences, SpellCheckingInspection
-    def run(
+    # noinspection PyShadowingBuiltins, PyUnresolvedReferences, PyUnusedLocal
+    def predict_solar(self, weather: pd.DataFrame) -> pd.DataFrame:
+        try:
+            weather = self.weather.validate(weather)
+            result = pd.DataFrame(data=0.0, index=weather.index, columns=[SolarSystem.POWER, SolarSystem.POWER_DC])
+            result.index.name = "timestamp"
+            for solar in self.get_all(SolarSystem):
+                solar_result = solar.predict(weather)
+                solar_columns = [SolarSystem.POWER, SolarSystem.POWER_DC]
+                result[solar_columns] += solar_result[solar_columns].abs()
+
+            solar_power_channel = self.data[SolarSystem.POWER_EST]
+            solar_power = result[SolarSystem.POWER]
+            if not solar_power.empty:
+                solar_power_channel.set(solar_power.index[0], solar_power)
+            else:
+                solar_power_channel.state = ChannelState.NOT_AVAILABLE
+
+            return result
+
+        except ComponentException as e:
+            self._logger.warning(f"Unable to predict system '{self.name}' PV: {str(e)}")
+
+    # noinspection PyShadowingBuiltins, PyUnresolvedReferences
+    def predict(
         self,
         start: pd.Timestamp | dt.datetime = None,
         end: pd.Timestamp | dt.datetime = None,
         **kwargs,
     ) -> pd.DataFrame:
         try:
-            weather = self.weather.get(start, end, validate=True, **kwargs)
-            result = pd.DataFrame(columns=[], index=weather.index)
-            result.index.name = "timestamp"
-            if self.has_type(SolarSystem.TYPE):
-                result.loc[:, [SolarSystem.POWER, SolarSystem.POWER_DC]] = 0.0
-                for pv in self.get_all(SolarSystem.TYPE):
-                    pv_result = pv.run(weather)
-                    pv_columns = [SolarSystem.POWER, SolarSystem.POWER_DC]
-                    result[pv_columns] += pv_result[pv_columns].abs()
-
-                pv_power_channel = self.data[SolarSystem.POWER_EST]
-                pv_power = result[SolarSystem.POWER]
-                if not pv_power.empty:
-                    pv_power_channel.set(pv_power.index[0], pv_power)
-                else:
-                    pv_power_channel.state = ChannelState.NOT_AVAILABLE
-            for irrig in self.get_all(IrrigationSystem.TYPE):
-                irrig.run(weather)
-            return pd.concat([result, weather], axis="columns")
+            weather = self.weather.get(start, end, **kwargs)  # , validate=True, **kwargs)
+            solar = self.predict_solar(weather)
+            return pd.concat([solar, weather], axis="columns")
 
         except ComponentException as e:
             self._logger.warning(f"Unable to run system '{self.name}': {str(e)}")

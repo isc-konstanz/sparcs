@@ -14,8 +14,6 @@ from lori.components import Component
 
 # noinspection SpellCheckingInspection
 class IrrigationSeries(Component):
-    TYPE: str = "irr_series"
-
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
 
