@@ -17,7 +17,8 @@ from dash import Input, Output, callback, dcc, html
 import pandas as pd
 import pytz as tz
 from lori.application.view.pages import ComponentPage, PageLayout, register_component_page
-from lori.components.weather import WeatherForecast, WeatherProvider as Weather
+from lori.components.weather import WeatherForecast
+from lori.components.weather import WeatherProvider as Weather
 from lori.util import floor_date
 
 
