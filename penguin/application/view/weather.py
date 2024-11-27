@@ -17,18 +17,16 @@ from dash import Input, Output, callback, dcc, html
 import pandas as pd
 import pytz as tz
 from lori.application.view.pages import ComponentPage, PageLayout, register_component_page
-from lori.components.weather import Weather, WeatherForecast
+from lori.components.weather import WeatherForecast, WeatherProvider as Weather
 from lori.util import floor_date
 
 
 @register_component_page(Weather, replace=True)
 class WeatherPage(ComponentPage[Weather]):
+    # noinspection PyProtectedMember
     @property
     def forecast(self) -> WeatherForecast:
         return self._component.forecast
-
-    def has_forecast(self) -> bool:
-        return self._component.has_forecast()
 
     def create_layout(self, layout: PageLayout) -> None:
         super().create_layout(layout)
@@ -37,7 +35,7 @@ class WeatherPage(ComponentPage[Weather]):
         layout.card.append(current, focus=True)
         layout.append(dbc.Row(dbc.Col(current, width="auto")))
 
-        if self.has_forecast():
+        if self.forecast.is_enabled():
             forecast = self._build_forecast()
             layout.card.append(forecast)
             layout.append(dbc.Row(dbc.Col(forecast, width="auto")))

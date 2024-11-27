@@ -9,18 +9,14 @@ penguin.components.current
 from lori.components import Component, register_component_type
 
 
-@register_component_type
+@register_component_type("dc")
 class DirectCurrent(Component):
-    TYPE: str = "dc"
-
     POWER_DC: str = "dc_power"
     ENERGY_DC: str = "dc_energy"
 
 
-@register_component_type
+@register_component_type("ac")
 class AlternatingCurrent(Component):
-    TYPE: str = "ac"
-
     POWER_ACTIVE: str = "active_power"
     POWER_L1_ACTIVE: str = "l1_active_power"
     POWER_L2_ACTIVE: str = "l2_active_power"

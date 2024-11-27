@@ -49,7 +49,7 @@ class EPWWeather(Weather):
             if self._data[column].sum() == 0:
                 self._data.drop(column, axis=1, inplace=True)
 
-        self._location = Location.from_epw(self._meta)
+        self.location = Location.from_epw(self._meta)
 
     # noinspection PyPackageRequirements
     def _download(self, location: Location) -> None:

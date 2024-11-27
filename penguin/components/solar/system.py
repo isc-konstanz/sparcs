@@ -17,17 +17,17 @@ import pvlib as pv
 import pandas as pd
 from lori import ChannelState, ConfigurationException, Configurations, Context
 from lori.components import Component, ComponentException, register_component_type
-from lori.util import parse_key
+from lori.util import validate_key
 from penguin.components.current import DirectCurrent
 from penguin.components.solar.array import SolarArray
 from penguin.components.solar.db import InverterDatabase
 
+TYPE: str = "pv"
 
-@register_component_type("solar", "pv")
+
+@register_component_type(TYPE, "solar")
 # noinspection SpellCheckingInspection
 class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
-    TYPE: str = "pv"
-
     SECTIONS = ["model", "inverter", "arrays", *SolarArray.SECTIONS]
 
     POWER: str = f"{TYPE}_power"
@@ -59,7 +59,7 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
     losses_parameters: dict = {}
 
     def __init__(self, context: Context, configs: Configurations) -> None:  # noqa
-        super(pv.pvsystem.PVSystem, self).__init__(context, configs)
+        super(pv.pvsystem.PVSystem, self).__init__(context=context, configs=configs)
         self.arrays = []
 
     def __repr__(self) -> str:
@@ -105,8 +105,8 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
             channel = {}
             if key in COLUMNS:
                 channel["name"] = COLUMNS[key]
-            channel["column"] = key.replace(f"{SolarSystem.TYPE}_", self.key)
-            channel["value_type"] = float
+            channel["column"] = key.replace(f"{TYPE}_", self.key)
+            channel["type"] = float
             channel["connector"] = None
 
             self.data.add(key=key, **channel)
@@ -144,7 +144,7 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
             array_defaults.update(arrays_section)
 
             for array_key, array_section in arrays_configs.items():
-                array_key = parse_key(array_key)
+                array_key = validate_key(array_key)
                 array_file = f"{array_key}.conf"
                 array_configs = Configurations.load(
                     array_file,
@@ -160,7 +160,7 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
 
         for array_path in glob.glob(os.path.join(array_dir, "array*.conf")):
             array_file = os.path.basename(array_path)
-            array_key = parse_key(array_file.rsplit(".", maxsplit=1)[0])
+            array_key = validate_key(array_file.rsplit(".", maxsplit=1)[0])
             if any([array_key == a.key for a in self.arrays]):
                 continue
 
@@ -265,13 +265,14 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
         else:
             return _pvwatts_losses(self.arrays[0])
 
-    def _run(self, weather: pd.DataFrame) -> pd.DataFrame:
+    def _predict(self, weather: pd.DataFrame) -> pd.DataFrame:
         from penguin.model import Model
 
         if len(self.arrays) < 1:
-            raise ComponentException("PV system must have at least one Array.")
+            raise ComponentException(self, "PV system must have at least one Array.")
         if not all(a.is_configured() for a in self.arrays):
             raise ComponentException(
+                self,
                 "PV array configurations of this system are not valid: ",
                 ", ".join(a.name for a in self.arrays if not a.is_configured()),
             )
@@ -288,8 +289,8 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
             }
         )
 
-    def run(self, weather: pd.DataFrame) -> pd.DataFrame:
-        data = self._run(weather)
+    def predict(self, weather: pd.DataFrame) -> pd.DataFrame:
+        data = self._predict(weather)
 
         for channel in self.data.channels:
             if channel.key not in data.columns or data[channel.key].empty:

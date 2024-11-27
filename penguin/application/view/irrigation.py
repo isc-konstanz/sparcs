@@ -22,17 +22,20 @@ from lori.application.view.pages import (
 )
 from penguin.components.irrigation import IrrigationSeries, IrrigationSystem
 
+KEY = "irrigation"
+NAME = "Irrigation"
+
 
 @register_component_page(IrrigationSystem)
 class IrrigationSystemPage(ComponentGroup, ComponentPage[IrrigationSystem]):
     def __init__(self, irrigation: IrrigationSystem, *args, **kwargs) -> None:
         super().__init__(component=irrigation, *args, **kwargs)
         for series in irrigation.series:
-            self.append(IrrigationSeriesPage(series))
+            self.append(IrrigationSeriesPage(self, series))
 
     @property
     def path(self) -> str:
-        return f"/{self._component.TYPE}/{self._encode_id(self._component.key)}"
+        return f"/{KEY}/{self._encode_id(self.key)}"
 
     def create_layout(self, layout: PageLayout) -> None:
         super().create_layout(layout)
@@ -86,6 +89,9 @@ class IrrigationSystemPage(ComponentGroup, ComponentPage[IrrigationSystem]):
 
 
 class IrrigationSeriesPage(ComponentPage[IrrigationSeries]):
+    def __init__(self, system: IrrigationSystemPage, *args, **kwargs) -> None:
+        super().__init__(group=system, *args, **kwargs)
+
     def create_layout(self, layout: PageLayout) -> None:
         super().create_layout(layout)
 
@@ -120,6 +126,6 @@ class IrrigationSeriesPage(ComponentPage[IrrigationSeries]):
         )
 
 
-@register_component_group(IrrigationSystem, name="Irrigation")
+@register_component_group(IrrigationSystem, key=KEY, name=NAME)
 class IrrigationGroup(ComponentGroup[IrrigationSystem]):
     pass
