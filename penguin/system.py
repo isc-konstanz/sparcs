@@ -14,7 +14,7 @@ from typing import Optional
 import lori
 import pandas as pd
 from lori import ChannelState, ComponentException, Configurations, WeatherUnavailableException
-from penguin import Location, IrrigationSystem, SolarSystem, Weather
+from penguin import Location, SolarSystem, Weather
 
 
 class System(lori.System):
@@ -107,6 +107,7 @@ class System(lori.System):
         try:
             weather = self.weather.get(start, end, **kwargs)  # , validate=True, **kwargs)
             solar = self.predict_solar(weather)
+
             return pd.concat([solar, weather], axis="columns")
 
         except ComponentException as e:
