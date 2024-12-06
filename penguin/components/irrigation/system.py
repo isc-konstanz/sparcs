@@ -22,6 +22,8 @@ from penguin.components.irrigation import IrrigationSeries
 @register_component_type("irr", "irrigation", "watering")
 # noinspection SpellCheckingInspection
 class IrrigationSystem(Component):
+    SECTIONS = ["storage", *IrrigationSeries.SECTIONS]
+
     series: List[IrrigationSeries]
 
     def __init__(self, context: Context, configs: Configurations) -> None:
@@ -32,8 +34,12 @@ class IrrigationSystem(Component):
         super().configure(configs)
         self._load_series(configs)
 
-        self.data.add("humidity_mean", name="Humidity [%]", connector="random", type=float, min=50, max=100)
-        self.data.add("storage_level", name="Storage Level [%]", connector="random", type=float, min=0, max=1000)
+        # As % of plant available water capacity (PAWC)
+        # self.data.add("water_supply_min", name="Water supply coverage min [%]", type=float)
+        # self.data.add("water_supply_max", name="Water supply coverage max [%]", type=float)
+        self.data.add("water_supply_mean", name="Water supply coverage mean [%]", type=float)
+
+        self.data.add("storage_level", name="Storage Level [%]", type=float)
 
     def _load_series(self, configs: Configurations):
         series_dir = configs.path.replace(".conf", ".d")
@@ -55,10 +61,9 @@ class IrrigationSystem(Component):
                     **series_defaults,
                     require=False,
                 )
-                series_configs.update(series_section)
-                series_configs.set("key", series_key)
+                series_configs.update(series_section, replace=False)
 
-                series = IrrigationSeries(self, series_configs)
+                series = IrrigationSeries(self, key="series", name=f"{self.name} Series")
                 series.configure(series_configs)
                 self.series.append(series)
 
@@ -73,23 +78,31 @@ class IrrigationSystem(Component):
                 **series_dirs,
                 **series_defaults,
             )
-            series_configs.set("key", series_key)
-
-            series = IrrigationSeries(self)
+            series = IrrigationSeries(self, key=series_key, name=f"{self.name} {series_key.title()}")
             series.configure(series_configs)
             self.series.append(series)
 
+    # noinspection SpellCheckingInspection
     def activate(self) -> None:
         super().activate()
-        humidity_channels = [s.data.humidity for s in self.series]
-        self.data.register(self._humidity_callback, *humidity_channels, how="all", unique=True)
+        water_supplies = []
+        for series in self.series:
+            series.activate()
+            water_supplies.append(series.soil.data.water_supply)
 
-    def _humidity_callback(self, data: pd.DataFrame) -> None:
-        humidity = data[[c for c in data.columns if "humidity" in c]]
-        if not humidity.empty:
-            humidity_mean = humidity.ffill().bfill().mean(axis="columns")
-            if len(humidity_mean) == 1:
-                humidity_mean = humidity_mean.iloc[0]
-            self.data.humidity_mean.value = humidity_mean
+        self.data.register(self._water_supply_callback, *water_supplies, how="all", unique=True)
+
+    def deactivate(self) -> None:
+        super().deactivate()
+        for series in self.series:
+            series.deactivate()
+
+    def _water_supply_callback(self, data: pd.DataFrame) -> None:
+        water_supply = data[[c for c in data.columns if "water_supply" in c]]
+        if not water_supply.empty:
+            water_supply_mean = water_supply.ffill().bfill().mean(axis="columns")
+            if len(water_supply_mean) == 1:
+                water_supply_mean = water_supply_mean.iloc[0]
+            self.data.water_supply_mean.value = water_supply_mean
         else:
-            self.data.humidity_mean.state = ChannelState.NOT_AVAILABLE
+            self.data.water_supply_mean.state = ChannelState.NOT_AVAILABLE
