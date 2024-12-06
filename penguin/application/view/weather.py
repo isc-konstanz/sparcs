@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-penguin.components.weather.view
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+penguin.application.view.weather
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 """
