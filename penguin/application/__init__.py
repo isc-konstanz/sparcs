@@ -11,7 +11,7 @@ try:
         IrrigationPage,
         WeatherPage,
     )
-except ImportError:
+except ModuleNotFoundError:
     pass
 
 from lori import Application  # noqa: F401
