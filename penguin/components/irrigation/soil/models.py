@@ -81,7 +81,7 @@ class Genuchten(SoilModel):
 
     l: float  # noqa: E741
 
-    def __init__(self, theta_r: float, theta_s: float, alpha: float, n: float, k_s: float, l: float = 0.5):
+    def __init__(self, theta_r: float, theta_s: float, alpha: float, n: float, k_s: float, l: float = 0.5):  # noqa: E741
         """
         Mualem-van Genuchten Soil Model
 
