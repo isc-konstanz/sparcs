@@ -15,7 +15,7 @@ from typing import List
 import pandas as pd
 from lori import ChannelState, Configurations, Context
 from lori.components import Component, register_component_type
-from lori.util import validate_key
+from lori.util import get_includes, validate_key
 from penguin.components.irrigation import IrrigationSeries
 
 
@@ -48,7 +48,7 @@ class IrrigationSystem(Component):
         series_defaults = {}
         if "series" in configs:
             series_section = configs.get_section("series")
-            series_keys = [k for k in series_section.sections if k not in [*Component.SECTIONS, *self.SECTIONS]]
+            series_keys = [k for k in series_section.sections if k not in get_includes(type(self))]
             series_configs = {k: series_section.pop(k) for k in series_keys}
             series_defaults.update(series_section)
 
