@@ -33,8 +33,6 @@ from .system import System  # noqa: F401
 from . import model  # noqa: F401
 from .model import Model  # noqa: F401
 
-from lori import Application  # noqa: F401
-
 from . import application  # noqa: F401
 from .application import Application
 
