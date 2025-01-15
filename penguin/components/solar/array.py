@@ -46,7 +46,7 @@ class Orientation(Enum):
 
 # noinspection SpellCheckingInspection
 class SolarArray(pv.pvsystem.Array, Component):
-    SECTIONS = ["rows", "mounting", "tracking"]
+    INCLUDES = ["rows", "mounting", "tracking"]
 
     POWER_AC: str = "p_ac"
     POWER_DC: str = "p_dc"

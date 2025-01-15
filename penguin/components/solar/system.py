@@ -17,7 +17,7 @@ import pvlib as pv
 import pandas as pd
 from lori import ChannelState, ConfigurationException, Configurations, Context
 from lori.components import Component, ComponentException, register_component_type
-from lori.util import validate_key
+from lori.util import get_includes, validate_key
 from penguin.components.current import DirectCurrent
 from penguin.components.solar.array import SolarArray
 from penguin.components.solar.db import InverterDatabase
@@ -28,7 +28,7 @@ TYPE: str = "pv"
 @register_component_type(TYPE, "solar")
 # noinspection SpellCheckingInspection
 class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
-    SECTIONS = ["model", "inverter", "arrays", *SolarArray.SECTIONS]
+    INCLUDES = ["model", "inverter", "arrays", *SolarArray.INCLUDES]
 
     POWER: str = f"{TYPE}_power"
     POWER_EST: str = f"{TYPE}_est_power"
@@ -139,7 +139,7 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
         array_defaults = {}
         if "arrays" in configs:
             arrays_section = configs.get_section("arrays")
-            array_keys = [k for k in arrays_section.sections if k not in [*Component.SECTIONS, *self.SECTIONS]]
+            array_keys = [k for k in arrays_section.sections if k not in get_includes(type(self))]
             arrays_configs = {k: arrays_section.pop(k) for k in array_keys}
             array_defaults.update(arrays_section)
 
