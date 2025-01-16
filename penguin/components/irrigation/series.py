@@ -15,7 +15,7 @@ from penguin.components.irrigation import SoilMoisture
 # noinspection SpellCheckingInspection
 class IrrigationSeries(Component):
     SECTION = "series"
-    SECTIONS = [SoilMoisture.SECTION]
+    INCLUDES = [SoilMoisture.SECTION]
 
     soil: SoilMoisture
 

@@ -22,7 +22,7 @@ from penguin.components.irrigation import IrrigationSeries
 @register_component_type("irr", "irrigation", "watering")
 # noinspection SpellCheckingInspection
 class IrrigationSystem(Component):
-    SECTIONS = ["storage", *IrrigationSeries.SECTIONS]
+    INCLUDES = ["storage", *IrrigationSeries.INCLUDES]
 
     series: List[IrrigationSeries]
 
