@@ -33,11 +33,11 @@ class IrrigationSeriesPage(ComponentPage[IrrigationSeries]):
         layout.append(html.Hr())
 
         moisture = [
-            dbc.Row(dbc.Col(html.H5("Soil moisture"), width = "auto")),
+            dbc.Row(dbc.Col(html.H5("Soil moisture"), width="auto")),
             dbc.Row(
                 [
-                    dbc.Col(html.H6("Water supply coverage",style={"min-width": "14rem"}), width = "auto"),
-                    dbc.Col(html.H6("Water content", style={"min-width": "10rem"}), width = "auto"),
+                    dbc.Col(html.H6("Water supply coverage", style={"min-width": "14rem"}), width="auto"),
+                    dbc.Col(html.H6("Water content", style={"min-width": "10rem"}), width="auto"),
                 ],
             ),
             dbc.Row(
