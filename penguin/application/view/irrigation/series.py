@@ -14,15 +14,12 @@ from typing import Any, Dict, Union
 import dash_bootstrap_components as dbc
 from dash import Input, Output, callback, dcc, html
 
-from lori.application.view.pages import ComponentGroup, ComponentPage, PageLayout
+from lori.application.view.pages import ComponentPage, PageLayout
 from lori.data import Channel
 from penguin.components.irrigation import IrrigationSeries, SoilMoisture
 
 
 class IrrigationSeriesPage(ComponentPage[IrrigationSeries]):
-    def __init__(self, group: ComponentGroup, *args, **kwargs) -> None:
-        super().__init__(group=group, *args, **kwargs)
-
     @property
     def soil(self) -> SoilMoisture:
         return self._component.soil
@@ -32,16 +29,16 @@ class IrrigationSeriesPage(ComponentPage[IrrigationSeries]):
 
         switch = self._build_switch()
         layout.card.append(switch, focus=True)
-        layout.append(dbc.Row(dbc.Col(switch)))
+        layout.append(html.Div(switch))
+        layout.append(html.Hr())
 
         moisture = [
-            dbc.Row(dbc.Col(html.H5("Soil moisture")), align="stretch"),
+            dbc.Row(dbc.Col(html.H5("Soil moisture"), width = "auto")),
             dbc.Row(
                 [
-                    dbc.Col(html.H6("Water supply coverage", style={"min-width": "14rem"})),
-                    dbc.Col(html.H6("Water content", style={"min-width": "10rem"})),
+                    dbc.Col(html.H6("Water supply coverage",style={"min-width": "14rem"}), width = "auto"),
+                    dbc.Col(html.H6("Water content", style={"min-width": "10rem"}), width = "auto"),
                 ],
-                align="stretch",
             ),
             dbc.Row(
                 [
@@ -52,6 +49,7 @@ class IrrigationSeriesPage(ComponentPage[IrrigationSeries]):
                             color="#68adff",
                             style={"min-width": "14rem"},
                         ),
+                        width="auto",
                     ),
                     dbc.Col(
                         self._build_soil_value(
@@ -60,9 +58,9 @@ class IrrigationSeriesPage(ComponentPage[IrrigationSeries]):
                             color="#8fd0ff",
                             style={"min-width": "10rem"},
                         ),
+                        width="auto",
                     ),
                 ],
-                align="stretch",
             ),
         ]
         temperature = [
@@ -74,8 +72,8 @@ class IrrigationSeriesPage(ComponentPage[IrrigationSeries]):
         layout.card.append(html.Div(moisture), focus=True)
         layout.card.append(html.Div(temperature))
 
-        layout.append(dbc.Row(moisture))
-        layout.append(dbc.Row(temperature))
+        layout.append(html.Div(moisture))
+        layout.append(html.Div(temperature))
 
     # noinspection PyShadowingBuiltins
     def _build_switch(self) -> html.Div:
