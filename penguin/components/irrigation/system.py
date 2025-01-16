@@ -20,7 +20,6 @@ from penguin.components.irrigation import IrrigationSeries
 
 
 @register_component_type("irr", "irrigation", "watering")
-# noinspection SpellCheckingInspection
 class IrrigationSystem(Component):
     INCLUDES = ["storage", *IrrigationSeries.INCLUDES]
 

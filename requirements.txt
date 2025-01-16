@@ -13,7 +13,11 @@ openpyxl~=3.1
 matplotlib~=3.9
 seaborn~=0.13
 holidays~=0.52
+pillow~=10.4
+flask~=3.0
+dash~=2.17
+dash-bootstrap-components~=1.6
 NREL-PySAM~=5.1
 pvlib~=0.11
 tqdm~=4.65
-lori@git+https://github.com/isc-konstanz/lori.git@stable
+lori@git+https://github.com/isc-konstanz/lori.git@view
