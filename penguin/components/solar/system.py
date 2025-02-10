@@ -119,13 +119,14 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
         _add_channel(SolarSystem.VOLTAGE_OC)
 
     def _load_arrays(self, configs: Configurations):
+        array_key = "array"
         array_dir = configs.path.replace(".conf", ".d")
         array_dirs = configs.dirs.to_dict()
         array_dirs["conf_dir"] = array_dir
         if "mounting" in configs and len(configs.get_section("mounting")) > 0:
-            # TODO: verify parameter availability in 'General' by keys
+            # TODO: verify parameter existence by keys
 
-            array_file = "array.conf"
+            array_file = f"{array_key}.conf"
             array_configs = Configurations.load(
                 array_file,
                 **array_dirs,
@@ -158,7 +159,10 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
                 array.configure(array_configs)
                 self.arrays.append(array)
 
-        for array_path in glob.glob(os.path.join(array_dir, "array*.conf")):
+            if "alias" in arrays_section:
+                array_key = arrays_section.get('alias')
+
+        for array_path in glob.glob(os.path.join(array_dir, f"{array_key}*.conf")):
             array_file = os.path.basename(array_path)
             array_key = validate_key(array_file.rsplit(".", maxsplit=1)[0])
             if any([array_key == a.key for a in self.arrays]):
@@ -270,7 +274,7 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
 
         if len(self.arrays) < 1:
             raise ComponentException(self, "PV system must have at least one Array.")
-        if not all(a.is_configured() for a in self.arrays):
+        if not all(a.is_parametrized() for a in self.arrays):
             raise ComponentException(
                 self,
                 "PV array configurations of this system are not valid: ",

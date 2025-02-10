@@ -61,7 +61,7 @@ class SolarArray(pv.pvsystem.Array, Component):
 
     albedo: float = 0.25
 
-    _module_configured: bool = False
+    _module_parametrized: bool = False
     modules_stacked: int = 1
     module_stack_gap: float = 0
     module_row_gap: float = 0
@@ -94,9 +94,6 @@ class SolarArray(pv.pvsystem.Array, Component):
     def __str__(self) -> str:
         return Component.__str__(self)
 
-    def is_configured(self) -> bool:
-        return self._module_configured and super().is_configured()
-
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
         self.mount = self._new_mount(configs)
@@ -113,8 +110,8 @@ class SolarArray(pv.pvsystem.Array, Component):
         self.module = configs.get("module", default=None)
 
         self.module_parameters = self._infer_module_params(configs)
-        self._module_configured = self._validate_module_params()
-        if not self._module_configured:
+        self._module_parametrized = self._validate_module_params()
+        if not self._module_parametrized:
             # raise ConfigurationException("Unable to configure module parameters")
             self._logger.debug("Unable to configure module parameters of array ", self.name)
             return
@@ -158,6 +155,9 @@ class SolarArray(pv.pvsystem.Array, Component):
         self.array_losses_parameters = self._infer_array_losses_params(configs)
         self.shading_losses_parameters = self._infer_shading_losses_params(configs)
         self.temperature_model_parameters = self._infer_temperature_model_params(configs)
+
+    def is_parametrized(self) -> bool:
+        return self._module_parametrized and self.is_configured()
 
     @staticmethod
     def _new_mount(configs: Configurations) -> pv.pvsystem.AbstractMount:
@@ -337,7 +337,9 @@ class SolarArray(pv.pvsystem.Array, Component):
         module_file = self.key.replace(re.split(r"[^a-zA-Z0-9\s]", self.key)[0], "module") + ".conf"
         if not os.path.isfile(os.path.join(configs.dirs.conf, module_file)):
             module_file = "module.conf"
-        if os.path.isfile(os.path.join(configs.dirs.conf, module_file)):
+
+        module_path = os.path.join(configs.dirs.conf, module_file)
+        if module_path != str(configs.path) and os.path.isfile(module_path):
             _update_parameters(params, Configurations.load(module_file, **configs.dirs.to_dict()))
             self._logger.debug("Read module file: %s", module_file)
             return True
