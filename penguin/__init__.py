@@ -15,6 +15,8 @@ del _version
 
 from .location import Location  # noqa: F401
 
+from . import converters  # noqa: F401
+
 from . import components  # noqa: F401
 from .components import (  # noqa: F401
     SolarArray,
