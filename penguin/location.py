@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.location
-    ~~~~~~~~~~~~~~~~
+penguin.location
+~~~~~~~~~~~~~~~~
 
 
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -12,11 +13,12 @@ from typing import Optional
 
 import pvlib as pv
 
-import loris
+import lori
 import pytz
+from lori.location import LocationException, LocationUnavailableException  # noqa: F401
 
 
-class Location(loris.Location, pv.location.Location):
+class Location(lori.Location, pv.location.Location):
     def __init__(
         self,
         latitude: float,
@@ -40,10 +42,6 @@ class Location(loris.Location, pv.location.Location):
 
         if self._altitude is None:
             self._altitude = pv.location.lookup_altitude(self.latitude, self.longitude)
-
-    def __repr__(self):
-        attrs = ["name", "latitude", "longitude", "altitude", "timezone"]
-        return "Location:\n\t" + "\n\t".join(f"{attr}: {str(getattr(self, attr))}" for attr in attrs)
 
     # noinspection PyUnresolvedReferences
     @property

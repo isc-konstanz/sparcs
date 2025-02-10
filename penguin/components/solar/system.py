@@ -1,38 +1,41 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.components.pv.system
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+penguin.components.solar.system
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 """
+
 from __future__ import annotations
 
 import glob
 import os
-from typing import Collection, Dict, List, Mapping
+from typing import Dict, List, Mapping
 
 import pvlib as pv
 
 import pandas as pd
-from loris import ChannelState, ConfigurationException, Configurations, Configurator
-from loris.components import Activator, ComponentException
-from loris.util import parse_id
-from penguin.components.dc import DirectCurrent
-from penguin.components.pv.array import PVArray
-from penguin.components.pv.db import InverterDatabase
+from lori import ChannelState, ConfigurationException, Configurations, Context
+from lori.components import Component, ComponentException, register_component_type
+from lori.util import get_includes, validate_key
+from penguin.components.current import DirectCurrent
+from penguin.components.solar.array import SolarArray
+from penguin.components.solar.db import InverterDatabase
+
+TYPE: str = "pv"
 
 
+@register_component_type(TYPE, "solar")
 # noinspection SpellCheckingInspection
-class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
-    TYPE: str = "pv"
-    ALIAS: List[str] = ["solar"]  # , 'array']
+class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
+    INCLUDES = ["model", "inverter", "arrays", *SolarArray.INCLUDES]
 
     POWER: str = f"{TYPE}_power"
-    POWER_CALC: str = f"{TYPE}_calc_power"
+    POWER_EST: str = f"{TYPE}_est_power"
     POWER_EXP: str = f"{TYPE}_exp_power"
 
     ENERGY: str = f"{TYPE}_energy"
-    ENERGY_CALC: str = f"{TYPE}_calc_energy"
+    ENERGY_EST: str = f"{TYPE}_est_energy"
     ENERGY_EXP: str = f"{TYPE}_exp_energy"
 
     CURRENT_SC: str = f"{TYPE}_current_sc"
@@ -43,41 +46,38 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
 
     YIELD_SPECIFIC: str = "specific_yield"
 
-    arrays: List[PVArray]
+    arrays: List[SolarArray]
 
     inverter: str = None
     inverter_parameters: dict = {}
     inverters_per_system: int = 1
 
-    modules_per_inverter: int = PVArray.modules_per_string * PVArray.strings
+    modules_per_inverter: int = SolarArray.modules_per_string * SolarArray.strings
 
     power_max: float = 0
 
     losses_parameters: dict = {}
 
-    def __init__(self, context, configs: Configurations) -> None:
-        super(pv.pvsystem.PVSystem, self).__init__(context, configs)
+    def __init__(self, context: Context, configs: Configurations) -> None:  # noqa
+        super(pv.pvsystem.PVSystem, self).__init__(context=context, configs=configs)
         self.arrays = []
 
     def __repr__(self) -> str:
-        return Configurator.__repr__(self)
+        return Component.__repr__(self)
 
-    @property
-    def type(self) -> str:
-        return self.TYPE
+    def __str__(self) -> str:
+        return Component.__str__(self)
 
     # noinspection PyProtectedMembers
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
-        self._do_load_arrays(configs)
-        for array in self.arrays:
-            array._do_configure()
+        self._load_arrays(configs)
         try:
             inverter = configs.get_section("inverter", defaults={})
-            self.inverter = inverter.get("model", default=PVSystem.inverter)
+            self.inverter = inverter.get("model", default=SolarSystem.inverter)
             self.inverter_parameters = self._infer_inverter_params()
             self.inverter_parameters = self._fit_inverter_params()
-            self.inverters_per_system = inverter.get_int("count", default=PVSystem.modules_per_inverter)
+            self.inverters_per_system = inverter.get_int("count", default=SolarSystem.modules_per_inverter)
 
             self.modules_per_inverter = sum([array.modules_per_string * array.strings for array in self.arrays])
 
@@ -94,106 +94,88 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
                     * self.inverters_per_system
                 )
 
-            self.losses_parameters = configs.get("losses", default=PVSystem.losses_parameters)
+            self.losses_parameters = configs.get("losses", default=SolarSystem.losses_parameters)
 
         except ConfigurationException as e:
-            self._logger.warning(f"Unable to configure inverter for system '{self.id}': ", e)
+            self._logger.warning(f"Unable to configure inverter for system '{self.key}': ", e)
 
-        def _add_channel(channel_id: str):
-            from penguin import COLUMNS
+        def _add_channel(key: str):
+            from penguin.constants import COLUMNS
+
             channel = {}
-            if channel_id in COLUMNS:
-                channel["name"] = COLUMNS[channel_id]
-            channel["column"] = channel_id.replace(f"{PVSystem.TYPE}_", self.id)
-            channel["value_type"] = float
+            if key in COLUMNS:
+                channel["name"] = COLUMNS[key]
+            channel["column"] = key.replace(f"{TYPE}_", self.key)
+            channel["type"] = float
             channel["connector"] = None
 
-            self.data.add(id=channel_id, **channel)
+            self.data.add(key=key, **channel)
 
-        _add_channel(PVSystem.POWER)
-        _add_channel(PVSystem.POWER_DC)
-        _add_channel(PVSystem.CURRENT_MP)
-        _add_channel(PVSystem.VOLTAGE_MP)
-        _add_channel(PVSystem.CURRENT_SC)
-        _add_channel(PVSystem.VOLTAGE_OC)
+        _add_channel(SolarSystem.POWER)
+        _add_channel(SolarSystem.POWER_DC)
+        _add_channel(SolarSystem.CURRENT_MP)
+        _add_channel(SolarSystem.VOLTAGE_MP)
+        _add_channel(SolarSystem.CURRENT_SC)
+        _add_channel(SolarSystem.VOLTAGE_OC)
 
-    def _do_configure_members(self, configurators: Collection[Configurator]) -> None:
-        configurators = [c for c in configurators if c not in self.arrays]
-        super()._do_configure_members(configurators)
-
-    def _do_load_arrays(self, configs: Configurations):
+    def _load_arrays(self, configs: Configurations):
+        array_key = "array"
         array_dir = configs.path.replace(".conf", ".d")
-        array_dirs = configs.dirs.encode()
+        array_dirs = configs.dirs.to_dict()
         array_dirs["conf_dir"] = array_dir
         if "mounting" in configs and len(configs.get_section("mounting")) > 0:
-            # TODO: verify parameter availability in 'General' by keys
+            # TODO: verify parameter existence by keys
 
-            array_file = "array.conf"
+            array_file = f"{array_key}.conf"
             array_configs = Configurations.load(
                 array_file,
                 **array_dirs,
                 **configs,
-                require=False
+                require=False,
             )
-            array_configs.set("id", "array")
-            if "name" not in array_configs:
-                array_configs.set("name", self.id)
-
-            array = self._new_array(array_configs)
-            self._add_array(array)
+            array = SolarArray(self, key="array", name=f"{self.name} Array")
+            array.configure(array_configs)
+            self.arrays.append(array)
 
         array_defaults = {}
         if "arrays" in configs:
             arrays_section = configs.get_section("arrays")
-            array_ids = [
-                i
-                for i in arrays_section.keys()
-                if (isinstance(arrays_section[i], Mapping) and i not in ["data", "mounting"])
-            ]
-            arrays_configs = {i: arrays_section.pop(i) for i in array_ids}
+            array_keys = [k for k in arrays_section.sections if k not in get_includes(type(self))]
+            arrays_configs = {k: arrays_section.pop(k) for k in array_keys}
             array_defaults.update(arrays_section)
 
-            for array_id, array_section in arrays_configs.items():
-                array_id = parse_id(array_id)
-                array_file = f"{array_id}.conf"
+            for array_key, array_section in arrays_configs.items():
+                array_key = validate_key(array_key)
+                array_file = f"{array_key}.conf"
                 array_configs = Configurations.load(
                     array_file,
                     **array_dirs,
                     **array_defaults,
-                    require=False
+                    require=False,
                 )
-                array_configs.update(arrays_section)
-                array_configs.set("id", array_id)
-                if "name" not in array_configs:
-                    array_configs.set("name", f"{self.id}_{array_id}")
+                array_configs.update(arrays_section, replace=False)
 
-                array = self._new_array(array_configs)
-                self._add_array(array)
+                array = SolarArray(self, key=array_key, name=f"{self.name} {array_key.title()}")
+                array.configure(array_configs)
+                self.arrays.append(array)
 
-        for array_path in glob.glob(os.path.join(array_dir, "array*.conf")):
+            if "alias" in arrays_section:
+                array_key = arrays_section.get('alias')
+
+        for array_path in glob.glob(os.path.join(array_dir, f"{array_key}*.conf")):
             array_file = os.path.basename(array_path)
-            array_id = parse_id(array_file.rsplit(".", maxsplit=1)[0])
-            if any([array_id == a.id for a in self.arrays]):
+            array_key = validate_key(array_file.rsplit(".", maxsplit=1)[0])
+            if any([array_key == a.key for a in self.arrays]):
                 continue
 
             array_configs = Configurations.load(
                 array_file,
                 **array_dirs,
-                **array_defaults
+                **array_defaults,
             )
-            array_configs.set("id", array_id)
-            if "name" not in array_configs:
-                array_configs.set("name", f"{self.id}_{array_id}")
-
-            array = self._new_array(array_configs)
-            self._add_array(array)
-
-    # noinspection PyMethodMayBeStatic
-    def _new_array(self, configs: Configurations) -> PVArray:
-        return PVArray(self, configs)
-
-    def _add_array(self, array: PVArray) -> None:
-        self.arrays.append(array)
+            array = SolarArray(self, key=array_key, name=f"{self.name} {array_key.title()}")
+            array.configure(array_configs)
+            self.arrays.append(array)
 
     def _infer_inverter_params(self) -> dict:
         params = {}
@@ -253,7 +235,7 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
         return False
 
     def _read_inverter_configs(self, params: dict) -> bool:
-        inverter_file = os.path.join(self.configs.dirs.conf, f"{self.id}.d", "inverter.conf")
+        inverter_file = os.path.join(self.configs.dirs.conf, f"{self.key}.d", "inverter.conf")
         if os.path.exists(inverter_file):
             with open(inverter_file) as f:
                 inverter_str = "[Inverter]\n" + f.read()
@@ -270,24 +252,16 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
         return False
 
     def activate(self) -> None:
-        pass
-
-    def _do_activate_members(self, activators: Collection[Activator]) -> None:
-        activators = list(activators)
-        activators.extend([a for a in self.arrays if a not in activators and a.is_configured()])
-        super()._do_activate_members(activators)
+        for array in self.arrays:
+            array.activate()
 
     def deactivate(self) -> None:
-        pass
-
-    def _do_deactivate_members(self, activators: Collection[Activator]) -> None:
-        activators = list(activators)
-        activators.extend([a for a in self.arrays if a not in activators and a.is_configured()])
-        super()._do_deactivate_members(activators)
+        for array in self.arrays:
+            array.deactivate()
 
     # noinspection PyMethodOverriding
     def pvwatts_losses(self, solar_position: pd.DataFrame):
-        def _pvwatts_losses(array: PVArray):
+        def _pvwatts_losses(array: SolarArray):
             return pv.pvsystem.pvwatts_losses(**array.pvwatts_losses(solar_position))
 
         if self.num_arrays > 1:
@@ -295,13 +269,14 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
         else:
             return _pvwatts_losses(self.arrays[0])
 
-    def _run(self, weather: pd.DataFrame) -> pd.DataFrame:
+    def _predict(self, weather: pd.DataFrame) -> pd.DataFrame:
         from penguin.model import Model
 
         if len(self.arrays) < 1:
-            raise ComponentException("PV system must have at least one Array.")
-        if not all(a.is_configured() for a in self.arrays):
+            raise ComponentException(self, "PV system must have at least one Array.")
+        if not all(a.is_parametrized() for a in self.arrays):
             raise ComponentException(
+                self,
                 "PV array configurations of this system are not valid: ",
                 ", ".join(a.name for a in self.arrays if not a.is_configured()),
             )
@@ -309,23 +284,23 @@ class PVSystem(pv.pvsystem.PVSystem, DirectCurrent):
         model = Model.load(self)
         return model(weather).rename(
             columns={
-                PVArray.POWER_AC: PVSystem.POWER,
-                PVArray.POWER_DC: PVSystem.POWER_DC,
-                PVArray.CURRENT_SC: PVSystem.CURRENT_SC,
-                PVArray.VOLTAGE_OC: PVSystem.VOLTAGE_OC,
-                PVArray.CURRENT_MP: PVSystem.CURRENT_MP,
-                PVArray.VOLTAGE_MP: PVSystem.VOLTAGE_MP,
+                SolarArray.POWER_AC: SolarSystem.POWER,
+                SolarArray.POWER_DC: SolarSystem.POWER_DC,
+                SolarArray.CURRENT_SC: SolarSystem.CURRENT_SC,
+                SolarArray.VOLTAGE_OC: SolarSystem.VOLTAGE_OC,
+                SolarArray.CURRENT_MP: SolarSystem.CURRENT_MP,
+                SolarArray.VOLTAGE_MP: SolarSystem.VOLTAGE_MP,
             }
         )
 
-    def run(self, weather: pd.DataFrame) -> pd.DataFrame:
-        data = self._run(weather)
+    def predict(self, weather: pd.DataFrame) -> pd.DataFrame:
+        data = self._predict(weather)
 
-        for channel in self.data.values():
-            if channel.id not in data.columns or data[channel.id].empty:
+        for channel in self.data.channels:
+            if channel.key not in data.columns or data[channel.key].empty:
                 channel.state = ChannelState.NOT_AVAILABLE
                 continue
-            channel_data = data[channel.id]
+            channel_data = data[channel.key]
             channel.set(channel_data.index[0], channel_data)
 
         return data

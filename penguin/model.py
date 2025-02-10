@@ -1,19 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.model
-    ~~~~~~~~~~~~~
+penguin.model
+~~~~~~~~~~~~~
 
 
 """
-from __future__ import annotations
 
-import os
+from __future__ import annotations
 
 from pvlib.modelchain import ModelChain
 
 import pandas as pd
-from loris import Configurations, Configurator, Location
-from penguin import PVSystem
+from lori import Configurations, Configurator, Location
+from penguin import SolarSystem
 
 # noinspection SpellCheckingInspection
 DEFAULTS = dict(
@@ -30,16 +29,16 @@ DEFAULTS = dict(
 # noinspection SpellCheckingInspection, PyAbstractClass
 class Model(Configurator, ModelChain):
     @classmethod
-    def load(cls, pvsystem: PVSystem, override_file: str = "model.conf", section: str = "model") -> Model:
-        override_dir = os.path.join(pvsystem.configs.dirs.conf, pvsystem.id + ".d")
-        configs_dirs = pvsystem.configs.dirs.encode()
+    def load(cls, pvsystem: SolarSystem, override_file: str = "model.conf", section: str = "model") -> Model:
+        override_dir = pvsystem.configs.path.replace(".conf", ".d")
+        configs_dirs = pvsystem.configs.dirs.to_dict()
         configs_dirs["conf_dir"] = override_dir
 
         configs = Configurations.load(
             override_file,
             **configs_dirs,
             **pvsystem.configs,
-            require=False
+            require=False,
         )
         params = DEFAULTS
         if section in configs:
@@ -47,8 +46,8 @@ class Model(Configurator, ModelChain):
 
         return cls(configs, pvsystem, pvsystem.context.location, **params)
 
-    def __init__(self, configs: Configurations, pvsystem: PVSystem, location: Location, **kwargs):
-        super().__init__(configs, pvsystem, location, **kwargs)
+    def __init__(self, configs: Configurations, pvsystem: SolarSystem, location: Location, **kwargs):
+        super().__init__(configs=configs, system=pvsystem, location=location, **kwargs)
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
@@ -84,8 +83,9 @@ class Model(Configurator, ModelChain):
         results.loc[:, results.columns.str.startswith(("p_", "i_"))] *= self.system.inverters_per_system
 
         losses = self.results.losses
-        if not isinstance(losses, float) and not \
-                (isinstance(losses, tuple) and any([isinstance(loss, float) for loss in losses])):
+        if not isinstance(losses, float) and not (
+            isinstance(losses, tuple) and any([isinstance(loss, float) for loss in losses])
+        ):
             if isinstance(losses, tuple):
                 losses = pd.concat(list(losses), axis="columns").mean(axis="columns")
                 losses.name = "losses"

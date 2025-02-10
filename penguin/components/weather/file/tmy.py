@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.components.weather.tmy
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+penguin.components.weather.tmy
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -14,7 +15,7 @@ from typing import Dict
 from pvlib.iotools import read_tmy2, read_tmy3
 
 import pandas as pd
-from loris import Configurations
+from lori import Configurations
 from penguin import Location
 from penguin.components.weather import Weather
 
@@ -49,13 +50,13 @@ class TMYWeather(Weather):
         else:
             raise ValueError("Invalid TMY version: {}".format(self.version))
 
-        self._location = Location.from_epw(self._meta)
+        self.location = Location.from_epw(self._meta)
 
     def get(
         self,
         start: pd.Timestamp | dt.datetime = None,
         end: pd.Timestamp | dt.datetime = None,
-        **kwargs
+        **kwargs,
     ) -> pd.DataFrame:
         """
         Retrieves the weather data for a specified time interval

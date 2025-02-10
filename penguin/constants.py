@@ -1,14 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-    penguin._var
-    ~~~~~~~~~~~~
+penguin.constants
+~~~~~~~~~~~~~~~~~
 
 
 """
-from loris.components.weather import WEATHER
-from penguin.system import System
-from penguin.components import POWER as COMPONENT_POWER, ENERGY as COMPONENT_ENERGY, STATES
+# fmt: off
 
+from lori.components.weather.constants import WEATHER
+from penguin.components.constants import ENERGY as COMPONENT_ENERGY
+from penguin.components.constants import POWER as COMPONENT_POWER
+from penguin.components.constants import STATES
+from penguin.system import System
 
 SYSTEM_POWER = {
     System.POWER_EL:     "Total Electrical Power [W]",
@@ -30,23 +33,23 @@ SYSTEM_ENERGY = {
 
 SYSTEM = {
     **SYSTEM_POWER,
-    **SYSTEM_ENERGY
+    **SYSTEM_ENERGY,
 }
 
 POWER = {
     **SYSTEM_POWER,
-    **COMPONENT_POWER
+    **COMPONENT_POWER,
 }
 
 ENERGY = {
     **SYSTEM_ENERGY,
-    **COMPONENT_ENERGY
+    **COMPONENT_ENERGY,
 }
 
 SOLAR_ANGLES = {
     "solar_elevation": "Solar Elevation [°]",
     "solar_zenith":    "Solar Zenith [°]",
-    "solar_azimuth":   "Solar Azimuth [°]"
+    "solar_azimuth":   "Solar Azimuth [°]",
 }
 
 TIME = {
@@ -54,7 +57,7 @@ TIME = {
     "day_of_week": "Day of the Week",
     "day_of_year": "Day of the Year",
     "month":       "Month",
-    "year":        "Year"
+    "year":        "Year",
 }
 
 COLUMNS = {
@@ -63,11 +66,6 @@ COLUMNS = {
     **ENERGY,
     **WEATHER,
     **SOLAR_ANGLES,
-    **TIME
+    **TIME,
 }
-
-
-def rename(name: str) -> str:
-    if name in COLUMNS:
-        return COLUMNS[name]
-    return name.title()
+# fmt: on

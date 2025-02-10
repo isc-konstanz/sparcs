@@ -1,16 +1,22 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.components.ac
-    ~~~~~~~~~~~~~~~~~~~~~
+penguin.components.current
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 """
-from loris import Component, Configurations
+
+from lori.components import Component, register_component_type
 
 
+@register_component_type("dc")
+class DirectCurrent(Component):
+    POWER_DC: str = "dc_power"
+    ENERGY_DC: str = "dc_energy"
+
+
+@register_component_type("ac")
 class AlternatingCurrent(Component):
-    TYPE: str = "ac"
-
     POWER_ACTIVE: str = "active_power"
     POWER_L1_ACTIVE: str = "l1_active_power"
     POWER_L2_ACTIVE: str = "l2_active_power"
@@ -70,16 +76,3 @@ class AlternatingCurrent(Component):
     CURRENT_L3: str = "l3_current"
 
     FREQUENCY: str = "frequency"
-
-    def configure(self, configs: Configurations) -> None:
-        super().configure(configs)
-
-    def activate(self) -> None:
-        super().activate()
-
-    def deactivate(self) -> None:
-        super().deactivate()
-
-    @property
-    def type(self) -> str:
-        return self.TYPE

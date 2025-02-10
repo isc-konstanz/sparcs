@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.components.pv.array
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+penguin.components.solar.array
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-    This module provides the :class:`penguin.PVArray`, containing information about orientation
-    and datasheet parameters of a specific photovoltaic installation.
+This module provides the :class:`penguin.SolarArray`, containing information about orientation
+and datasheet parameters of a specific photovoltaic installation.
 
 """
+
 from __future__ import annotations
 
 import os
@@ -23,18 +24,29 @@ from pvlib.pvsystem import FixedMount, SingleAxisTrackerMount
 from pvlib.tools import _build_kwargs
 
 import pandas as pd
-from loris import Component, ConfigurationException, Configurations, Configurator
-from penguin.components.pv.db import ModuleDatabase
+from lori import ConfigurationException, Configurations, Context
+from lori.components import Component
+from penguin.components.solar.db import ModuleDatabase
 
 
 class Orientation(Enum):
     PORTRAIT = "portrait"
     LANDSCAPE = "landscape"
 
+    @classmethod
+    def from_str(cls, s) -> Orientation:
+        s = s.upper()
+        if s == "PORTRAIT":
+            return cls.PORTRAIT
+        elif s == "LANDSCAPE":
+            return cls.LANDSCAPE
+        else:
+            raise NotImplementedError
+
 
 # noinspection SpellCheckingInspection
-class PVArray(pv.pvsystem.Array, Component):
-    TYPE: str = "pv_array"
+class SolarArray(pv.pvsystem.Array, Component):
+    INCLUDES = ["rows", "mounting", "tracking"]
 
     POWER_AC: str = "p_ac"
     POWER_DC: str = "p_dc"
@@ -49,7 +61,7 @@ class PVArray(pv.pvsystem.Array, Component):
 
     albedo: float = 0.25
 
-    _module_configured: bool = False
+    _module_parametrized: bool = False
     modules_stacked: int = 1
     module_stack_gap: float = 0
     module_row_gap: float = 0
@@ -67,18 +79,20 @@ class PVArray(pv.pvsystem.Array, Component):
     shading_losses_parameters: dict = {}
     temperature_model_parameters: dict = {}
 
-    def __init__(self, context, configs: Configurations) -> None:
-        super(pv.pvsystem.Array, self).__init__(context, configs)
+    def __init__(  # noqa
+        self,
+        context: Component | Context,
+        configs: Optional[Configurations] = None,
+        key: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> None:
+        super(pv.pvsystem.Array, self).__init__(context=context, configs=configs, key=key, name=name)
 
     def __repr__(self) -> str:
-        return Configurator.__repr__(self)
+        return Component.__repr__(self)
 
-    @property
-    def type(self) -> str:
-        return self.TYPE
-
-    def is_configured(self) -> bool:
-        return self._module_configured and super().is_configured()
+    def __str__(self) -> str:
+        return Component.__str__(self)
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
@@ -86,48 +100,51 @@ class PVArray(pv.pvsystem.Array, Component):
 
         self.surface_type = configs.get("surface_type", default=configs.get("ground_type", default=None))
         if "albedo" not in configs:
-            self.albedo = pv.albedo.SURFACE_ALBEDOS.get(self.surface_type, PVArray.albedo)
+            self.albedo = pv.albedo.SURFACE_ALBEDOS.get(self.surface_type, SolarArray.albedo)
         else:
             self.albedo = configs.get_float("albedo")
 
-        self.strings = configs.get_int("strings", default=configs.get_int("count", default=PVArray.strings))
-        self.modules_per_string = configs.get_int("modules_per_string", default=PVArray.modules_per_string)
+        self.strings = configs.get_int("strings", default=configs.get_int("count", default=SolarArray.strings))
+        self.modules_per_string = configs.get_int("modules_per_string", default=SolarArray.modules_per_string)
         self.module_type = configs.get("module_type", default=configs.get("construct_type"))
         self.module = configs.get("module", default=None)
 
-        self.module_parameters = self._infer_module_params()
-        self._module_configured = self._validate_module_params()
-        if not self._module_configured:
+        self.module_parameters = self._infer_module_params(configs)
+        self._module_parametrized = self._validate_module_params()
+        if not self._module_parametrized:
             # raise ConfigurationException("Unable to configure module parameters")
             self._logger.debug("Unable to configure module parameters of array ", self.name)
             return
 
         rows = configs.get_section("rows", defaults={})
-        self.modules_stacked = rows.get_int("stack", default=PVArray.modules_stacked)
-        self.module_stack_gap = rows.get_float("stack_gap", default=PVArray.module_stack_gap)
-        self.module_row_gap = rows.get_float("row_gap", default=PVArray.module_row_gap)
+        self.modules_stacked = rows.get_int("stack", default=SolarArray.modules_stacked)
+        self.module_stack_gap = rows.get_float("stack_gap", default=SolarArray.module_stack_gap)
+        self.module_row_gap = rows.get_float("row_gap", default=SolarArray.module_row_gap)
 
-        self.module_transmission = rows.get_float("module_transmission", default=PVArray.module_transmission)
+        self.module_transmission = rows.get_float("module_transmission", default=SolarArray.module_transmission)
 
-        _module_orientation = configs.get("orientation", default="portrait").upper()
-        self.module_orientation = Orientation[_module_orientation]
+        self.module_orientation = Orientation.from_str(configs.get("orientation", default="portrait"))
         if self.module_orientation == Orientation.PORTRAIT:
             self.module_width = self.module_parameters["Width"] + self.module_row_gap
-            self.module_length = (self.module_parameters["Length"] * self.modules_stacked +
-                                  self.module_stack_gap * (self.modules_stacked - 1))
-
+            self.module_length = (
+                self.modules_stacked * self.module_parameters["Length"]
+                + (self.modules_stacked - 1) * self.module_stack_gap
+            )
         elif self.module_orientation == Orientation.LANDSCAPE:
             self.module_width = self.module_parameters["Length"] + self.module_row_gap
-            self.module_length = (self.module_parameters["Width"] * self.modules_stacked +
-                                  self.module_stack_gap * (self.modules_stacked - 1))
+            self.module_length = (
+                self.modules_stacked * self.module_parameters["Width"]
+                + (self.modules_stacked - 1) * self.module_stack_gap
+            )
         else:
             raise ValueError(f"Invalid module orientation to calculate length: {str(self.module_orientation)}")
 
         if self.module_transmission is None:
-            self.module_transmission = ((self.module_row_gap + self.module_stack_gap * (self.modules_stacked - 1)) /
-                                        (self.module_length * self.module_width))
+            module_gaps = self.module_row_gap + self.module_stack_gap * (self.modules_stacked - 1)
+            module_area = self.module_length * self.module_width
+            self.module_transmission = module_gaps / module_area
 
-        self.row_pitch = rows.get_float("pitch", default=PVArray.row_pitch)
+        self.row_pitch = rows.get_float("pitch", default=SolarArray.row_pitch)
         if (
             self.row_pitch
             and isinstance(self.mount, SingleAxisTrackerMount)
@@ -135,9 +152,12 @@ class PVArray(pv.pvsystem.Array, Component):
         ):
             self.mount.gcr = self.module_length / self.row_pitch
 
-        self.array_losses_parameters = self._infer_array_losses_params()
-        self.shading_losses_parameters = self._infer_shading_losses_params()
-        self.temperature_model_parameters = self._infer_temperature_model_params()
+        self.array_losses_parameters = self._infer_array_losses_params(configs)
+        self.shading_losses_parameters = self._infer_shading_losses_params(configs)
+        self.temperature_model_parameters = self._infer_temperature_model_params(configs)
+
+    def is_parametrized(self) -> bool:
+        return self._module_parametrized and self.is_configured()
 
     @staticmethod
     def _new_mount(configs: Configurations) -> pv.pvsystem.AbstractMount:
@@ -169,14 +189,14 @@ class PVArray(pv.pvsystem.Array, Component):
                 module_height=mounting.get_float("module_height", default=FixedMount.module_height),
             )
 
-    def _infer_module_params(self) -> dict:
+    def _infer_module_params(self, configs: Configurations) -> dict:
         params = {}
         self._module_parameters_override = False
-        if not self._read_module_params(params):
-            self._read_module_database(params)
+        if not self._read_module_params(configs, params):
+            self._read_module_database(configs, params)
 
         module_params_exist = len(params) > 0
-        if self._read_module_configs(params) and module_params_exist:
+        if self._read_module_configs(configs, params) and module_params_exist:
             self._module_parameters_override = True
 
         return params
@@ -238,7 +258,7 @@ class PVArray(pv.pvsystem.Array, Component):
                 "I_o_ref",
                 "R_s",
                 "R_sh_ref",
-                "a_ref"
+                "a_ref",
             ]
             params_cec = [
                 "Technology",
@@ -258,7 +278,7 @@ class PVArray(pv.pvsystem.Array, Component):
                 "I_sc_ref",
                 "alpha_sc",
                 "beta_oc",
-                "N_s"
+                "N_s",
             ]
             if self._module_parameters_override or not all(k in self.module_parameters.keys() for k in params_iv):
 
@@ -292,18 +312,18 @@ class PVArray(pv.pvsystem.Array, Component):
 
         return True
 
-    def _read_module_params(self, params: dict) -> bool:
-        if self.configs.has_section("module"):
-            module_params = dict(self.configs["module"])
+    def _read_module_params(self, configs: Configurations, params: dict) -> bool:
+        if configs.has_section("module"):
+            module_params = dict(configs["module"])
             _update_parameters(params, module_params)
             self._logger.debug("Extracted module from config file")
             return True
         return False
 
-    def _read_module_database(self, params: dict) -> bool:
+    def _read_module_database(self, configs: Configurations, params: dict) -> bool:
         if self.module is not None:
             try:
-                modules = ModuleDatabase(self.configs)
+                modules = ModuleDatabase(configs)
                 module_params = modules.read(self.module)
                 _update_parameters(params, module_params)
             except IOError as e:
@@ -313,12 +333,14 @@ class PVArray(pv.pvsystem.Array, Component):
             return True
         return False
 
-    def _read_module_configs(self, params: dict) -> bool:
-        module_file = self.name.replace(re.split(r"[^a-zA-Z0-9\s]", self.id)[0], "module") + ".conf"
-        if not os.path.isfile(os.path.join(self.configs.dirs.conf, module_file)):
+    def _read_module_configs(self, configs: Configurations, params: dict) -> bool:
+        module_file = self.key.replace(re.split(r"[^a-zA-Z0-9\s]", self.key)[0], "module") + ".conf"
+        if not os.path.isfile(os.path.join(configs.dirs.conf, module_file)):
             module_file = "module.conf"
-        if os.path.isfile(os.path.join(self.configs.dirs.conf, module_file)):
-            _update_parameters(params, Configurations.load(module_file, **self.configs.dirs.encode()))
+
+        module_path = os.path.join(configs.dirs.conf, module_file)
+        if module_path != str(configs.path) and os.path.isfile(module_path):
+            _update_parameters(params, Configurations.load(module_file, **configs.dirs.to_dict()))
             self._logger.debug("Read module file: %s", module_file)
             return True
         return False
@@ -335,8 +357,8 @@ class PVArray(pv.pvsystem.Array, Component):
         return params
 
     # noinspection PyProtectedMember, PyUnresolvedReferences
-    def _infer_temperature_model_params(self) -> dict:
-        params = self._read_temperature_model_params(self.configs)
+    def _infer_temperature_model_params(self, configs: Configurations) -> dict:  # noqa
+        params = self._read_temperature_model_params(configs)
         if len(params) > 0:
             self._logger.debug("Extracted temperature model parameters from config file")
             return params
@@ -394,27 +416,21 @@ class PVArray(pv.pvsystem.Array, Component):
         return params
 
     # noinspection PyProtectedMember, PyUnresolvedReferences
-    def _infer_array_losses_params(self) -> dict:
-        params = self._read_array_losses_params(self.configs)
+    def _infer_array_losses_params(self, configs: Configurations) -> dict:
+        params = self._read_array_losses_params(configs)
         if len(params) > 0:
             self._logger.debug("Extracted array losses model parameters from config file")
 
         return params
 
-    def _infer_shading_losses_params(self) -> Optional[Dict[str, Any]]:
+    def _infer_shading_losses_params(self, configs: Configurations) -> Optional[Dict[str, Any]]:
         shading = {}
-        shading_file = os.path.join(self.configs.dirs.conf, self.name.replace("array", "shading") + ".conf")
+        shading_file = os.path.join(configs.dirs.conf, self.key.replace("array", "shading") + ".conf")
         if not os.path.isfile(shading_file):
-            shading_file = os.path.join(self.configs.dirs.conf, "shading.conf")
+            shading_file = os.path.join(configs.dirs.conf, "shading.conf")
         if os.path.isfile(shading_file):
-            shading = Configurations.load(shading_file, **self.configs.dirs.encode())
+            shading = Configurations.load(shading_file, **configs.dirs.to_dict())
         return shading
-
-    def activate(self) -> None:
-        super().activate()
-
-    def deactivate(self) -> None:
-        super().activate()
 
     def pvwatts_losses(self, solar_position: pd.DataFrame) -> dict:
         params = _build_kwargs(

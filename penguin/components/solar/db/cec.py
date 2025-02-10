@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.components.pv.db.cec
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+penguin.components.solar.db.cec
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 """
+
 import os
 from collections import OrderedDict
 
@@ -12,9 +13,9 @@ from pvlib import pvsystem
 
 import numpy as np
 import pandas as pd
-from loris import Configurations
+from lori import Configurations
 
-from .base import PVDatabase
+from .base import SolarDatabase
 
 SAM_CEC_MODULES_CSV = "sam-library-cec-modules-2019-03-05.csv"
 SAM_CEC_INVERTERS_CSV = "sam-library-cec-inverters-2019-03-05.csv"
@@ -23,7 +24,7 @@ CEC_MODULES_XLSX = "https://solarequipment.energy.ca.gov/Home/DownloadtoExcel?fi
 CEC_INVERTERS_XLSX = "https://solarequipment.energy.ca.gov/Home/DownloadtoExcel?filename=InvertersList"
 
 
-class ModuleDatabase(PVDatabase):
+class ModuleDatabase(SolarDatabase):
     def __init__(self, configs: Configurations):
         super().__init__(configs, "modules")
 
@@ -48,7 +49,7 @@ class ModuleDatabase(PVDatabase):
             elif len_post > 0 and len_post > len_prior:
                 return " ".join(arr[:len_post]).strip()
             else:
-                logger.warning("Unable to find manufacturer for {}".format(index))
+                self._logger.warning("Unable to find manufacturer for {}".format(index))
                 return False
 
         manufacturer = False
@@ -75,10 +76,11 @@ class ModuleDatabase(PVDatabase):
                 sorted(manufacturers)
                 with open(manufacturers_file, "w", encoding="utf-8") as f:
                     f.write("\n".join(manufacturers))
-                logger.info("Adding manufacturer: {}".format(manufacturer))
+                self._logger.info("Adding manufacturer: {}".format(manufacturer))
 
             module_meta, module_data = self._decode_singlediode(manufacturer, index, module)
-            module_model = self._encode_str(index[len(manufacturer) + 1 :].strip())
+            module_model_prefix = len(manufacturer) + 1
+            module_model = self._encode_str(index[module_model_prefix:].strip())
             manufacturer = self._encode_str(manufacturer)
             if manufacturer not in meta:
                 meta[manufacturer] = OrderedDict()
@@ -86,11 +88,13 @@ class ModuleDatabase(PVDatabase):
 
             self.write(module_model, module_data, sub_dir=manufacturer)
 
-            logger.debug("Successfully built Module: %s %s", module_meta["Manufacturer"], module_meta["Model Number"])
+            self._logger.debug(
+                "Successfully built Module: %s %s", module_meta["Manufacturer"], module_meta["Model Number"]
+            )
 
         super().write("modules", meta)
 
-        logger.info("Complete module library built for %i entries", len(meta))
+        self._logger.info("Complete module library built for %i entries", len(meta))
 
     @staticmethod
     def _encode_str(string: str) -> str:
@@ -156,7 +160,7 @@ class ModuleDatabase(PVDatabase):
         return meta, data
 
 
-class InverterDatabase(PVDatabase):
+class InverterDatabase(SolarDatabase):
     def __init__(self, configs: Configurations):
         super().__init__(configs, "inverters")
 
@@ -176,13 +180,13 @@ class InverterDatabase(PVDatabase):
 
             self.write(inverter_model, inverter_data, sub_dir=manufacturer)
 
-            logger.debug(
+            self._logger.debug(
                 "Successfully built Inverter: %s %s", inverter_meta["Manufacturer"], inverter_meta["Model Number"]
             )
 
         super().write("inverters", meta)
 
-        logger.info("Complete inverter library built for %i entries", len(meta))
+        self._logger.info("Complete inverter library built for %i entries", len(meta))
 
     @staticmethod
     def _encode_str(string: str) -> str:

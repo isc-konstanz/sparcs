@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-    penguin.components.weather.epw
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+penguin.components.weather.epw
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -16,7 +17,7 @@ from pvlib.iotools import read_epw
 
 import numpy as np
 import pandas as pd
-from loris import Configurations
+from lori import Configurations
 from penguin import Location
 from penguin.components.weather import Weather
 
@@ -48,7 +49,7 @@ class EPWWeather(Weather):
             if self._data[column].sum() == 0:
                 self._data.drop(column, axis=1, inplace=True)
 
-        self._location = Location.from_epw(self._meta)
+        self.location = Location.from_epw(self._meta)
 
     # noinspection PyPackageRequirements
     def _download(self, location: Location) -> None:
@@ -97,7 +98,7 @@ class EPWWeather(Weather):
         self,
         start: pd.Timestamp | dt.datetime = None,
         end: pd.Timestamp | dt.datetime = None,
-        **kwargs
+        **kwargs,
     ) -> pd.DataFrame:
         """
         Retrieves the weather data for a specified time interval
