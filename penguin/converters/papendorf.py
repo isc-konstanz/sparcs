@@ -5,15 +5,22 @@ penguin.converters.papendorf
 
 
 """
-
 from __future__ import annotations
 
-import json
-from typing import Literal, Type
+from typing import Type
 
 import pandas as pd
+import json
+
 from lori import Configurations
-from lori.converters import ConversionException, Converter, register_converter_type
+from lori.converters import Converter, ConversionException, register_converter_type
+
+# FIXME: Remove this once Python >= 3.9 is a requirement
+try:
+    from typing import Literal
+
+except ImportError:
+    from typing_extensions import Literal
 
 
 # noinspection SpellCheckingInspection
@@ -36,13 +43,13 @@ class PapendorfConverter(Converter):
         try:
             # TODO: Implement conversion
             print(value)
-            return None
+            return value
 
         except TypeError:
             pass
         raise ConversionException(f"Expected str or {self.dtype}, not: {type(value)}")
 
-    def revert(self, value: pd.Series) -> str | pd.Series:
+    def to_str(self, value: pd.Series) -> str | pd.Series:
         if issubclass(type(value), pd.Series):
             return value.apply(lambda v: json.dumps(v)).astype(str)
         return json.dumps(value)
