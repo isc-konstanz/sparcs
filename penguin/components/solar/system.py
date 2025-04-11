@@ -75,6 +75,7 @@ class SolarSystem(pv.pvsystem.PVSystem, Component):
 
         self.components.load_from_type(
             SolarArray,
+            configs,
             "arrays",
             key="array",
             name=f"{self.name} Array",
