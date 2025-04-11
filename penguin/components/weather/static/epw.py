@@ -1,31 +1,29 @@
 # -*- coding: utf-8 -*-
 """
-penguin.components.weather.epw
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+penguin.components.weather.static.epw
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 """
 
 from __future__ import annotations
 
-import datetime as dt
 import os
 import re
-from typing import Dict
+from typing import Any, Dict, Tuple
 
 from pvlib.iotools import read_epw
 
 import numpy as np
 import pandas as pd
 from lori import Configurations
+from lori.components.weather import register_weather_type
+from penguin.components.weather.static import WeatherFile
 from penguin import Location
-from penguin.components.weather import Weather
 
 
-class EPWWeather(Weather):
-    _data: pd.DataFrame
-    _meta: Dict
-
+@register_weather_type("epw")
+class EPWWeather(WeatherFile):
     year: int
     file: str
     path: str
@@ -42,14 +40,6 @@ class EPWWeather(Weather):
         if not os.path.isfile(self.path):
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
             self._download(self.location)
-
-        self._data, self._meta = read_epw(filename=self.path, coerce_year=self.year)
-        columns = self._data.columns
-        for column in columns:
-            if self._data[column].sum() == 0:
-                self._data.drop(column, axis=1, inplace=True)
-
-        self.location = Location.from_epw(self._meta)
 
     # noinspection PyPackageRequirements
     def _download(self, location: Location) -> None:
@@ -94,30 +84,9 @@ class EPWWeather(Weather):
             self._logger.warning("Connection error status code: %s" % response.status_code)
             response.raise_for_status()
 
-    def get(
-        self,
-        start: pd.Timestamp | dt.datetime = None,
-        end: pd.Timestamp | dt.datetime = None,
-        **kwargs,
-    ) -> pd.DataFrame:
-        """
-        Retrieves the weather data for a specified time interval
+    def _read_from_file(self) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+        return read_epw(filename=self.path, coerce_year=self.year)
 
-        :param start:
-            the start timestamp for which weather data will be looked up for.
-            For many applications, passing datetime.datetime.now() will suffice.
-        :type start:
-            :class:`pandas.Timestamp` or datetime
-
-        :param end:
-            the end timestamp for which weather data will be looked up for.
-        :type end:
-            :class:`pandas.Timestamp` or datetime
-
-        :returns:
-            the weather data, indexed in a specific time interval.
-
-        :rtype:
-            :class:`pandas.DataFrame`
-        """
-        return self._get_range(self._data, start, end)
+    # noinspection PyMethodMayBeStatic
+    def _localize_from_meta(self, meta: Dict[str, Any]) -> Location:
+        return Location.from_epw(meta)

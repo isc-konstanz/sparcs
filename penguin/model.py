@@ -29,13 +29,13 @@ DEFAULTS = dict(
 # noinspection SpellCheckingInspection, PyAbstractClass
 class Model(Configurator, ModelChain):
     @classmethod
-    def load(cls, pvsystem: SolarSystem, override_file: str = "model.conf", section: str = "model") -> Model:
-        override_dir = pvsystem.configs.path.replace(".conf", ".d")
+    def load(cls, pvsystem: SolarSystem, include_file: str = "model.conf", section: str = "model") -> Model:
+        include_dir = pvsystem.configs.path.replace(".conf", ".d")
         configs_dirs = pvsystem.configs.dirs.to_dict()
-        configs_dirs["conf_dir"] = override_dir
+        configs_dirs["conf_dir"] = include_dir
 
         configs = Configurations.load(
-            override_file,
+            include_file,
             **configs_dirs,
             **pvsystem.configs,
             require=False,

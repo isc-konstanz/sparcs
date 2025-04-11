@@ -21,10 +21,8 @@ from .components import (  # noqa: F401
     SolarSystem,
     IrrigationSeries,
     IrrigationSystem,
-    ElectricVehicle,
     ElectricalEnergyStorage,
     ThermalEnergyStorage,
-    Weather,
 )
 
 from . import system  # noqa: F401
