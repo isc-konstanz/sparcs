@@ -14,6 +14,114 @@ from pvlib.irradiance import dirint, disc, dni
 import numpy as np
 import pandas as pd
 
+from lori import Constant, Weather
+
+
+SOLAR_ELEVATION = Constant(float, "solar_elevation", "Solar Elevation", "°")
+SOLAR_ZENITH = Constant(float, "solar_zenith", "Solar Zenith", "°")
+SOLAR_AZIMUTH = Constant(float, "solar_azimuth", "Solar Azimuth", "°")
+
+validated_meteo_inputs = [
+    Weather.GHI,
+    Weather.DHI,
+    Weather.DNI,
+    Weather.TEMP_AIR,
+    Weather.TEMP_DEW_POINT,
+    Weather.HUMIDITY_REL,
+    Weather.PRECIPITABLE_WATER,
+    Weather.PRESSURE_SEA,
+    Weather.WIND_SPEED,
+    SOLAR_ELEVATION,
+    SOLAR_ZENITH,
+    SOLAR_AZIMUTH,
+]
+
+
+# noinspection PyUnresolvedReferences, PyTypeChecker
+def validate_meteo_inputs(weather: pd.DataFrame, location: Location) -> pd.DataFrame:
+    def assert_columns(*columns: str) -> bool:
+        if any(column for column in columns if column not in weather.columns or weather[column].isna().any()):
+            return False
+        return True
+
+    def insert_column(column: str, data: pd.DataFrame) -> None:
+        if column not in weather.columns or weather[column].dropna().empty:
+            weather[column] = data
+        else:
+            weather[column] = weather[column].combine_first(data)
+
+    if not assert_columns(Weather.PRESSURE_SEA):
+        pressure = pd.Series(index=weather.index, data=atmosphere.alt2pres(location.altitude))
+        insert_column(Weather.PRESSURE_SEA, pressure)
+
+    solar_position = location.get_solarposition(weather.index, pressure=weather[Weather.PRESSURE_SEA])
+
+    if not assert_columns(Weather.GHI, Weather.DHI, Weather.DNI):
+        if not assert_columns(Weather.GHI):
+            if not assert_columns(Weather.CLOUD_COVER):
+                raise WeatherException(
+                    f"Unable to estimate missing '{Weather.GHI}' data with "
+                    f"missing or invalid column: {Weather.CLOUD_COVER}"
+                )
+            ghi = global_irradiance_from_cloud_cover(location, weather[Weather.CLOUD_COVER], solar_position)
+            insert_column(Weather.GHI, ghi)
+
+        if not assert_columns(Weather.DHI, Weather.DNI):
+            if not assert_columns(Weather.DHI):
+                if not assert_columns(Weather.GHI):
+                    raise WeatherException(
+                        f"Unable to estimate missing '{Weather.DHI}' and '{Weather.DNI}' data with "
+                        f"missing or invalid columns: {', '.join([Weather.GHI])}"
+                    )
+                kwargs = {}
+                if assert_columns(Weather.TEMP_DEW_POINT):
+                    kwargs["temp_dew"] = weather[Weather.TEMP_DEW_POINT]
+                if assert_columns(Weather.PRESSURE_SEA):
+                    kwargs["pressure"] = weather[Weather.PRESSURE_SEA]
+
+                dni, dhi = direct_diffuse_from_global_irradiance(solar_position, weather[Weather.GHI], **kwargs)
+                insert_column(Weather.DHI, dhi)
+                insert_column(Weather.DNI, dni)
+            else:
+                if not assert_columns(Weather.GHI, Weather.DHI):
+                    raise WeatherException(
+                        f"Unable to estimate missing '{Weather.DNI}' data with "
+                        f"missing or invalid columns: {', '.join([Weather.GHI, Weather.DHI])}"
+                    )
+                dni = direct_normal_from_global_diffuse_irradiance(
+                    solar_position, weather[Weather.GHI], weather[Weather.DHI]
+                )
+                insert_column(Weather.DNI, dni)
+
+    if not assert_columns(Weather.HUMIDITY_REL):
+        if not assert_columns(Weather.TEMP_AIR, Weather.TEMP_DEW_POINT):
+            raise WeatherException(
+                f"Unable to estimate missing '{Weather.HUMIDITY_REL}' data with "
+                f"missing or invalid columns: {', '.join([Weather.TEMP_AIR, Weather.TEMP_DEW_POINT])}"
+            )
+        else:
+            insert_column(
+                Weather.HUMIDITY_REL,
+                relative_humidity_from_dewpoint(weather[Weather.TEMP_AIR], weather[Weather.TEMP_DEW_POINT]),
+            )
+    if not assert_columns(Weather.PRECIPITABLE_WATER):
+        if not assert_columns(Weather.TEMP_AIR, Weather.HUMIDITY_REL):
+            raise WeatherException(
+                f"Unable to estimate missing '{Weather.PRECIPITABLE_WATER}' data with "
+                f"missing or invalid columns: {', '.join([Weather.TEMP_AIR, Weather.HUMIDITY_REL])}"
+            )
+        else:
+            insert_column(
+                Weather.PRECIPITABLE_WATER,
+                precipitable_water_from_relative_humidity(weather[Weather.TEMP_AIR], weather[Weather.HUMIDITY_REL]),
+            )
+
+    insert_column(SOLAR_AZIMUTH, solar_position["azimuth"])
+    insert_column(SOLAR_ZENITH, solar_position["apparent_zenith"])
+    insert_column(SOLAR_ELEVATION, solar_position["apparent_elevation"])
+
+    return weather
+
 
 def precipitable_water_from_relative_humidity(temperature: pd.Series, relative_humidity: pd.Series) -> pd.Series:
     r"""

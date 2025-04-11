@@ -7,4 +7,5 @@ penguin.components.solar
 """
 
 from .array import SolarArray, Orientation  # noqa: F401
+from .inverter import SolarInverter  # noqa: F401
 from .system import SolarSystem  # noqa: F401

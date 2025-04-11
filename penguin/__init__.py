@@ -19,10 +19,8 @@ from . import components  # noqa: F401
 from .components import (  # noqa: F401
     SolarArray,
     SolarSystem,
-    ElectricVehicle,
     ElectricalEnergyStorage,
     ThermalEnergyStorage,
-    Weather,
 )
 
 from . import system  # noqa: F401

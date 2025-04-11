@@ -6,9 +6,12 @@ penguin.components.weather
 
 """
 
-from .validator import WeatherValidator as Weather  # noqa: F401
+from .input import (  # noqa: F401
+    validate_meteo_inputs,
+    validated_meteo_inputs,
+)
 
-from .file import (  # noqa: F401
+from .static import (  # noqa: F401
     EPWWeather,
     TMYWeather,
 )

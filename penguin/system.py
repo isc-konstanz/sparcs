@@ -8,40 +8,60 @@ penguin.system
 
 from __future__ import annotations
 
-import datetime as dt
 from typing import Optional
 
 import lori
 import pandas as pd
-from lori import ChannelState, ComponentException, Configurations, WeatherUnavailableException
-from penguin import Location, SolarSystem, Weather
+from lori import Channel, ChannelState, Configurations, Constant, Weather, WeatherUnavailableException
+from lori.typing import TimestampType
+from penguin import Location
+from penguin.components import SolarSystem
+from penguin.components.weather import validated_meteo_inputs, validate_meteo_inputs
 
 
 class System(lori.System):
-    # fmt: off
-    POWER_EL:       str = "el_power"
-    POWER_EL_IMP:   str = "el_import_power"
-    POWER_EL_EXP:   str = "el_export_power"
-    POWER_TH:       str = "th_power"
-    POWER_TH_HT:    str = "th_ht_power"
-    POWER_TH_DOM:   str = "th_dom_power"
+    POWER_EL = Constant(float, "el_power", "Electrical Power", "W")
+    POWER_EL_EST = Constant(float, "el_est_power", "Estimate Electrical Power", "W")
+    POWER_EL_IMP = Constant(float, "el_import_power", "Import Electrical Power", "W")
+    POWER_EL_EXP = Constant(float, "el_export_power", "Export Electrical Power", "W")
 
-    ENERGY_EL:      str = "el_energy"
-    ENERGY_EL_IMP:  str = "el_import_energy"
-    ENERGY_EL_EXP:  str = "el_export_energy"
-    ENERGY_TH:      str = "th_energy"
-    ENERGY_TH_HT:   str = "th_ht_energy"
-    ENERGY_TH_DOM:  str = "th_dom_energy"
-    # fmt: on
+    POWER_TH = Constant(float, "th_power", "Thermal Power", "W")
+    POWER_TH_EST = Constant(float, "th_est_power", "Estimate Thermal Power", "W")
+    POWER_TH_DOM = Constant(float, "th_dom_power", "Domestic Water Thermal Power", "W")
+    POWER_TH_HT = Constant(float, "th_ht_power", "Heating Water Thermal Power", "W")
+
+    ENERGY_EL = Constant(float, "el_energy", "Electrical Energy", "kWh")
+    ENERGY_EL_IMP = Constant(float, "el_import_energy", "Import Electrical Energy", "kWh")
+    ENERGY_EL_EXP = Constant(float, "el_export_energy", "Export Electrical Energy", "kWh")
+
+    ENERGY_TH = Constant(float, "th_energy", "Thermal Energy", "kWh")
+    ENERGY_TH_HT = Constant(float, "th_ht_energy", "Heating Water Thermal Energy", "kWh")
+    ENERGY_TH_DOM = Constant(float, "th_dom_energy", "Domestic Water Thermal Energy", "kWh")
 
     _location: Optional[Location] = None
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
-        if self.has_type(SolarSystem):
-            from penguin.constants import COLUMNS
 
-            self.data.add(key=SolarSystem.POWER_EST, name=COLUMNS[SolarSystem.POWER_EST], connector=None, type=float)
+        def add_channel(constant: Constant, **custom) -> None:
+            self.data.add(
+                key = constant,
+                aggregate = "mean",
+                connector = None,
+                **custom,
+            )
+
+        if self.components.has_type(SolarSystem):
+            add_channel(SolarSystem.POWER_DC)
+            add_channel(SolarSystem.POWER)
+            add_channel(SolarSystem.POWER_EST)
+
+        # TODO: Improve channel setup based on available components
+        add_channel(System.POWER_EL)
+        add_channel(System.POWER_EL_EST)
+        add_channel(System.POWER_TH)
+        add_channel(System.POWER_TH_EST)
+
 
     def localize(self, configs: Configurations) -> None:
         if configs.enabled:
@@ -56,59 +76,69 @@ class System(lori.System):
         else:
             self._location = None
 
+    # noinspection PyUnresolvedReferences
     def activate(self) -> None:
         super().activate()
-        if self.has_type(SolarSystem):
-            try:
-                weather_channels = self.weather.data.channels.filter(lambda c: c.key in Weather.VALIDATED)
-                if self.weather.forecast.is_enabled():
-                    weather_channels += self.weather.forecast.data.channels.filter(lambda c: c.key in Weather.VALIDATED)
-                self.data.register(self.predict_solar, *weather_channels, how="all", unique=False)
-
-            except WeatherUnavailableException:
-                pass
-
-    # # noinspection PyShadowingBuiltins
-    # def evaluate(self, **kwargs):
-    #     from .evaluation import Evaluation
-    #     eval = Evaluation(self)
-    #     return eval(**kwargs)
-
-    # noinspection PyShadowingBuiltins, PyUnresolvedReferences, PyUnusedLocal
-    def predict_solar(self, weather: pd.DataFrame) -> pd.DataFrame:
         try:
-            weather = self.weather.validate(weather)
-            result = pd.DataFrame(data=0.0, index=weather.index, columns=[SolarSystem.POWER, SolarSystem.POWER_DC])
-            result.index.name = "timestamp"
-            for solar in self.get_all(SolarSystem):
-                solar_result = solar.predict(weather)
-                solar_columns = [SolarSystem.POWER, SolarSystem.POWER_DC]
-                result[solar_columns] += solar_result[solar_columns].abs()
+            self._register_weather(self.weather)
+            self._register_weather(self.weather.forecast)
 
-            solar_power_channel = self.data[SolarSystem.POWER_EST]
-            solar_power = result[SolarSystem.POWER]
-            if not solar_power.empty:
-                solar_power_channel.set(solar_power.index[0], solar_power)
+        except WeatherUnavailableException:
+            pass
+
+    def _register_weather(self, weather: Weather) -> None:
+        if not weather.is_enabled():
+            return
+
+        weather_channels = []
+        for input in validated_meteo_inputs:
+            if input not in weather.data:
+                weather.data.add(key=input, aggregate="mean", connector=None)
+                continue
+            weather_channels.append(weather.data[input])
+        weather.data.register(self._on_weather_received, weather_channels, how="all", unique=False)
+
+    def _on_weather_received(self, weather: pd.DataFrame) -> None:
+        predictions = self._predict(weather)
+        timestamp = predictions.index[0]
+
+        def update_channel(channel: Channel, column: str) -> None:
+            if column in predictions.columns:
+                channel.set(timestamp, predictions[column])
             else:
-                solar_power_channel.state = ChannelState.NOT_AVAILABLE
+                channel.state = ChannelState.NOT_AVAILABLE
 
-            return result
+        if self.components.has_type(SolarSystem):
+            for solar in self.components.get_all(SolarSystem):
+                solar_column = solar.data[SolarSystem.POWER].column
+                update_channel(solar.data[SolarSystem.POWER_EST], solar_column)
+            update_channel(self.data[SolarSystem.POWER_EST], SolarSystem.POWER)
+        update_channel(self.data[System.POWER_EL_EST], System.POWER_EL)
+        update_channel(self.data[System.POWER_TH_EST], System.POWER_TH)
 
-        except ComponentException as e:
-            self._logger.warning(f"Unable to predict system '{self.name}' PV: {str(e)}")
+    def _predict(self, weather: pd.DataFrame) -> pd.DataFrame:
+        weather = validate_meteo_inputs(weather, self.location)
+        predictions = pd.DataFrame(index=weather.index)
+        predictions.index.name = Channel.TIMESTAMP
 
-    # noinspection PyShadowingBuiltins, PyUnresolvedReferences
+        if self.components.has_type(SolarSystem):
+            solar_columns = [SolarSystem.POWER, SolarSystem.POWER_DC]
+            predictions[solar_columns] = 0.0
+            for solar in self.components.get_all(SolarSystem):
+                solar_column = solar.data[SolarSystem.POWER].column
+                solar_prediction = solar.predict(weather)
+                predictions[solar_column] = solar_prediction[SolarSystem.POWER]
+                predictions[solar_columns] += solar_prediction[solar_columns].fillna(0)
+
+        return predictions
+
     def predict(
         self,
-        start: pd.Timestamp | dt.datetime = None,
-        end: pd.Timestamp | dt.datetime = None,
+        start: TimestampType = None,
+        end: TimestampType = None,
         **kwargs,
     ) -> pd.DataFrame:
-        try:
-            weather = self.weather.get(start, end, **kwargs)  # , validate=True, **kwargs)
-            solar = self.predict_solar(weather)
+        weather = self.weather.get(start, end, **kwargs)
+        predictions = self._predict(weather)
 
-            return pd.concat([solar, weather], axis="columns")
-
-        except ComponentException as e:
-            self._logger.warning(f"Unable to run system '{self.name}': {str(e)}")
+        return pd.concat([predictions, weather], axis="columns")

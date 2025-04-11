@@ -8,45 +8,41 @@ penguin.components.solar.system
 
 from __future__ import annotations
 
-import glob
 import os
 from typing import Dict, List, Mapping
 
 import pvlib as pv
 
 import pandas as pd
-from lori import ChannelState, ConfigurationException, Configurations, Context
+from lori import ConfigurationException, Configurations, Constant, Context
 from lori.components import Component, ComponentException, register_component_type
-from lori.util import get_includes, validate_key
-from penguin.components.current import DirectCurrent
 from penguin.components.solar.array import SolarArray
 from penguin.components.solar.db import InverterDatabase
 
-TYPE: str = "pv"
 
-
-@register_component_type(TYPE, "solar")
+@register_component_type("pv", "solar")
 # noinspection SpellCheckingInspection
-class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
+class SolarSystem(pv.pvsystem.PVSystem, Component):
     INCLUDES = ["model", "inverter", "arrays", *SolarArray.INCLUDES]
 
-    POWER: str = f"{TYPE}_power"
-    POWER_EST: str = f"{TYPE}_est_power"
-    POWER_EXP: str = f"{TYPE}_exp_power"
+    POWER = Constant(float, "pv_power", "PV Power", "W")
+    POWER_EST = Constant(float, "pv_est_power", "Estimate PV Power", "W")
+    POWER_EXP = Constant(float, "pv_exp_power", "Export PV Power", "W")
+    POWER_DC = Constant(float, "pv_dc_power", "PV (DC) Power", "W")
 
-    ENERGY: str = f"{TYPE}_energy"
-    ENERGY_EST: str = f"{TYPE}_est_energy"
-    ENERGY_EXP: str = f"{TYPE}_exp_energy"
+    ENERGY = Constant(float, "pv_energy", "PV Energy", "kWh")
+    ENERGY_DC = Constant(float, "pv_dc_energy", "PV (DC) Energy", "kWh")
+    ENERGY_EXP = Constant(float, "pv_exp_energy", "Export PV Energy", "kWh")
 
-    CURRENT_SC: str = f"{TYPE}_current_sc"
-    CURRENT_MP: str = f"{TYPE}_current_mp"
+    CURRENT_SC = Constant(float, "pv_current_sc", "Short Circuit Current", "A")
+    CURRENT_MP = Constant(float, "pv_current_mp", "Maximum Power Point Current", "A")
 
-    VOLTAGE_OC: str = f"{TYPE}_voltage_oc"
-    VOLTAGE_MP: str = f"{TYPE}_voltage_mp"
+    VOLTAGE_OC = Constant(float, "pv_voltage_oc", "Open Circuit Voltage", "V")
+    VOLTAGE_MP = Constant(float, "pv_voltage_mp", "Maximum Power Point Voltage", "V")
 
-    YIELD_SPECIFIC: str = "specific_yield"
-
-    arrays: List[SolarArray]
+    YIELD_SPECIFIC = Constant(float, "yield_specific", "Specific Yield", "kWh/kWp")
+    YIELD_ENERGY_DC = Constant(float, "yield_energy_dc", "Energy Yield (DC)", "kWh")
+    YIELD_ENERGY = Constant(float, "yield_energy", "Energy Yield", "kWh")
 
     inverter: str = None
     inverter_parameters: dict = {}
@@ -60,7 +56,6 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
 
     def __init__(self, context: Context, configs: Configurations) -> None:  # noqa
         super(pv.pvsystem.PVSystem, self).__init__(context=context, configs=configs)
-        self.arrays = []
 
     def __repr__(self) -> str:
         return Component.__repr__(self)
@@ -68,11 +63,25 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
     def __str__(self) -> str:
         return Component.__str__(self)
 
+    # noinspection PyTypeChecker
+    @property
+    def arrays(self) -> List[SolarArray]:
+        return self.components.get_all(SolarArray)
+
     # noinspection PyProtectedMembers
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
-        self._load_arrays(configs)
+        self.losses_parameters = configs.get("losses", default=SolarSystem.losses_parameters)
+
+        self.components.load_from_type(
+            SolarArray,
+            "arrays",
+            key="array",
+            name=f"{self.name} Array",
+            includes=SolarArray.INCLUDES
+        )
         try:
+            # The converter needs to be configured, after all solar arrays were configured
             inverter = configs.get_section("inverter", defaults={})
             self.inverter = inverter.get("model", default=SolarSystem.inverter)
             self.inverter_parameters = self._infer_inverter_params()
@@ -94,88 +103,20 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
                     * self.inverters_per_system
                 )
 
-            self.losses_parameters = configs.get("losses", default=SolarSystem.losses_parameters)
-
         except ConfigurationException as e:
             self._logger.warning(f"Unable to configure inverter for system '{self.key}': ", e)
 
-        def _add_channel(key: str):
-            from penguin.constants import COLUMNS
-
-            channel = {}
-            if key in COLUMNS:
-                channel["name"] = COLUMNS[key]
-            channel["column"] = key.replace(f"{TYPE}_", self.key)
-            channel["type"] = float
+        def add_channel(constant: Constant, **custom) -> None:
+            channel = constant.to_dict()
+            channel["name"] = constant.name.replace("PV", self.name, 1)
+            channel["column"] = constant.key.replace("pv", self.key, 1)
+            channel["aggregate"] = "mean"
             channel["connector"] = None
+            channel.update(custom)
+            self.data.add(**channel)
 
-            self.data.add(key=key, **channel)
-
-        _add_channel(SolarSystem.POWER)
-        _add_channel(SolarSystem.POWER_DC)
-        _add_channel(SolarSystem.CURRENT_MP)
-        _add_channel(SolarSystem.VOLTAGE_MP)
-        _add_channel(SolarSystem.CURRENT_SC)
-        _add_channel(SolarSystem.VOLTAGE_OC)
-
-    def _load_arrays(self, configs: Configurations):
-        array_key = "array"
-        array_dir = configs.path.replace(".conf", ".d")
-        array_dirs = configs.dirs.to_dict()
-        array_dirs["conf_dir"] = array_dir
-        if "mounting" in configs and len(configs.get_section("mounting")) > 0:
-            # TODO: verify parameter existence by keys
-
-            array_file = f"{array_key}.conf"
-            array_configs = Configurations.load(
-                array_file,
-                **array_dirs,
-                **configs,
-                require=False,
-            )
-            array = SolarArray(self, key="array", name=f"{self.name} Array")
-            array.configure(array_configs)
-            self.arrays.append(array)
-
-        array_defaults = {}
-        if "arrays" in configs:
-            arrays_section = configs.get_section("arrays")
-            array_keys = [k for k in arrays_section.sections if k not in get_includes(type(self))]
-            arrays_configs = {k: arrays_section.pop(k) for k in array_keys}
-            array_defaults.update(arrays_section)
-
-            for array_key, array_section in arrays_configs.items():
-                array_key = validate_key(array_key)
-                array_file = f"{array_key}.conf"
-                array_configs = Configurations.load(
-                    array_file,
-                    **array_dirs,
-                    **array_defaults,
-                    require=False,
-                )
-                array_configs.update(arrays_section, replace=False)
-
-                array = SolarArray(self, key=array_key, name=f"{self.name} {array_key.title()}")
-                array.configure(array_configs)
-                self.arrays.append(array)
-
-            if "alias" in arrays_section:
-                array_key = arrays_section.get('alias')
-
-        for array_path in glob.glob(os.path.join(array_dir, f"{array_key}*.conf")):
-            array_file = os.path.basename(array_path)
-            array_key = validate_key(array_file.rsplit(".", maxsplit=1)[0])
-            if any([array_key == a.key for a in self.arrays]):
-                continue
-
-            array_configs = Configurations.load(
-                array_file,
-                **array_dirs,
-                **array_defaults,
-            )
-            array = SolarArray(self, key=array_key, name=f"{self.name} {array_key.title()}")
-            array.configure(array_configs)
-            self.arrays.append(array)
+        add_channel(SolarSystem.POWER)
+        add_channel(SolarSystem.POWER_EST)
 
     def _infer_inverter_params(self) -> dict:
         params = {}
@@ -251,16 +192,9 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
             return True
         return False
 
-    def activate(self) -> None:
-        for array in self.arrays:
-            array.activate()
-
-    def deactivate(self) -> None:
-        for array in self.arrays:
-            array.deactivate()
-
-    # noinspection PyMethodOverriding
+    # noinspection SpellCheckingInspection, PyMethodOverriding
     def pvwatts_losses(self, solar_position: pd.DataFrame):
+        # noinspection SpellCheckingInspection
         def _pvwatts_losses(array: SolarArray):
             return pv.pvsystem.pvwatts_losses(**array.pvwatts_losses(solar_position))
 
@@ -269,7 +203,7 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
         else:
             return _pvwatts_losses(self.arrays[0])
 
-    def _predict(self, weather: pd.DataFrame) -> pd.DataFrame:
+    def predict(self, weather: pd.DataFrame) -> pd.DataFrame:
         from penguin.model import Model
 
         if len(self.arrays) < 1:
@@ -292,19 +226,6 @@ class SolarSystem(pv.pvsystem.PVSystem, DirectCurrent):
                 SolarArray.VOLTAGE_MP: SolarSystem.VOLTAGE_MP,
             }
         )
-
-    def predict(self, weather: pd.DataFrame) -> pd.DataFrame:
-        data = self._predict(weather)
-
-        for channel in self.data.channels:
-            if channel.key not in data.columns or data[channel.key].empty:
-                channel.state = ChannelState.NOT_AVAILABLE
-                continue
-            channel_data = data[channel.key]
-            channel.set(channel_data.index[0], channel_data)
-
-        return data
-
 
 def _update_parameters(parameters: Dict, update: Mapping):
     for key, value in update.items():
