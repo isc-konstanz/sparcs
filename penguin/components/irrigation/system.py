@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import List
 
 import pandas as pd
-from lori import ChannelState, Configurations
+from lori import ChannelState, Configurations, Constant
 from lori.components import Component, register_component_type
 from penguin.components.irrigation import IrrigationSeries
 
@@ -19,6 +19,10 @@ from penguin.components.irrigation import IrrigationSeries
 @register_component_type("irr", "irrigation", "watering")
 class IrrigationSystem(Component):
     INCLUDES = ["storage", *IrrigationSeries.INCLUDES]
+
+    WATER_SUPPLY_MEAN = Constant(float, "water_supply_mean", "Water Supply Coverage Mean", "%")
+
+    STORAGE_LEVEL = Constant(float, "storage_level", "Storage Level", "%")
 
     # noinspection PyTypeChecker
     @property
@@ -38,9 +42,10 @@ class IrrigationSystem(Component):
         # As % of plant available water capacity (PAWC)
         # self.data.add("water_supply_min", name="Water supply coverage min [%]", type=float)
         # self.data.add("water_supply_max", name="Water supply coverage max [%]", type=float)
-        self.data.add("water_supply_mean", name="Water supply coverage mean [%]", type=float)
+        self.data.add(IrrigationSystem.WATER_SUPPLY_MEAN, aggregate="mean")
 
-        self.data.add("storage_level", name="Storage Level [%]", type=float)
+        # TODO: Verify if last storage level as aggregation is correct
+        self.data.add(IrrigationSystem.STORAGE_LEVEL, aggregate="last")
 
     # noinspection SpellCheckingInspection
     def activate(self) -> None:

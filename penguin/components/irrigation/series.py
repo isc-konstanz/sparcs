@@ -8,7 +8,7 @@ penguin.components.irrigation.series
 
 from __future__ import annotations
 
-from lori import Component, Configurations
+from lori import Component, Configurations, Constant
 from penguin.components.irrigation import SoilMoisture
 
 
@@ -16,6 +16,8 @@ from penguin.components.irrigation import SoilMoisture
 class IrrigationSeries(Component):
     SECTION = "series"
     INCLUDES = [SoilMoisture.SECTION]
+
+    STATE = Constant(bool, "irrigation_state", "Irrigation state")
 
     soil: SoilMoisture
 
@@ -27,7 +29,15 @@ class IrrigationSeries(Component):
         super().configure(configs)
         self.soil.configure(configs.get_section(SoilMoisture.SECTION, defaults={}))
 
-        self.data.add("irrigation_state", name="Irrigation state", type=bool)
+        def add_channel(constant: Constant, **custom) -> None:
+            channel = constant.to_dict()
+            channel["name"] = constant.name.replace("Irrigation", self.name, 1)
+            channel["column"] = constant.key.replace("irrigation", self.key, 1)
+            channel["aggregate"] = "max"
+            channel.update(custom)
+            self.data.add(**channel)
+
+        add_channel(IrrigationSeries.STATE)
 
     # noinspection SpellCheckingInspection
     def activate(self) -> None:
