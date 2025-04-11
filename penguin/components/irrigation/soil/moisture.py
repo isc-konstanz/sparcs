@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Optional
 
 import pandas as pd
-from lori import ChannelState, Component, Configurations
+from lori import ChannelState, Component, Configurations, Constant
 from penguin.components.irrigation.soil import Genuchten, SoilModel
 
 DEFAULT_WILTING_POINT: float = 4.2
@@ -22,14 +22,19 @@ DEFAULT_FIELD_CAPACITY: float = 1.8
 class SoilMoisture(Component):
     SECTION: str = "soil"
 
+    TEMPERATURE = Constant(float, "temperature", "Soil Temperature", "°C")
+    WATER_CONTENT = Constant(float, "water_content", "Soil Water Content", "%")
+    WATER_TENSION = Constant(float, "water_tension", "Soil Water Tension", "hPa")
+    WATER_SUPPLY = Constant(float, "water_supply", "Soil Water Supply Coverage", "%")
+
     wilting_point: float = DEFAULT_WILTING_POINT
     field_capacity: float = DEFAULT_FIELD_CAPACITY
     water_capacity_available: float
 
     model: Optional[SoilModel] = None
 
-    def __init__(self, context: Context, key="soil", **kwargs) -> None:  # noqa
-        super().__init__(context, key=key, **kwargs)
+    def __init__(self, context: Context, configs: Configurations, key="soil", **kwargs) -> None:  # noqa
+        super().__init__(context, configs, key=key, **kwargs)
         self.model = None
 
     def configure(self, configs: Configurations) -> None:
@@ -37,10 +42,11 @@ class SoilMoisture(Component):
         self.model = Genuchten(**configs["model"])
 
         # TODO: Implement validation if water tension is measured directly
-        self.data.add("temperature", name="Soil temperature [°C]", type=float)
-        self.data.add("water_content", name="Soil water content [%]", type=float)
+        self.data.add(SoilMoisture.TEMPERATURE, aggregate="mean")
+        self.data.add(SoilMoisture.WATER_CONTENT, aggregate="mean")
+        self.data.add(SoilMoisture.WATER_TENSION, aggregate="mean")
 
-        self.data.add("water_tension", name="Soil water tension [hPa]", type=float)
+        self.data.add(SoilMoisture.WATER_SUPPLY, aggregate="mean")
 
         # As % of plant available water capacity (PAWC)
         self.data.add("water_supply", name="Soil water supply coverage [%]", type=float)

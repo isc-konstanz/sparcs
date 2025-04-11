@@ -33,6 +33,7 @@ class IrrigationSystem(Component):
         super().configure(configs)
         self.components.load_from_type(
             IrrigationSeries,
+            configs,
             "series",
             key="series",
             name=f"{self.name} Series",
@@ -50,11 +51,8 @@ class IrrigationSystem(Component):
     # noinspection SpellCheckingInspection
     def activate(self) -> None:
         super().activate()
-        water_supplies = []
-        for series in self.series:
-            water_supplies.append(series.soil.data.water_supply)
-
-        self.data.register(self._water_supply_callback, *water_supplies, how="all", unique=True)
+        water_supplies = [s.soil.data.water_supply for s in self.series]
+        self.data.register(self._water_supply_callback, water_supplies, how="all", unique=True)
 
     def _water_supply_callback(self, data: pd.DataFrame) -> None:
         water_supply = data[[c for c in data.columns if "water_supply" in c]]
