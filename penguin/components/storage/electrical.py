@@ -12,7 +12,7 @@ from lori.core import Configurations, Constant
 
 @register_component_type("ees")
 class ElectricalEnergyStorage(Component):
-    STATE_OF_CHARGE = Constant(float, "ees_soc", "EES Charge of State", "%")
+    STATE_OF_CHARGE = Constant(float, "ees_soc", "EES State of Charge", "%")
 
     POWER_CHARGE = Constant(float, "ees_charge_power", "EES Charging Power", "W")
 
