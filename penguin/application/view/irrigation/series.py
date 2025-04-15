@@ -14,11 +14,12 @@ from typing import Any, Dict, Union
 import dash_bootstrap_components as dbc
 from dash import Input, Output, callback, dcc, html
 
-from lori.application.view.pages import ComponentPage, PageLayout
+from lori.application.view.pages import ComponentPage, PageLayout, register_component_page
 from lori.data import Channel
 from penguin.components.irrigation import IrrigationSeries, SoilMoisture
 
 
+@register_component_page(IrrigationSeries)
 class IrrigationSeriesPage(ComponentPage[IrrigationSeries]):
     @property
     def soil(self) -> SoilMoisture:

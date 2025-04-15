@@ -12,11 +12,10 @@ import dash_bootstrap_components as dbc
 from dash import Input, Output, callback, html
 
 from lori.application.view.pages import ComponentGroup, PageLayout, register_component_group, register_component_page
-from penguin.application.view.irrigation import IrrigationSeriesPage
 from penguin.components.irrigation import IrrigationSystem
 
 
-@register_component_page(IrrigationSystem, children={"series": IrrigationSeriesPage})
+@register_component_page(IrrigationSystem)
 @register_component_group(IrrigationSystem, name="Irrigation")
 class IrrigationSystemPage(ComponentGroup[IrrigationSystem]):
     def create_layout(self, layout: PageLayout) -> None:
