@@ -71,8 +71,6 @@ class SolarSystem(pv.pvsystem.PVSystem, Component):
     # noinspection PyProtectedMembers
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
-        self.losses_parameters = configs.get("losses", default=SolarSystem.losses_parameters)
-
         self.components.load_from_type(
             SolarArray,
             configs,
@@ -81,6 +79,22 @@ class SolarSystem(pv.pvsystem.PVSystem, Component):
             name=f"{self.name} Array",
             includes=SolarArray.INCLUDES
         )
+
+        def add_channel(constant: Constant, **custom) -> None:
+            channel = constant.to_dict()
+            channel["name"] = constant.name.replace("PV", self.name, 1)
+            channel["column"] = constant.key.replace("pv", self.key, 1)
+            channel["aggregate"] = "mean"
+            channel["connector"] = None
+            channel.update(custom)
+            self.data.add(**channel)
+
+        add_channel(SolarSystem.POWER)
+        add_channel(SolarSystem.POWER_EST)
+
+    def _on_configure(self, configs: Configurations) -> None:
+        super()._on_configure(configs)
+        self.losses_parameters = configs.get("losses", default=SolarSystem.losses_parameters)
         try:
             # The converter needs to be configured, after all solar arrays were configured
             inverter = configs.get_section("inverter", defaults={})
@@ -103,21 +117,8 @@ class SolarSystem(pv.pvsystem.PVSystem, Component):
                     )
                     * self.inverters_per_system
                 )
-
         except ConfigurationException as e:
             self._logger.warning(f"Unable to configure inverter for system '{self.key}': ", e)
-
-        def add_channel(constant: Constant, **custom) -> None:
-            channel = constant.to_dict()
-            channel["name"] = constant.name.replace("PV", self.name, 1)
-            channel["column"] = constant.key.replace("pv", self.key, 1)
-            channel["aggregate"] = "mean"
-            channel["connector"] = None
-            channel.update(custom)
-            self.data.add(**channel)
-
-        add_channel(SolarSystem.POWER)
-        add_channel(SolarSystem.POWER_EST)
 
     def _infer_inverter_params(self) -> dict:
         params = {}
