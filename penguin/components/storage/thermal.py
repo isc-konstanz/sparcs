@@ -5,6 +5,7 @@ penguin.components.storage.thermal
 
 
 """
+
 from lori.components import Component, register_component_type
 from lori.core import Configurations, Constant
 
@@ -34,4 +35,5 @@ class ThermalEnergyStorage(Component):
             channel["aggregate"] = "mean"
             channel["connector"] = None
             channel.update(custom)
+
         add_channel(ThermalEnergyStorage.TEMPERATURE)

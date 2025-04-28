@@ -18,8 +18,8 @@ import numpy as np
 import pandas as pd
 from lori import Configurations
 from lori.components.weather import register_weather_type
-from penguin.components.weather.static import WeatherFile
 from penguin import Location
+from penguin.components.weather.static import WeatherFile
 
 
 @register_weather_type("epw")

@@ -5,6 +5,7 @@ penguin.components.storage.electrical
 
 
 """
+
 import pandas as pd
 from lori.components import Component, register_component_type
 from lori.core import Configurations, Constant
@@ -44,6 +45,7 @@ class ElectricalEnergyStorage(Component):
             channel["connector"] = None
             channel.update(custom)
             self.data.add(**channel)
+
         add_channel(ElectricalEnergyStorage.STATE_OF_CHARGE)
         add_channel(ElectricalEnergyStorage.POWER_CHARGE)
 

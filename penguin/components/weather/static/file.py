@@ -8,9 +8,8 @@ penguin.components.weather.static.file
 
 from __future__ import annotations
 
-from abc import abstractmethod
-
 import datetime as dt
+from abc import abstractmethod
 from typing import Any, Dict, Tuple
 
 import pandas as pd

@@ -16,7 +16,7 @@ from lori import Channel, ChannelState, Configurations, Constant, Weather, Weath
 from lori.typing import TimestampType
 from penguin import Location
 from penguin.components import SolarSystem
-from penguin.components.weather import validated_meteo_inputs, validate_meteo_inputs
+from penguin.components.weather import validate_meteo_inputs, validated_meteo_inputs
 
 
 class System(lori.System):
@@ -45,9 +45,9 @@ class System(lori.System):
 
         def add_channel(constant: Constant, **custom) -> None:
             self.data.add(
-                key = constant,
-                aggregate = "mean",
-                connector = None,
+                key=constant,
+                aggregate="mean",
+                connector=None,
                 **custom,
             )
 
@@ -61,7 +61,6 @@ class System(lori.System):
         add_channel(System.POWER_EL_EST)
         add_channel(System.POWER_TH)
         add_channel(System.POWER_TH_EST)
-
 
     def localize(self, configs: Configurations) -> None:
         if configs.enabled:
