@@ -77,7 +77,7 @@ class SolarSystem(pv.pvsystem.PVSystem, Component):
             "arrays",
             key="array",
             name=f"{self.name} Array",
-            includes=SolarArray.INCLUDES
+            includes=SolarArray.INCLUDES,
         )
 
         def add_channel(constant: Constant, **custom) -> None:
@@ -228,6 +228,7 @@ class SolarSystem(pv.pvsystem.PVSystem, Component):
                 SolarArray.VOLTAGE_MP: SolarSystem.VOLTAGE_MP,
             }
         )
+
 
 def _update_parameters(parameters: Dict, update: Mapping):
     for key, value in update.items():

@@ -20,3 +20,9 @@ from .solar import (  # noqa: F401
     SolarInverter,
     SolarSystem,
 )
+
+from . import irrigation  # noqa: F401
+from .irrigation import (  # noqa: F401
+    IrrigationSeries,
+    IrrigationSystem,
+)

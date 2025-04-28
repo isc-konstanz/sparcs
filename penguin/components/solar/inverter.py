@@ -6,8 +6,8 @@ penguin.components.solar.inverter
 
 """
 
-from lori.core import Constant
 from lori.components import Component
+from lori.core import Constant
 
 
 class SolarInverter(Component):
