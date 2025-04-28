@@ -144,5 +144,8 @@ dmypy.json
 conf/*
 !conf/*.default.conf
 
-# Configurations and default generated output files
-data/
+# Configurations, assets and default generated output files
+/data/
+/data/assets/
+
+/assets/
