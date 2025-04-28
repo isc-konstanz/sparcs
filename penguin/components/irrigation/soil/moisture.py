@@ -41,15 +41,21 @@ class SoilMoisture(Component):
         super().configure(configs)
         self.model = Genuchten(**configs["model"])
 
-        # TODO: Implement validation if water tension is measured directly
-        self.data.add(SoilMoisture.TEMPERATURE, aggregate="mean")
-        self.data.add(SoilMoisture.WATER_CONTENT, aggregate="mean")
-        self.data.add(SoilMoisture.WATER_TENSION, aggregate="mean")
+        def add_channel(constant: Constant, **custom) -> None:
+            channel = constant.to_dict()
+            channel["name"] = constant.name.replace("Soil", self.name, 1)
+            channel["column"] = f"{self.key}_{constant.key}"
+            channel["aggregate"] = "mean"
+            channel.update(custom)
+            self.data.add(**channel)
 
-        self.data.add(SoilMoisture.WATER_SUPPLY, aggregate="mean")
+        # TODO: Implement validation if water tension is measured directly
+        add_channel(SoilMoisture.TEMPERATURE)
+        add_channel(SoilMoisture.WATER_CONTENT)
+        add_channel(SoilMoisture.WATER_TENSION)
 
         # As % of plant available water capacity (PAWC)
-        self.data.add("water_supply", name="Soil water supply coverage [%]", type=float)
+        add_channel(SoilMoisture.WATER_SUPPLY)
 
         wilting_point = configs.get("wilting_point", default=SoilMoisture.wilting_point)
         field_capacity = configs.get("field_capacity", default=SoilMoisture.field_capacity)
@@ -69,21 +75,23 @@ class SoilMoisture(Component):
 
     def _water_content_callback(self, data: pd.DataFrame) -> None:
         if not data.empty:
+            timestamp = data.index[0]
             water_content = data.dropna(axis="columns").mean(axis="columns") / 100
             if len(water_content) == 1:
                 water_content = water_content.iloc[0]
             water_tension = self.model.water_tension(water_content)
-            self.data.water_tension.value = water_tension
+            self.data.water_tension.set(timestamp, water_tension)
         else:
             self.data.water_tension.state = ChannelState.NOT_AVAILABLE
 
     def _water_tension_callback(self, data: pd.DataFrame) -> None:
         if not data.empty:
+            timestamp = data.index[0]
             water_tension = data.dropna(axis="columns").mean(axis="columns")
             if len(water_tension) == 1:
                 water_tension = water_tension.iloc[0]
             water_content = self.model.water_content(water_tension)
             water_supply = (water_content - self.wilting_point) / self.water_capacity_available
-            self.data.water_supply.value = water_supply * 100
+            self.data.water_supply.set(timestamp, water_supply * 100)
         else:
             self.data.water_supply.state = ChannelState.NOT_AVAILABLE

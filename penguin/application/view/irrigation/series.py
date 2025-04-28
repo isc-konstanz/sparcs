@@ -14,8 +14,8 @@ from typing import Any, Dict, Union
 import dash_bootstrap_components as dbc
 from dash import Input, Output, callback, dcc, html
 
+from lori import Channel, Channels, Constant
 from lori.application.view.pages import ComponentPage, PageLayout, register_component_page
-from lori.data import Channel
 from penguin.components.irrigation import IrrigationSeries, SoilMoisture
 
 
@@ -45,8 +45,7 @@ class IrrigationSeriesPage(ComponentPage[IrrigationSeries]):
                 [
                     dbc.Col(
                         self._build_soil_value(
-                            "water_supply",
-                            unit="%",
+                            SoilMoisture.WATER_SUPPLY,
                             color="#68adff",
                             style={"min-width": "14rem"},
                         ),
@@ -54,8 +53,7 @@ class IrrigationSeriesPage(ComponentPage[IrrigationSeries]):
                     ),
                     dbc.Col(
                         self._build_soil_value(
-                            "water_content",
-                            unit="%",
+                            SoilMoisture.WATER_CONTENT,
                             color="#8fd0ff",
                             style={"min-width": "10rem"},
                         ),
@@ -67,7 +65,7 @@ class IrrigationSeriesPage(ComponentPage[IrrigationSeries]):
         temperature = [
             dbc.Row(dbc.Col(html.H5("Soil"))),
             dbc.Row(dbc.Col(html.H6("Temperature"))),
-            dbc.Row(dbc.Col(self._build_soil_value("temperature", unit="°C", color="#ff746c"))),
+            dbc.Row(dbc.Col(self._build_soil_value(SoilMoisture.TEMPERATURE, color="#ff746c"))),
         ]
 
         layout.card.append(html.Div(moisture), focus=True)
@@ -75,6 +73,9 @@ class IrrigationSeriesPage(ComponentPage[IrrigationSeries]):
 
         layout.append(html.Div(moisture))
         layout.append(html.Div(temperature))
+
+    def _create_data_layout(self, layout: PageLayout, channels: Channels, **kwargs) -> None:
+        super()._create_data_layout(layout, channels + self.soil.data.channels, **kwargs)
 
     # noinspection PyShadowingBuiltins
     def _build_switch(self) -> html.Div:
@@ -117,13 +118,13 @@ class IrrigationSeriesPage(ComponentPage[IrrigationSeries]):
         )
 
     # noinspection PyShadowingBuiltins
-    def _build_soil_value(self, key: str, *args, **kwargs) -> html.Div:
-        id = f"{self.id}-{key.replace('_', '-')}"
-        channel = self.soil.data[key]
+    def _build_soil_value(self, constant: Constant, *args, **kwargs) -> html.Div:
+        id = f"{self.id}-{constant.key.replace('_', '-')}"
+        channel = self.soil.data[constant.key]
         channel_callback = callback(
             Output(id, "children"),
             Input("view-update", "n_intervals"),
-        )(ChannelCallback(channel, *args, **kwargs))
+        )(ChannelCallback(channel, unit=constant.unit, *args, **kwargs))
         return html.Div(channel_callback(), id=id)
 
 

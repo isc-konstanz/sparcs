@@ -37,7 +37,7 @@ class IrrigationSystem(Component):
             "series",
             key="series",
             name=f"{self.name} Series",
-            includes=IrrigationSeries.INCLUDES
+            includes=IrrigationSeries.INCLUDES,
         )
 
         # As % of plant available water capacity (PAWC)
