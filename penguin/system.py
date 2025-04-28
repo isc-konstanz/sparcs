@@ -335,16 +335,29 @@ class System(lori.System):
         ]
         if not self.components.has_type(ElectricalEnergyStorage):
             return
-        if not any(c in data["predictions"].columns for c in columns):
-            return
+
+        hours = pd.Series(data.index, index=data.index)
+        hours = (hours - hours.shift(1)).bfill().dt.total_seconds() / 3600.0
+
         ees_simulated = False
         for ees in self.components.get_all(ElectricalEnergyStorage):
             ees_columns = [ees.data[c].column for c in columns]
+            ees_power_column = ees.data[ElectricalEnergyStorage.POWER_CHARGE].column
+            if ees_power_column not in data["predictions"].columns:
+                continue
+
+            ees_power = data[("predictions", ees_power_column)]
             ees_reference = ees.data.from_logger(start=data.index[0], end=data.index[-1])
             if ees_reference.empty:
                 ees_simulated = True
             else:
                 data[("references", ees_columns)] = ees_reference[columns]
+
+            ees_capacity = sum([ees.capacity for ees in self.components.get_all(ElectricalEnergyStorage)])
+            ees_cycles = (ees_power.where(ees_power >= 0, other=0) / 1000 * hours).sum() / ees_capacity
+            ees_cycles_name = ElectricalEnergyStorage.CYCLES.name.replace("EES", ees.name)
+
+            results.add(ElectricalEnergyStorage.CYCLES, ees_cycles_name, ees_cycles, header="Battery Storage")
 
         if ees_simulated:
             # One or more solar system does not have reference measurements.
@@ -352,14 +365,6 @@ class System(lori.System):
             for column in [System.POWER_EL, *columns]:
                 if column in data["references"].columns:
                     data.drop(columns=[("references", column)], inplace=True)
-
-        hours = pd.Series(data.index, index=data.index)
-        hours = (hours - hours.shift(1)).bfill().dt.total_seconds() / 3600.0
-
-        ees_power = data[("predictions", ElectricalEnergyStorage.POWER_CHARGE)]
-        ees_capacity = sum([ees.capacity for ees in self.components.get_all(ElectricalEnergyStorage)])
-        ees_cycles = (ees_power.where(active_power >= 0, other=0) / 1000 * hours).sum() / ees_capacity
-        results.append(Result.from_const(ElectricalEnergyStorage.CYCLES, ees_cycles, header="Battery Storage"))
 
     # noinspection PyMethodMayBeStatic
     def _evaluate_energy(self, results: Results, data: pd.DataFrame) -> None:
