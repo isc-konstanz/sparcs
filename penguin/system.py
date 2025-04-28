@@ -13,11 +13,11 @@ from typing import Any, Optional
 import lori
 import pandas as pd
 from lori import Channel, ChannelState, Configurations, Constant, Weather, WeatherUnavailableException
-from lori.simulation import Results, Result
+from lori.simulation import Result, Results
 from lori.typing import TimestampType
 from penguin import Location
 from penguin.components import ElectricalEnergyStorage, SolarSystem
-from penguin.components.weather import validated_meteo_inputs, validate_meteo_inputs
+from penguin.components.weather import validate_meteo_inputs, validated_meteo_inputs
 
 
 class System(lori.System):
@@ -46,9 +46,9 @@ class System(lori.System):
 
         def add_channel(constant: Constant, **custom) -> None:
             self.data.add(
-                key = constant,
-                aggregate = "mean",
-                connector = None,
+                key=constant,
+                aggregate="mean",
+                connector=None,
                 **custom,
             )
 
@@ -62,7 +62,6 @@ class System(lori.System):
         add_channel(System.POWER_EL_EST)
         add_channel(System.POWER_TH)
         add_channel(System.POWER_TH_EST)
-
 
     def localize(self, configs: Configurations) -> None:
         if configs.enabled:
@@ -268,14 +267,14 @@ class System(lori.System):
                     data.drop(columns=[("references", column)], inplace=True)
 
         hours = pd.Series(data.index, index=data.index)
-        hours = (hours - hours.shift(1)).bfill().dt.total_seconds() / 3600.
+        hours = (hours - hours.shift(1)).bfill().dt.total_seconds() / 3600.0
 
-        solar_kwp = sum(solar.power_max / 1000. for solar in self.components.get_all(SolarSystem))
+        solar_kwp = sum(solar.power_max / 1000.0 for solar in self.components.get_all(SolarSystem))
         solar_power = data[("predictions", SolarSystem.POWER)]
-        solar_energy = solar_power / 1000. * hours
+        solar_energy = solar_power / 1000.0 * hours
         solar_energy.name = SolarSystem.ENERGY
 
-        yield_months_file = results.dirs.tmp.joinpath('yield_months.png')
+        yield_months_file = results.dirs.tmp.joinpath("yield_months.png")
         try:
             from lori.io import plot
 
@@ -284,9 +283,9 @@ class System(lori.System):
                 x=plot_data.index,
                 y=SolarSystem.ENERGY,
                 data=plot_data,
-                xlabel='Month',
-                ylabel='Energy [kWh]',
-                title='Monthly Yield',
+                xlabel="Month",
+                ylabel="Energy [kWh]",
+                title="Monthly Yield",
                 colors=list(reversed(plot.COLORS)),
                 file=str(yield_months_file),
             )
@@ -325,7 +324,7 @@ class System(lori.System):
         results.append(Result.from_const(SolarSystem.YIELD_ENERGY, yield_energy, header="Yield", images=yield_images))
 
         if SolarSystem.POWER_DC in data["predictions"].columns:
-            dc_energy = (data[("predictions", SolarSystem.POWER_DC)] / 1000. * hours).sum()
+            dc_energy = (data[("predictions", SolarSystem.POWER_DC)] / 1000.0 * hours).sum()
             results.append(Result.from_const(SolarSystem.YIELD_ENERGY_DC, dc_energy, header="Yield"))
 
     # noinspection PyUnresolvedReferences
@@ -334,10 +333,9 @@ class System(lori.System):
             ElectricalEnergyStorage.STATE_OF_CHARGE,
             ElectricalEnergyStorage.POWER_CHARGE,
         ]
-        if (
-            not self.components.has_type(ElectricalEnergyStorage)
-            or all(c not in data["predictions"].columns for c in columns)
-        ):
+        if not self.components.has_type(ElectricalEnergyStorage):
+            return
+        if not any(c in data["predictions"].columns for c in columns):
             return
         ees_simulated = False
         for ees in self.components.get_all(ElectricalEnergyStorage):
@@ -356,7 +354,7 @@ class System(lori.System):
                     data.drop(columns=[("references", column)], inplace=True)
 
         hours = pd.Series(data.index, index=data.index)
-        hours = (hours - hours.shift(1)).bfill().dt.total_seconds() / 3600.
+        hours = (hours - hours.shift(1)).bfill().dt.total_seconds() / 3600.0
 
         ees_power = data[("predictions", ElectricalEnergyStorage.POWER_CHARGE)]
         ees_capacity = sum([ees.capacity for ees in self.components.get_all(ElectricalEnergyStorage)])
@@ -368,7 +366,7 @@ class System(lori.System):
         if System.POWER_EL not in data["predictions"].columns:
             return
         hours = pd.Series(data.index, index=data.index)
-        hours = (hours - hours.shift(1)).bfill().dt.total_seconds() / 3600.
+        hours = (hours - hours.shift(1)).bfill().dt.total_seconds() / 3600.0
 
         active_power = data[("predictions", System.POWER_EL)]
         import_power = active_power.where(active_power >= 0, other=0)
@@ -376,20 +374,20 @@ class System(lori.System):
         export_power = active_power.where(active_power <= 0, other=0).abs()
         export_energy = (export_power / 1000 * hours).sum()
 
-        results.add("grid_import", 'Import [kWh]', import_energy, header="Grid")
-        results.add("grid_export", 'Export [kWh]', export_energy, header="Grid")
-        results.add("grid_import_max", 'Import Peak [W]', import_power.max(), header="Grid")
-        results.add("grid_export_max", 'Export Peak [W]', export_power.max(), header="Grid")
+        results.add("grid_import", "Import [kWh]", import_energy, header="Grid")
+        results.add("grid_export", "Export [kWh]", export_energy, header="Grid")
+        results.add("grid_import_max", "Import Peak [W]", import_power.max(), header="Grid")
+        results.add("grid_export_max", "Export Peak [W]", export_power.max(), header="Grid")
 
     # noinspection PyMethodMayBeStatic
     def _evaluate_weather(self, results: Results, data: pd.DataFrame) -> None:
         if not all(c in data["predictions"].columns for c in [Weather.GHI, Weather.DHI]):
             return
         hours = pd.Series(data.index, index=data.index)
-        hours = (hours - hours.shift(1)).bfill().dt.total_seconds() / 3600.
+        hours = (hours - hours.shift(1)).bfill().dt.total_seconds() / 3600.0
 
-        ghi = (data[("predictions", Weather.GHI)] / 1000. * hours).sum()
-        dhi = (data[("predictions", Weather.DHI)] / 1000. * hours).sum()
+        ghi = (data[("predictions", Weather.GHI)] / 1000.0 * hours).sum()
+        dhi = (data[("predictions", Weather.DHI)] / 1000.0 * hours).sum()
 
         results.add(Weather.GHI, f"{Weather.GHI.name} [kWh/m^2]", ghi, header="Weather")
         results.add(Weather.DHI, f"{Weather.DHI.name} [kWh/m^2]", dhi, header="Weather")
