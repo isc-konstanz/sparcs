@@ -68,9 +68,8 @@ class SoilMoisture(Component):
     def activate(self) -> None:
         super().activate()
 
-        # TODO: Implement validation if water tension is measured directly
-        self.data.register(self._water_content_callback, self.data.water_content)
-
+        if not self.data.water_tension.has_connector():
+            self.data.register(self._water_content_callback, self.data.water_content)
         self.data.register(self._water_tension_callback, self.data.water_tension)
 
     def _water_content_callback(self, data: pd.DataFrame) -> None:

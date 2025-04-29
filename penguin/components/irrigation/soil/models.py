@@ -18,7 +18,7 @@ class SoilModel(ABC):
     @abstractmethod
     def water_tension(self, water_content: float | pd.Series) -> float | pd.Series:
         """
-        Calculate the soil water tension in pF
+        Calculate the soil water tension in hPa
         """
         ...
 
