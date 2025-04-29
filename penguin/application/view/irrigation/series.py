@@ -86,7 +86,7 @@ class IrrigationSeriesPage(ComponentPage[IrrigationSeries]):
             force_no_output=True,
         )
         def _update_state(state: bool) -> None:
-            _state = self.data.irrigation_state
+            _state = self.data.watering_state
             if _state.is_valid() and _state.value != state:
                 _state.write(state)
 
@@ -95,7 +95,7 @@ class IrrigationSeriesPage(ComponentPage[IrrigationSeries]):
             Input(f"{id}-update", "n_intervals"),
         )
         def _update_switch(*_) -> bool:
-            _state = self.data.irrigation_state
+            _state = self.data.watering_state
             if _state.is_valid():
                 return _state.value
             return False

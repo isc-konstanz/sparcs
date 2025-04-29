@@ -22,7 +22,7 @@ class IrrigationSystem(Component):
 
     WATER_SUPPLY_MEAN = Constant(float, "water_supply_mean", "Water Supply Coverage Mean", "%")
 
-    STORAGE_LEVEL = Constant(float, "storage_level", "Storage Level", "%")
+    STORAGE_STATE = Constant(float, "storage_state", "Storage state", "%")
 
     # noinspection PyTypeChecker
     @property
@@ -46,7 +46,7 @@ class IrrigationSystem(Component):
         self.data.add(IrrigationSystem.WATER_SUPPLY_MEAN, aggregate="mean")
 
         # TODO: Verify if last storage level as aggregation is correct
-        self.data.add(IrrigationSystem.STORAGE_LEVEL, aggregate="last")
+        self.data.add(IrrigationSystem.STORAGE_STATE, aggregate="last")
 
     # noinspection SpellCheckingInspection
     def activate(self) -> None:
