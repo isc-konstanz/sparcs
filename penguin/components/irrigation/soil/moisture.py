@@ -22,7 +22,7 @@ DEFAULT_FIELD_CAPACITY: float = 1.8
 class SoilMoisture(Component):
     SECTION: str = "soil"
 
-    TEMPERATURE = Constant(float, "temperature", "Soil Temperature", "°C")
+    TEMPERATURE = Constant(float, "temp", "Soil Temperature", "°C")
     WATER_CONTENT = Constant(float, "water_content", "Soil Water Content", "%")
     WATER_TENSION = Constant(float, "water_tension", "Soil Water Tension", "hPa")
     WATER_SUPPLY = Constant(float, "water_supply", "Soil Water Supply Coverage", "%")
@@ -44,7 +44,6 @@ class SoilMoisture(Component):
         def add_channel(constant: Constant, **custom) -> None:
             channel = constant.to_dict()
             channel["name"] = constant.name.replace("Soil", self.name, 1)
-            channel["column"] = f"{self.key}_{constant.key}"
             channel["aggregate"] = "mean"
             channel.update(custom)
             self.data.add(**channel)
@@ -68,9 +67,8 @@ class SoilMoisture(Component):
     def activate(self) -> None:
         super().activate()
 
-        # TODO: Implement validation if water tension is measured directly
-        self.data.register(self._water_content_callback, self.data.water_content)
-
+        if not self.data.water_tension.has_connector():
+            self.data.register(self._water_content_callback, self.data.water_content)
         self.data.register(self._water_tension_callback, self.data.water_tension)
 
     def _water_content_callback(self, data: pd.DataFrame) -> None:
@@ -80,9 +78,9 @@ class SoilMoisture(Component):
             if len(water_content) == 1:
                 water_content = water_content.iloc[0]
             water_tension = self.model.water_tension(water_content)
-            self.data.water_tension.set(timestamp, water_tension)
+            self.data[SoilMoisture.WATER_TENSION].set(timestamp, water_tension)
         else:
-            self.data.water_tension.state = ChannelState.NOT_AVAILABLE
+            self.data[SoilMoisture.WATER_TENSION].state = ChannelState.NOT_AVAILABLE
 
     def _water_tension_callback(self, data: pd.DataFrame) -> None:
         if not data.empty:
@@ -92,6 +90,6 @@ class SoilMoisture(Component):
                 water_tension = water_tension.iloc[0]
             water_content = self.model.water_content(water_tension)
             water_supply = (water_content - self.wilting_point) / self.water_capacity_available
-            self.data.water_supply.set(timestamp, water_supply * 100)
+            self.data[SoilMoisture.WATER_SUPPLY].set(timestamp, water_supply * 100)
         else:
-            self.data.water_supply.state = ChannelState.NOT_AVAILABLE
+            self.data[SoilMoisture.WATER_SUPPLY].state = ChannelState.NOT_AVAILABLE
