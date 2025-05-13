@@ -17,10 +17,7 @@ from lori.core import Configurations, Constant
 @register_component_type("ees")
 class ElectricalEnergyStorage(Component):
     STATE_OF_CHARGE = Constant(float, "ees_soc", "EES State of Charge", "%")
-
     POWER_CHARGE = Constant(float, "ees_charge_power", "EES Charging Power", "W")
-
-    CYCLES = Constant(int, "ees_cycles", "EES Cycles")
 
     MODES = ["self_consumption", "self_peak_shaving", "peak_shaving"]
 
@@ -74,17 +71,17 @@ class ElectricalEnergyStorage(Component):
             self._mode_parameters["grid_power_min"] = mode_section.get_float("grid_power_min") * 1000
             self._predict_charge_power = self._predict_peak_shaving
 
-        def add_channel(constant: Constant, **custom) -> None:
+        def add_channel(constant: Constant, aggregate: str = "mean", **custom) -> None:
             channel = constant.to_dict()
             channel["name"] = constant.name.replace("EES", self.name, 1)
             channel["column"] = constant.key.replace("ees", self.key, 1)
-            channel["aggregate"] = "mean"
+            channel["aggregate"] = aggregate
             channel["connector"] = None
             channel.update(custom)
             self.data.add(**channel)
 
-        add_channel(ElectricalEnergyStorage.STATE_OF_CHARGE)
         add_channel(ElectricalEnergyStorage.POWER_CHARGE)
+        add_channel(ElectricalEnergyStorage.STATE_OF_CHARGE, aggregate="last")
 
     def percent_to_energy(self, percent) -> float:
         return percent * self.capacity / 100
@@ -136,7 +133,8 @@ class ElectricalEnergyStorage(Component):
         # First, check if the grid power is above grid_power_max
         if soc < soc_reserve or grid_power > self._mode_parameters["grid_power_max"]:
             charge_power = self._predict_peak_shaving(hours, soc, grid_power)
-            charge_power = min(charge_power, self.percent_to_energy(soc_reserve - soc) * 1000.0 / hours)
+            if charge_power > 0:
+                charge_power = min(charge_power, self.percent_to_energy(soc_reserve - soc) * 1000.0 / hours)
             return charge_power
         return self._predict_self_consumption(hours, soc, grid_power)
 
