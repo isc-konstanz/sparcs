@@ -131,12 +131,13 @@ class ElectricalEnergyStorage(Component):
         soc_reserve = self._mode_parameters["soc_reserve"]
 
         # First, check if the grid power is above grid_power_max
-        if soc < soc_reserve or grid_power > self._mode_parameters["grid_power_max"]:
-            charge_power = self._predict_peak_shaving(hours, soc, grid_power)
-            if charge_power > 0:
-                charge_power = min(charge_power, self.percent_to_energy(soc_reserve - soc) * 1000.0 / hours)
-            return charge_power
-        return self._predict_self_consumption(hours, soc, grid_power)
+        if grid_power <= self._mode_parameters["grid_power_max"] and (grid_power < 0 or soc > soc_reserve):
+            return self._predict_self_consumption(hours, soc, grid_power)
+
+        charge_power = self._predict_peak_shaving(hours, soc, grid_power)
+        if charge_power > 0:
+            charge_power = min(charge_power, self.percent_to_energy(soc_reserve - soc) * 1000.0 / hours)
+        return charge_power
 
     def _predict_peak_shaving(self, hours: float, soc: float, grid_power: float) -> float:
         grid_power_max = self._mode_parameters["grid_power_max"]
