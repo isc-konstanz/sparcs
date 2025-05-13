@@ -202,7 +202,7 @@ class System(lori.System):
                 ees_columns = [ees.data[c].column for c in columns]
                 ees_soc_column = ees.data[ElectricalEnergyStorage.STATE_OF_CHARGE].column
                 ees_soc = prior.iloc[-1][ees_soc_column] if prior is not None else 50.0
-                ees_result = ees.infer_soc(data, ees_soc)
+                ees_result = ees.predict(data, ees_soc)
 
                 # EES does not have a measured reference and will be simulated to effect residual power
                 data[System.POWER_EL] += ees_result[ElectricalEnergyStorage.POWER_CHARGE]
