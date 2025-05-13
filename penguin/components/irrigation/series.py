@@ -17,7 +17,7 @@ class IrrigationSeries(Component):
     SECTION = "series"
     INCLUDES = [SoilMoisture.SECTION]
 
-    STATE = Constant(bool, "irrigation_state", "Irrigation state")
+    STATE = Constant(bool, "watering_state", "Watering state")
 
     soil: SoilMoisture
 

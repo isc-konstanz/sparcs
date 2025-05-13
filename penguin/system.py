@@ -8,6 +8,7 @@ penguin.system
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any, Optional
 
 import lori
@@ -44,24 +45,28 @@ class System(lori.System):
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
 
-        def add_channel(constant: Constant, **custom) -> None:
+        def add_channel(constant: Constant, aggregate: str = "mean", **custom) -> None:
             self.data.add(
                 key=constant,
-                aggregate="mean",
+                aggregate=aggregate,
                 connector=None,
                 **custom,
             )
-
-        if self.components.has_type(SolarSystem):
-            add_channel(SolarSystem.POWER_DC)
-            add_channel(SolarSystem.POWER)
-            add_channel(SolarSystem.POWER_EST)
 
         # TODO: Improve channel setup based on available components
         add_channel(System.POWER_EL)
         add_channel(System.POWER_EL_EST)
         add_channel(System.POWER_TH)
         add_channel(System.POWER_TH_EST)
+
+        if self.components.has_type(SolarSystem):
+            add_channel(SolarSystem.POWER_DC)
+            add_channel(SolarSystem.POWER)
+            add_channel(SolarSystem.POWER_EST)
+
+        if self.components.has_type(ElectricalEnergyStorage):
+            add_channel(ElectricalEnergyStorage.POWER_CHARGE)
+            add_channel(ElectricalEnergyStorage.STATE_OF_CHARGE, aggregate="last")
 
     def localize(self, configs: Configurations) -> None:
         if configs.enabled:
@@ -178,11 +183,11 @@ class System(lori.System):
         for solar in self.components.get_all(SolarSystem):
             solar_column = solar.data[SolarSystem.POWER].column
             if not solar.data.has_logged(SolarSystem.POWER, start, end):
-                # Solar System does not have a measured reference and will be simulated to effect residual power
+                # Solar System does not have a measured reference and will be subtracted from residual power
                 data[System.POWER_EL] -= data[solar_column]
         return data
 
-    # noinspection PyUnusedLocal, PyUnresolvedReferences
+    # noinspection PyUnusedLocal
     def _simulate_storage(
         self,
         data: pd.DataFrame,
@@ -197,47 +202,44 @@ class System(lori.System):
             ElectricalEnergyStorage.STATE_OF_CHARGE,
             ElectricalEnergyStorage.POWER_CHARGE,
         ]
+        if ElectricalEnergyStorage.POWER_CHARGE not in data.columns:
+            data[ElectricalEnergyStorage.POWER_CHARGE] = 0
+
+        total_capacity = 0
+        total_energy = pd.Series(index=data.index, data=0)
+
         for ees in self.components.get_all(ElectricalEnergyStorage):
-            if not ees.data.has_logged(columns, start, end):
+            ees_data = ees.data.from_logger(columns, start, end)
+            if ees_data.empty:
                 ees_columns = [ees.data[c].column for c in columns]
                 ees_soc_column = ees.data[ElectricalEnergyStorage.STATE_OF_CHARGE].column
                 ees_soc = prior.iloc[-1][ees_soc_column] if prior is not None else 50.0
-                ees_result = ees.predict(data, ees_soc)
+                ees_data = ees.predict(data, ees_soc)
+                ees_power = ees_data[ElectricalEnergyStorage.POWER_CHARGE]
 
-                # EES does not have a measured reference and will be simulated to effect residual power
-                data[System.POWER_EL] += ees_result[ElectricalEnergyStorage.POWER_CHARGE]
-                data[ees_columns] = ees_result[columns]
+                data[ees_columns] = ees_data[columns]
+                data[ElectricalEnergyStorage.POWER_CHARGE] += ees_power
 
-        # TODO: Aggregate SoC and Power if more than one EES exist
-        # def aggregate(column: str, how: str) -> None:
-        #     for ees in self.get_all(ElectricalEnergyStorage):
-        #         ees_columns = [ees.data[c].column for c in columns]
-        #     data = pd.concat(ees_results, axis='columns').loc[:, [column]]
-        #     if len(data.columns) > 1:
-        #         if how == 'sum':
-        #             data = data.sum(axis='columns')
-        #         elif how == 'mean':
-        #             data = data.mean(axis='columns')
-        #     results.loc[:, column] = data
-        #
-        # aggregate(ElectricalEnergyStorage.STATE_OF_CHARGE, how='mean')
-        # aggregate(ElectricalEnergyStorage.POWER_CHARGE, how='sum')
+                # EES does not have a measured reference and will be added to residual power
+                data[System.POWER_EL] += ees_power
+
+            total_capacity += ees.capacity
+            total_energy += ees_data[ElectricalEnergyStorage.STATE_OF_CHARGE] / 100 * ees.capacity
+
+        data[ElectricalEnergyStorage.STATE_OF_CHARGE] = total_energy/total_capacity * 100
 
         return data
 
     def evaluate(self, results: Results) -> pd.DataFrame:
-        predictions = results.data
+        predictions = deepcopy(results.data)
+        predictions.columns = pd.MultiIndex.from_product([["predictions"], predictions.columns])
         references = self.data.from_logger(start=results.start, end=results.end)
-
-        columns = list(dict.fromkeys([*predictions.columns, *references.columns]))
-        data = pd.DataFrame(columns=pd.MultiIndex.from_product([["predictions", "references"], columns]))
-        data["predictions"] = predictions.reindex(columns=columns)
-        data["references"] = references.reindex(columns=columns)
-        data.dropna(axis="columns", how="all", inplace=True)
+        references.columns = pd.MultiIndex.from_product([["references"], references.columns])
+        data = pd.concat([predictions, references], axis="columns")
 
         self._evaluate_yield(results, data)
         self._evaluate_storage(results, data)
-        self._evaluate_energy(results, data)
+        self._evaluate_system(results, data)
         self._evaluate_weather(results, data)
 
         if "references" in data.columns.get_level_values(0):
@@ -246,10 +248,10 @@ class System(lori.System):
             data = pd.concat([data, errors], axis="columns")
         return data
 
-    # noinspection PyUnresolvedReferences
     def _evaluate_yield(self, results: Results, data: pd.DataFrame) -> None:
         if not self.components.has_type(SolarSystem) or SolarSystem.POWER not in data["predictions"].columns:
             return
+
         solar_simulated = False
         for solar in self.components.get_all(SolarSystem):
             solar_column = solar.data[SolarSystem.POWER].column
@@ -327,37 +329,22 @@ class System(lori.System):
             dc_energy = (data[("predictions", SolarSystem.POWER_DC)] / 1000.0 * hours).sum()
             results.append(Result.from_const(SolarSystem.YIELD_ENERGY_DC, dc_energy, header="Yield"))
 
-    # noinspection PyUnresolvedReferences
     def _evaluate_storage(self, results: Results, data: pd.DataFrame) -> None:
+        if not self.components.has_type(ElectricalEnergyStorage):
+            return
+
         columns = [
             ElectricalEnergyStorage.STATE_OF_CHARGE,
             ElectricalEnergyStorage.POWER_CHARGE,
         ]
-        if not self.components.has_type(ElectricalEnergyStorage):
-            return
-
-        hours = pd.Series(data.index, index=data.index)
-        hours = (hours - hours.shift(1)).bfill().dt.total_seconds() / 3600.0
-
         ees_simulated = False
         for ees in self.components.get_all(ElectricalEnergyStorage):
             ees_columns = [ees.data[c].column for c in columns]
-            ees_power_column = ees.data[ElectricalEnergyStorage.POWER_CHARGE].column
-            if ees_power_column not in data["predictions"].columns:
-                continue
-
-            ees_power = data[("predictions", ees_power_column)]
-            ees_reference = ees.data.from_logger(start=data.index[0], end=data.index[-1])
+            ees_reference = ees.data.from_logger(start=results.start, end=results.end)
             if ees_reference.empty:
                 ees_simulated = True
             else:
-                data[("references", ees_columns)] = ees_reference[columns]
-
-            ees_capacity = sum([ees.capacity for ees in self.components.get_all(ElectricalEnergyStorage)])
-            ees_cycles = (ees_power.where(ees_power >= 0, other=0) / 1000 * hours).sum() / ees_capacity
-            ees_cycles_name = ElectricalEnergyStorage.CYCLES.name.replace("EES", ees.name)
-
-            results.add(ElectricalEnergyStorage.CYCLES, ees_cycles_name, ees_cycles, header="Battery Storage")
+                data[("references", ees_columns)] = ees_reference[SolarSystem.POWER]
 
         if ees_simulated:
             # One or more solar system does not have reference measurements.
@@ -366,8 +353,19 @@ class System(lori.System):
                 if column in data["references"].columns:
                     data.drop(columns=[("references", column)], inplace=True)
 
+        hours = pd.Series(data.index, index=data.index)
+        hours = (hours - hours.shift(1)).bfill().dt.total_seconds() / 3600.0
+
+        ees_soc = data[("predictions", ElectricalEnergyStorage.STATE_OF_CHARGE)]
+        ees_power = data[("predictions", ElectricalEnergyStorage.POWER_CHARGE)]
+        ees_capacity = sum(ees.capacity for ees in self.components.get_all(ElectricalEnergyStorage))
+        ees_cycles = (ees_power.where(ees_power >= 0, other=0) / 1000 * hours).sum() / ees_capacity
+
+        results.add("ees_cycles", "EES Cycles", ees_cycles, header="Storage")
+        results.add("ees_soc_min", "EES SoC Minimum [%]", ees_soc.min(), header="Storage")
+
     # noinspection PyMethodMayBeStatic
-    def _evaluate_energy(self, results: Results, data: pd.DataFrame) -> None:
+    def _evaluate_system(self, results: Results, data: pd.DataFrame) -> None:
         if System.POWER_EL not in data["predictions"].columns:
             return
         hours = pd.Series(data.index, index=data.index)
@@ -375,14 +373,63 @@ class System(lori.System):
 
         active_power = data[("predictions", System.POWER_EL)]
         import_power = active_power.where(active_power >= 0, other=0)
-        import_energy = (import_power / 1000 * hours).sum()
+        import_energy = (import_power / 1000 * hours)
         export_power = active_power.where(active_power <= 0, other=0).abs()
-        export_energy = (export_power / 1000 * hours).sum()
+        export_energy = (export_power / 1000 * hours)
 
-        results.add("grid_import", "Import [kWh]", import_energy, header="Grid")
-        results.add("grid_export", "Export [kWh]", export_energy, header="Grid")
-        results.add("grid_import_max", "Import Peak [W]", import_power.max(), header="Grid")
-        results.add("grid_export_max", "Export Peak [W]", export_power.max(), header="Grid")
+        results.add("grid_export_max", "Export Peak [W]", export_power.max(), header="Grid", order=10)
+        results.add("grid_import_max", "Import Peak [W]", import_power.max(), header="Grid", order=10)
+        results.add("grid_export", "Export [kWh]", export_energy.sum(), header="Grid", order=10)
+        results.add("grid_import", "Import [kWh]", import_energy.sum(), header="Grid", order=10)
+
+        if SolarSystem.POWER in data["predictions"].columns:
+            solar_power = data[("predictions", SolarSystem.POWER)]
+            solar_energy = (solar_power / 1000 * hours)
+
+            cons_energy = import_energy + solar_energy - export_energy
+            cons_self = (solar_energy - export_energy).sum() / solar_energy.sum() * 100
+            suff_self = (1 - (import_energy.sum() / cons_energy)) * 100
+
+            results.add("consumption", "Energy [kWh]", cons_energy.sum(), header="Load", order=10)
+            results.add("self_consumption", "Self-Consumption [%]", cons_self, header="Consumption", order=10)
+            results.add("self_sufficiency", "Self-Sufficiency [%]", suff_self, header="Consumption", order=10)
+
+        try:
+            # import_peak_energy = import_energy[import_power >= import_power.max()]
+            # import_peak_time = import_peak_energy.index.time.min()
+            # import_peak_date = import_peak_energy[import_peak_energy.index.time == import_peak_time].index.date[0]
+            # self._plot_system(
+            #     data["predictions"][data.index.date == import_peak_date],
+            #     title="Day with earliest Peak",
+            #     file=str(results.dirs.tmp.joinpath("power_peak.png")),
+            #     width=16,
+            # )
+
+            import_week_energy = import_energy.groupby(import_energy.index.isocalendar().week).sum()
+            import_week_energy_max = import_week_energy[import_week_energy == import_week_energy.max()].index[0]
+            self._plot_system(
+                data["predictions"][data.index.isocalendar().week == import_week_energy_max],
+                title="Week with highest Grid Import",
+                file=str(results.dirs.tmp.joinpath("week_max_import.png")),
+            )
+
+            if self.components.has_type(SolarSystem):
+                solar_power = data[("predictions", SolarSystem.POWER)]
+                solar_energy = (solar_power / 1000 * hours)
+
+                cons_self = solar_energy - export_energy
+                cons_self_week_energy = cons_self.groupby(cons_self.index.isocalendar().week).sum()
+                cons_self_week_energy_max = cons_self_week_energy[
+                    cons_self_week_energy == cons_self_week_energy.max()
+                ].index[0]
+                self._plot_system(
+                    data["predictions"][data.index.isocalendar().week == cons_self_week_energy_max],
+                    title="Week with highest Grid Import",
+                    file=str(results.dirs.tmp.joinpath("week_max_self-cons.png")),
+                )
+
+        except ImportError:
+            pass
 
     # noinspection PyMethodMayBeStatic
     def _evaluate_weather(self, results: Results, data: pd.DataFrame) -> None:
@@ -394,5 +441,155 @@ class System(lori.System):
         ghi = (data[("predictions", Weather.GHI)] / 1000.0 * hours).sum()
         dhi = (data[("predictions", Weather.DHI)] / 1000.0 * hours).sum()
 
-        results.add(Weather.GHI, f"{Weather.GHI.name} [kWh/m^2]", ghi, header="Weather")
-        results.add(Weather.DHI, f"{Weather.DHI.name} [kWh/m^2]", dhi, header="Weather")
+        results.add(Weather.GHI, f"{Weather.GHI.name} [kWh/m²]", ghi, header="Weather")
+        results.add(Weather.DHI, f"{Weather.DHI.name} [kWh/m²]", dhi, header="Weather")
+
+    # noinspection PyTypeChecker
+    def _plot_system(
+        self,
+        data: pd.DataFrame,
+        title: Optional[str] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        show: bool = False,
+        file: str = None,
+    ) -> None:
+        import seaborn as sns
+        import matplotlib.dates as dates
+        import matplotlib.pyplot as plt
+        from lori.io import plot
+
+        columns_power = [System.POWER_EL]
+
+        # TODO: Replace with tariff component constants
+        has_tariff = "tariff" in data.columns
+        has_solar = self.components.has_type(SolarSystem)
+        if has_solar:
+            columns_power.append(SolarSystem.POWER)
+        has_ees = self.components.has_type(ElectricalEnergyStorage)
+        if has_ees:
+            columns_power.append(ElectricalEnergyStorage.POWER_CHARGE)
+
+        data_power = deepcopy(data[columns_power])
+        data_power /= 1000
+
+        if width is None:
+            width = plot.WIDTH
+        if height is None:
+            height = plot.HEIGHT
+        figure, ax_power = plt.subplots(figsize=(width / plot.INCH, height / plot.INCH), dpi=120)
+        axes = [ax_power]
+
+        sns.lineplot(
+            data_power[System.POWER_EL],
+            linewidth=0.25,
+            color="#004f9e",
+            label="_hidden",
+            ax=axes[0],
+        )
+        if has_ees:
+            ax_soc = axes[0].twinx()
+            axes.append(ax_soc)
+
+            sns.lineplot(
+                data_power[ElectricalEnergyStorage.POWER_CHARGE],
+                linewidth=0.25,
+                color="#ff9995",
+                label="_hidden",
+                ax=ax_power,
+            )
+            sns.lineplot(
+                data[ElectricalEnergyStorage.STATE_OF_CHARGE],
+                linewidth=1,
+                color="#333333",
+                label="Battery State",
+                ax=ax_soc
+            )
+
+            data_ref = data_power[System.POWER_EL] - data_power[ElectricalEnergyStorage.POWER_CHARGE]
+            data_ref.plot.area(
+                stacked=False,
+                label="_hidden",
+                color={"_hidden": "#dddddd"},
+                linewidth=0,
+                alpha=0.75,
+                ax=ax_power,
+            )
+
+            ax_soc.set_ylim(-1, 119)
+            ax_soc.yaxis.set_label_text("State of Charge [%]")
+            if has_tariff:
+                ax_soc.legend(ncol=1, loc="upper right", bbox_to_anchor=(0.84, 1), frameon=False)
+            else:
+                ax_soc.legend(ncol=1, loc="upper right", frameon=False)
+
+        if has_solar:
+            data_power[SolarSystem.POWER].plot.area(
+                stacked=False,
+                label="PV Generation",
+                color={"PV Generation": "#ffeb9b"},
+                linewidth=0,
+                alpha=0.75,
+                ax=ax_power,
+            )
+
+        data_power[System.POWER_EL].plot.area(
+            stacked=False,
+            label="Residual Load",
+            alpha=0.25,
+            ax=ax_power,
+        )
+
+        if has_ees:
+            data_power[ElectricalEnergyStorage.POWER_CHARGE].plot.area(
+                stacked=False,
+                label="Battery Charging",
+                color={"Battery Charging": "#ff9995"},
+                alpha=0.25,
+                ax=ax_power,
+            )
+
+        if has_tariff:
+            # TODO: Replace with tariff component constants
+            tariff = data["tariff"]
+
+            ax_price = axes[0].twinx()
+            axes.append(ax_price)
+
+            sns.lineplot(tariff, linewidth=1, color="#999999", label="Dynamic Tariff", ax=ax_price)
+
+            ax_price.spines.right.set_position(("axes", 1.07))
+            ax_price.set_ylim(min(tariff.min() - 0.05), max(tariff.max()) + 0.1)
+            ax_price.yaxis.set_label_text("Price [€/kWh]")
+            ax_price.legend(ncol=1, loc="upper right", frameon=False)
+
+        ax_power.set_xlim(data_power.index[0], data_power.index[-1])
+        ax_power.set_ylim(min(data_power.min()), max(data_power.max()) + 50)
+        ax_power.xaxis.set_minor_locator(dates.HourLocator(interval=12))
+        ax_power.xaxis.set_minor_formatter(dates.DateFormatter("%H:%M", tz="Europe/Berlin"))
+        ax_power.xaxis.set_major_locator(dates.DayLocator(interval=1))
+        ax_power.xaxis.set_major_formatter(dates.DateFormatter("\n%A", tz="Europe/Berlin"))
+        ax_power.xaxis.set_label_text(
+            f"{data.index[0].strftime('%d. %B')} to "
+            f"{data.index[-1].strftime('%d. %B')}"
+        )
+        # ax_power.xaxis.label.set_visible(False)
+        ax_power.yaxis.set_label_text("Power [kW]")
+        ax_power.legend(ncol=3, loc="upper left", frameon=False)
+
+        for pos in ['right', 'top', 'bottom', 'left']:
+            for ax in axes:
+                ax.spines[pos].set_visible(False)
+
+        axes[0].grid(color="grey", linestyle="--", linewidth=0.25, alpha=0.5, axis="both")
+        axes[0].set_title(title)
+        figure.tight_layout()
+
+        if file is not None:
+            figure.savefig(file)
+        if show:
+            figure.show()
+            # figure.waitforbuttonpress()
+
+        plt.close(figure)
+        plt.clf()
