@@ -459,6 +459,14 @@ class System(lori.System):
         import matplotlib.pyplot as plt
         from lori.io import plot
 
+        # Ignore this error, as pandas implements its own matplotlib converters for handling datetime or period values.
+        # When seaborn and pandas plots are mixed, converters may conflict and this warning is shown.
+        import warnings
+        warnings.filterwarnings(
+            "ignore",
+            message="This axis already has a converter set and is updating to a potentially incompatible converter"
+        )
+
         columns_power = [System.POWER_EL]
 
         # TODO: Replace with tariff component constants
