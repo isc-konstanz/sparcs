@@ -1,0 +1,94 @@
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = ['setuptools >= 61.0', 'versioneer[toml]']
+
+[project]
+name = "penguin"
+description = """\
+This repository provides a set of core functions for several \
+Photovoltaic Energy Generation and Utility Integration systems of \
+ISC Konstanz e.V."""
+
+authors = [
+    {name = "ISC Konstanz e.V."}
+]
+maintainers = [
+    {name = "Adrian Minde", email = "adrian.minde@isc-konstanz.de"}
+]
+
+urls.author = "https://isc-konstanz.de"
+urls.source = "https://github.com/isc-konstanz/penguin/"
+urls.issues = "https://github.com/isc-konstanz/penguin/issues"
+
+classifiers = [
+    "License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent"
+]
+
+readme = "README.md"
+requires-python = ">= 3.7"
+license.file = "LICENSE"
+dynamic = ["version"]
+
+
+dependencies = [
+    "pvlib >= 0.10.1",
+    "NREL-PySAM >= 4.0",
+    "lori @ git+https://github.com/isc-konstanz/lori.git@stable"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pre-commit",
+    "ruff"
+]
+
+[tool.setuptools.package-data]
+penguin = []
+
+[tool.setuptools.packages.find]
+namespaces = false
+exclude = [
+    "doc",
+    "data*"
+]
+
+[tool.versioneer]
+VCS = "git"
+style = "pep440"
+versionfile_source = "penguin/_version.py"
+versionfile_build = "penguin/_version.py"
+parentdir_prefix = "penguin-"
+tag_prefix = "v"
+
+[project.scripts]
+penguin = "penguin.__main__:main"
+
+[tool.ruff]
+indent-width = 4
+line-length = 120
+target-version = "py37"
+exclude = ["penguin/_version.py"]
+
+[tool.ruff.lint]
+select = [
+    # "D",  # pydocstyle
+    "E",  # pycodestyle
+    "F",  # pyflakes
+    "I",  # isort
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["E", "I"]
+
+[tool.ruff.lint.isort]
+extra-standard-library = ["dateutil"]
+known-first-party = ["penguin", "lori", "numpy", "pandas", "pytz"]

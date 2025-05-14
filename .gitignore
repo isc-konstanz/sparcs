@@ -137,13 +137,18 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
+# Root libraries
+!/lib
+
 # Configurations except for default files
 conf/*
-!conf/*.default.cfg
+!conf/*.default.conf
 
-# Generated output
-data/
-#!lib/modules
-#lib/modules/*.csv
-#!lib/inverters
-#lib/inverters/*.csv
+# Configurations, assets and default generated output files
+/data/
+/data/assets/
+
+/assets/
+
+# MacOS
+.DS_Store
