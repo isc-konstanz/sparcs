@@ -388,7 +388,7 @@ class System(lori.System):
 
             cons_energy = import_energy + solar_energy - export_energy
             cons_self = (solar_energy - export_energy).sum() / solar_energy.sum() * 100
-            suff_self = (1 - (import_energy.sum() / cons_energy)) * 100
+            suff_self = (1 - (import_energy.sum() / cons_energy.sum())) * 100
 
             results.add("consumption", "Energy [kWh]", cons_energy.sum(), header="Load", order=10)
             results.add("self_consumption", "Self-Consumption [%]", cons_self, header="Consumption", order=10)
