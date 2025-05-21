@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-penguin.model
-~~~~~~~~~~~~~
+penguin.components.solar.model
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 """
@@ -12,7 +12,6 @@ from pvlib.modelchain import ModelChain
 
 import pandas as pd
 from lori import Configurations, Configurator, Location
-from penguin import SolarSystem
 
 # noinspection SpellCheckingInspection
 DEFAULTS = dict(
@@ -27,9 +26,10 @@ DEFAULTS = dict(
 
 
 # noinspection SpellCheckingInspection, PyAbstractClass
-class Model(Configurator, ModelChain):
+class SolarModel(Configurator, ModelChain):
+    # noinspection PyUnresolvedReferences
     @classmethod
-    def load(cls, pvsystem: SolarSystem, include_file: str = "model.conf", section: str = "model") -> Model:
+    def load(cls, pvsystem, include_file: str = "model.conf", section: str = "model") -> SolarModel:
         include_dir = pvsystem.configs.path.replace(".conf", ".d")
         configs_dirs = pvsystem.configs.dirs.to_dict()
         configs_dirs["conf_dir"] = include_dir
@@ -46,7 +46,7 @@ class Model(Configurator, ModelChain):
 
         return cls(configs, pvsystem, pvsystem.context.location, **params)
 
-    def __init__(self, configs: Configurations, pvsystem: SolarSystem, location: Location, **kwargs):
+    def __init__(self, configs: Configurations, pvsystem, location: Location, **kwargs):
         super().__init__(configs=configs, system=pvsystem, location=location, **kwargs)
 
     def configure(self, configs: Configurations) -> None:
@@ -83,12 +83,12 @@ class Model(Configurator, ModelChain):
         results.loc[:, results.columns.str.startswith(("p_", "i_"))] *= self.system.inverters_per_system
 
         losses = self.results.losses
-        if not isinstance(losses, float) and not (
-            isinstance(losses, tuple) and any([isinstance(loss, float) for loss in losses])
+        if isinstance(losses, pd.Series) or (
+            isinstance(losses, tuple) and all([isinstance(l, pd.Series) for l in losses])
         ):
             if isinstance(losses, tuple):
                 losses = pd.concat(list(losses), axis="columns").mean(axis="columns")
-                losses.name = "losses"
+            losses.name = "losses"
             results = pd.concat([results, losses], axis="columns")
         return results
 

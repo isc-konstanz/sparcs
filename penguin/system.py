@@ -226,14 +226,14 @@ class System(lori.System):
             total_capacity += ees.capacity
             total_energy += ees_data[ElectricalEnergyStorage.STATE_OF_CHARGE] / 100 * ees.capacity
 
-        data[ElectricalEnergyStorage.STATE_OF_CHARGE] = total_energy/total_capacity * 100
+        data[ElectricalEnergyStorage.STATE_OF_CHARGE] = total_energy / total_capacity * 100
 
         return data
 
     def evaluate(self, results: Results) -> pd.DataFrame:
         predictions = deepcopy(results.data)
         predictions.columns = pd.MultiIndex.from_product([["predictions"], predictions.columns])
-        references = self.data.from_logger(start=results.start, end=results.end)
+        references = self.data.from_logger(start=results.start, end=results.end).dropna(axis="columns", how="all")
         references.columns = pd.MultiIndex.from_product([["references"], references.columns])
         data = pd.concat([predictions, references], axis="columns")
 
@@ -261,7 +261,7 @@ class System(lori.System):
             else:
                 data[("references", solar_column)] = solar_reference[SolarSystem.POWER]
 
-        if solar_simulated:
+        if solar_simulated and "references" in data.columns.get_level_values(0):
             # One or more solar system does not have reference measurements.
             # The reference value does not correspond to the total prediction and should be dropped
             for column in [System.POWER_EL, SolarSystem.POWER]:
@@ -346,7 +346,7 @@ class System(lori.System):
             else:
                 data[("references", ees_columns)] = ees_reference[SolarSystem.POWER]
 
-        if ees_simulated:
+        if ees_simulated and "references" in data.columns.get_level_values(0):
             # One or more solar system does not have reference measurements.
             # The reference value does not correspond to the total prediction and should be dropped
             for column in [System.POWER_EL, *columns]:
@@ -373,9 +373,9 @@ class System(lori.System):
 
         active_power = data[("predictions", System.POWER_EL)]
         import_power = active_power.where(active_power >= 0, other=0)
-        import_energy = (import_power / 1000 * hours)
+        import_energy = import_power / 1000 * hours
         export_power = active_power.where(active_power <= 0, other=0).abs()
-        export_energy = (export_power / 1000 * hours)
+        export_energy = export_power / 1000 * hours
 
         results.add("grid_export_max", "Export Peak [W]", export_power.max(), header="Grid", order=10)
         results.add("grid_import_max", "Import Peak [W]", import_power.max(), header="Grid", order=10)
@@ -384,7 +384,7 @@ class System(lori.System):
 
         if SolarSystem.POWER in data["predictions"].columns:
             solar_power = data[("predictions", SolarSystem.POWER)]
-            solar_energy = (solar_power / 1000 * hours)
+            solar_energy = solar_power / 1000 * hours
 
             cons_energy = import_energy + solar_energy - export_energy
             cons_self = (solar_energy - export_energy).sum() / solar_energy.sum() * 100
@@ -415,7 +415,7 @@ class System(lori.System):
 
             if self.components.has_type(SolarSystem):
                 solar_power = data[("predictions", SolarSystem.POWER)]
-                solar_energy = (solar_power / 1000 * hours)
+                solar_energy = solar_power / 1000 * hours
 
                 cons_self = solar_energy - export_energy
                 cons_self_week_energy = cons_self.groupby(cons_self.index.isocalendar().week).sum()
@@ -454,17 +454,19 @@ class System(lori.System):
         show: bool = False,
         file: str = None,
     ) -> None:
-        import seaborn as sns
-        import matplotlib.dates as dates
-        import matplotlib.pyplot as plt
-        from lori.io import plot
-
         # Ignore this error, as pandas implements its own matplotlib converters for handling datetime or period values.
         # When seaborn and pandas plots are mixed, converters may conflict and this warning is shown.
         import warnings
+
+        import matplotlib.dates as dates
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+
+        from lori.io import plot
+
         warnings.filterwarnings(
             "ignore",
-            message="This axis already has a converter set and is updating to a potentially incompatible converter"
+            message="This axis already has a converter set and is updating to a potentially incompatible converter",
         )
 
         columns_power = [System.POWER_EL]
@@ -511,7 +513,7 @@ class System(lori.System):
                 linewidth=1,
                 color="#333333",
                 label="Battery State",
-                ax=ax_soc
+                ax=ax_soc,
             )
 
             data_ref = data_power[System.POWER_EL] - data_power[ElectricalEnergyStorage.POWER_CHARGE]
@@ -577,15 +579,12 @@ class System(lori.System):
         ax_power.xaxis.set_minor_formatter(dates.DateFormatter("%H:%M", tz="Europe/Berlin"))
         ax_power.xaxis.set_major_locator(dates.DayLocator(interval=1))
         ax_power.xaxis.set_major_formatter(dates.DateFormatter("\n%A", tz="Europe/Berlin"))
-        ax_power.xaxis.set_label_text(
-            f"{data.index[0].strftime('%d. %B')} to "
-            f"{data.index[-1].strftime('%d. %B')}"
-        )
+        ax_power.xaxis.set_label_text(f"{data.index[0].strftime('%d. %B')} to " f"{data.index[-1].strftime('%d. %B')}")
         # ax_power.xaxis.label.set_visible(False)
         ax_power.yaxis.set_label_text("Power [kW]")
         ax_power.legend(ncol=3, loc="upper left", frameon=False)
 
-        for pos in ['right', 'top', 'bottom', 'left']:
+        for pos in ["right", "top", "bottom", "left"]:
             for ax in axes:
                 ax.spines[pos].set_visible(False)
 

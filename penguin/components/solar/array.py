@@ -45,7 +45,7 @@ class Orientation(Enum):
 
 
 # noinspection SpellCheckingInspection
-class SolarArray(pv.pvsystem.Array, Component):
+class SolarArray(Component, pv.pvsystem.Array):
     INCLUDES = ["rows", "mounting", "tracking"]
 
     POWER_AC: str = "p_ac"
@@ -79,20 +79,29 @@ class SolarArray(pv.pvsystem.Array, Component):
     shading_losses_parameters: dict = {}
     temperature_model_parameters: dict = {}
 
-    def __init__(  # noqa
+    def __init__(
         self,
-        context: Component | Context,
-        configs: Optional[Configurations] = None,
-        key: Optional[str] = None,
-        name: Optional[str] = None,
+        context: Context,
+        configs: Configurations,
+        mount: Optional[pv.pvsystem.AbstractMount] = None,
     ) -> None:
-        super(pv.pvsystem.Array, self).__init__(context=context, configs=configs, key=key, name=name)
+        super().__init__(context=context, configs=configs, mount=mount)
 
     def __repr__(self) -> str:
         return Component.__repr__(self)
 
     def __str__(self) -> str:
         return Component.__str__(self)
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @name.setter
+    def name(self, name: Optional[str]) -> None:
+        if name is None:
+            return
+        self._name = name
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
@@ -207,7 +216,7 @@ class SolarArray(pv.pvsystem.Array, Component):
             return False
 
         def denormalize_coeff(key: str, ref: str) -> float:
-            self._logger.debug(f"Denormalized %/C temperature coefficient {key}: ")
+            self._logger.debug(f"Denormalized %/°C temperature coefficient {key}: ")
             return self.module_parameters[key] / 100 * self.module_parameters[ref]
 
         if "noct" not in self.module_parameters.keys():
@@ -316,7 +325,7 @@ class SolarArray(pv.pvsystem.Array, Component):
         if configs.has_section("module"):
             module_params = dict(configs["module"])
             _update_parameters(params, module_params)
-            self._logger.debug("Extracted module from config file")
+            self._logger.debug("Extracted module from config section")
             return True
         return False
 
@@ -357,25 +366,29 @@ class SolarArray(pv.pvsystem.Array, Component):
         return params
 
     # noinspection PyProtectedMember, PyUnresolvedReferences
-    def _infer_temperature_model_params(self, configs: Configurations) -> dict:  # noqa
-        params = self._read_temperature_model_params(configs)
-        if len(params) > 0:
-            self._logger.debug("Extracted temperature model parameters from config file")
-            return params
+    def _infer_temperature_model_params(self, configs: Optional[Configurations] = None) -> Dict[str, Any]:
+        params = {}
 
-        # try to infer temperature model parameters from from racking_model
-        # and module_type
+        if configs is not None:
+            params.update(self._read_temperature_model_params(configs))
+            if len(params) > 0:
+                self._logger.debug("Extracted temperature model parameters from config file")
+                return params
+
+        # try to infer temperature model parameters from the racking_model and module_type
         # params = super()._infer_temperature_model_params()
-        if self.mount.racking_model is not None:
-            param_set = self.mount.racking_model.lower()
-            if param_set in ["open_rack", "close_mount", "insulated_back"]:
-                param_set += f"_{self.module_type}"
-            if param_set in temperature.TEMPERATURE_MODEL_PARAMETERS["sapm"]:
-                params.update(temperature._temperature_model_params("sapm", param_set))
-            elif "freestanding" in param_set:
-                params.update(temperature._temperature_model_params("pvsyst", "freestanding"))
-            elif "insulated" in param_set:  # after SAPM to avoid confusing keys
-                params.update(temperature._temperature_model_params("pvsyst", "insulated"))
+        if self.mount is not None:
+            if self.mount.racking_model is not None:
+                param_set = self.mount.racking_model.lower()
+                if param_set in ["open_rack", "close_mount", "insulated_back"]:
+                    param_set += f"_{self.module_type}"
+                if param_set in temperature.TEMPERATURE_MODEL_PARAMETERS["sapm"]:
+                    params.update(temperature._temperature_model_params("sapm", param_set))
+                elif "freestanding" in param_set:
+                    params.update(temperature._temperature_model_params("pvsyst", "freestanding"))
+                elif "insulated" in param_set:  # after SAPM to avoid confusing keys
+                    params.update(temperature._temperature_model_params("pvsyst", "insulated"))
+
         if len(params) == 0 and len(self.module_parameters) > 0:
             if "noct" in self.module_parameters.keys():
                 params["noct"] = self.module_parameters["noct"]

@@ -9,7 +9,7 @@ penguin.components.solar.system
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Mapping
+from typing import Dict, Mapping, Optional, Sequence
 
 import pvlib as pv
 
@@ -18,11 +18,12 @@ from lori import ConfigurationException, Configurations, Constant, Context
 from lori.components import Component, ComponentException, register_component_type
 from penguin.components.solar.array import SolarArray
 from penguin.components.solar.db import InverterDatabase
+from penguin.components.solar.model import SolarModel
 
 
 @register_component_type("pv", "solar")
 # noinspection SpellCheckingInspection
-class SolarSystem(pv.pvsystem.PVSystem, Component):
+class SolarSystem(Component, pv.pvsystem.PVSystem):
     INCLUDES = ["model", "inverter", "arrays", *SolarArray.INCLUDES]
 
     POWER = Constant(float, "pv_power", "PV Power", "W")
@@ -44,6 +45,8 @@ class SolarSystem(pv.pvsystem.PVSystem, Component):
     YIELD_ENERGY_DC = Constant(float, "yield_energy_dc", "Energy Yield (DC)", "kWh")
     YIELD_ENERGY = Constant(float, "yield_energy", "Energy Yield", "kWh")
 
+    arrays: Sequence[SolarArray]
+
     inverter: str = None
     inverter_parameters: dict = {}
     inverters_per_system: int = 1
@@ -54,8 +57,8 @@ class SolarSystem(pv.pvsystem.PVSystem, Component):
 
     losses_parameters: dict = {}
 
-    def __init__(self, context: Context, configs: Configurations) -> None:  # noqa
-        super(pv.pvsystem.PVSystem, self).__init__(context=context, configs=configs)
+    def __init__(self, context: Context, configs: Configurations) -> None:
+        super().__init__(context=context, configs=configs)
 
     def __repr__(self) -> str:
         return Component.__repr__(self)
@@ -63,22 +66,32 @@ class SolarSystem(pv.pvsystem.PVSystem, Component):
     def __str__(self) -> str:
         return Component.__str__(self)
 
-    # noinspection PyTypeChecker
     @property
-    def arrays(self) -> List[SolarArray]:
-        return self.components.get_all(SolarArray)
+    def name(self) -> str:
+        return self._name
+
+    @name.setter
+    def name(self, name: Optional[str]) -> None:
+        if name is None:
+            return
+        self._name = name
+
+    def _load_arrays(self, configs: Configurations) -> None:
+        self.arrays = tuple(
+            self.components.load_from_type(
+                SolarArray,
+                configs,
+                "arrays",
+                key="array",
+                name=f"{self.name} Array",
+                includes=SolarArray.INCLUDES,
+            )
+        )
 
     # noinspection PyProtectedMembers
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
-        self.components.load_from_type(
-            SolarArray,
-            configs,
-            "arrays",
-            key="array",
-            name=f"{self.name} Array",
-            includes=SolarArray.INCLUDES,
-        )
+        self._load_arrays(configs)
 
         def add_channel(constant: Constant, **custom) -> None:
             channel = constant.to_dict()
@@ -206,8 +219,6 @@ class SolarSystem(pv.pvsystem.PVSystem, Component):
             return _pvwatts_losses(self.arrays[0])
 
     def predict(self, weather: pd.DataFrame) -> pd.DataFrame:
-        from penguin.model import Model
-
         if len(self.arrays) < 1:
             raise ComponentException(self, "PV system must have at least one Array.")
         if not all(a.is_parametrized() for a in self.arrays):
@@ -217,7 +228,7 @@ class SolarSystem(pv.pvsystem.PVSystem, Component):
                 ", ".join(a.name for a in self.arrays if not a.is_configured()),
             )
 
-        model = Model.load(self)
+        model = SolarModel.load(self)
         return model(weather).rename(
             columns={
                 SolarArray.POWER_AC: SolarSystem.POWER,
