@@ -9,7 +9,7 @@ penguin.input
 from __future__ import annotations
 
 from pvlib import atmosphere
-from pvlib.irradiance import dirint, disc, dni
+from pvlib.irradiance import complete_irradiance, dirint, disc, dni
 
 import numpy as np
 import pandas as pd
@@ -77,7 +77,7 @@ def validate_meteo_inputs(weather: pd.DataFrame, location: Location) -> pd.DataF
                 if assert_columns(Weather.PRESSURE_SEA):
                     kwargs["pressure"] = weather[Weather.PRESSURE_SEA]
 
-                dni, dhi = direct_diffuse_from_global_irradiance(solar_position, weather[Weather.GHI], **kwargs)
+                dhi, dni = direct_diffuse_from_global_irradiance(solar_position, weather[Weather.GHI], **kwargs)
                 insert_column(Weather.DHI, dhi)
                 insert_column(Weather.DNI, dni)
             else:
@@ -237,13 +237,12 @@ def direct_diffuse_from_global_irradiance(solar_position, ghi, **kwargs):
     dhi, dni : Series
         Estimated DHI and DNI.
     """
-    if "pressure" in kwargs or "temp_dew" in kwargs:
+    if "temp_dew" in kwargs:
         dni = dirint(ghi, solar_position["zenith"], ghi.index, **kwargs).fillna(0)
     else:
         dni = disc(ghi, solar_position["zenith"], ghi.index, **kwargs)["dni"]
 
-    dhi = ghi - dni * np.cos(np.radians(solar_position["zenith"]))
-
+    dhi = complete_irradiance(solar_position["zenith"], ghi=ghi, dni=dni)["dhi"]
     return (
         _fill_irradiance(dhi),
         _fill_irradiance(dni),
