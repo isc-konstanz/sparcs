@@ -1,18 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-penguin.components.irrigation.soil.moisture
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+penguin.components.agriculture.soil.moisture
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 """
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional
 
 import pandas as pd
 from lori import ChannelState, Component, Configurations, Constant
-from penguin.components.irrigation.soil import Genuchten, SoilModel
+from penguin.components.agriculture.soil import Genuchten, SoilModel
 
 DEFAULT_WILTING_POINT: float = 4.2
 DEFAULT_FIELD_CAPACITY: float = 1.8
@@ -21,6 +21,7 @@ DEFAULT_FIELD_CAPACITY: float = 1.8
 # noinspection SpellCheckingInspection
 class SoilMoisture(Component):
     SECTION: str = "soil"
+    INCLUDES: List[str] = [SoilModel.SECTION]
 
     TEMPERATURE = Constant(float, "temp", "Soil Temperature", "°C")
     WATER_CONTENT = Constant(float, "water_content", "Soil Water Content", "%")
@@ -33,6 +34,8 @@ class SoilMoisture(Component):
 
     model: Optional[SoilModel] = None
 
+    depth: float
+
     def __init__(self, context: Context, configs: Configurations, key="soil", **kwargs) -> None:  # noqa
         super().__init__(context, configs, key=key, **kwargs)
         self.model = None
@@ -40,6 +43,8 @@ class SoilMoisture(Component):
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
         self.model = Genuchten(**configs["model"])
+
+        self.depth = configs.get_float("depth")
 
         def add_channel(constant: Constant, **custom) -> None:
             channel = constant.to_dict()

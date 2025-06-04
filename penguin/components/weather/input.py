@@ -13,7 +13,7 @@ from pvlib.irradiance import complete_irradiance, dirint, disc, dni
 
 import numpy as np
 import pandas as pd
-from lori import Constant, Weather, WeatherException
+from lori import Constant, Location, Weather, WeatherException
 
 SOLAR_ELEVATION = Constant(float, "solar_elevation", "Solar Elevation", "°")
 SOLAR_ZENITH = Constant(float, "solar_zenith", "Solar Zenith", "°")

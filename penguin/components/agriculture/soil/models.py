@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-penguin.components.irrigation.soil.model
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+penguin.components.agriculture.soil.model
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 """
@@ -15,6 +15,8 @@ import pandas as pd
 
 
 class SoilModel(ABC):
+    SECTION: str = "model"
+
     @abstractmethod
     def water_tension(self, water_content: float | pd.Series) -> float | pd.Series:
         """
