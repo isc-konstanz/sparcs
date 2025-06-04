@@ -424,7 +424,7 @@ class System(lori.System):
                 ].index[0]
                 self._plot_system(
                     data["predictions"][data.index.isocalendar().week == cons_self_week_energy_max],
-                    title="Week with highest Grid Import",
+                    title="Week with highest Self-Consumption",
                     file=str(results.dirs.tmp.joinpath("week_max_self-cons.png")),
                 )
 
