@@ -86,8 +86,8 @@ class ElectricalEnergyStorage(Component):
     def percent_to_energy(self, percent) -> float:
         return percent * self.capacity / 100
 
-    def energy_to_percent(self, capacity) -> float:
-        return capacity / self.capacity * 100
+    def energy_to_percent(self, energy) -> float:
+        return energy / self.capacity * 100
 
     # noinspection PyUnresolvedReferences
     def predict(self, data: pd.DataFrame, soc: float = 50.0) -> pd.DataFrame:
