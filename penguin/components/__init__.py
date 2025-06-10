@@ -21,8 +21,9 @@ from .solar import (  # noqa: F401
     SolarSystem,
 )
 
-from . import irrigation  # noqa: F401
-from .irrigation import (  # noqa: F401
-    IrrigationSeries,
-    IrrigationSystem,
+from . import agriculture  # noqa: F401
+from .agriculture import (  # noqa: F401
+    AgriculturalArea,
+    AgriculturalField,
+    Irrigation,
 )

@@ -8,7 +8,7 @@ penguin.application
 
 try:
     from .view import (  # noqa: F401
-        IrrigationPage,
+        AgriculturePage,
         WeatherPage,
     )
 except ModuleNotFoundError:

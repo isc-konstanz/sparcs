@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-penguin.application.view.irrigation.series
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+penguin.application.view.agriculture.soil
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 """
@@ -12,26 +12,17 @@ from collections.abc import Callable
 from typing import Any, Dict, Union
 
 import dash_bootstrap_components as dbc
-from dash import Input, Output, callback, dcc, html
+from dash import Input, Output, callback, html
 
-from lori import Channel, Channels, Constant
+from lori import Channel, Constant
 from lori.application.view.pages import ComponentPage, PageLayout, register_component_page
-from penguin.components.irrigation import IrrigationSeries, SoilMoisture
+from penguin.components.agriculture import SoilMoisture
 
 
-@register_component_page(IrrigationSeries)
-class IrrigationSeriesPage(ComponentPage[IrrigationSeries]):
-    @property
-    def soil(self) -> SoilMoisture:
-        return self._component.soil
-
+@register_component_page(SoilMoisture)
+class SoilModelPage(ComponentPage[SoilMoisture]):
     def create_layout(self, layout: PageLayout) -> None:
         super().create_layout(layout)
-
-        switch = self._build_switch()
-        layout.card.append(switch, focus=True)
-        layout.append(html.Div(switch))
-        layout.append(html.Hr())
 
         moisture = [
             dbc.Row(dbc.Col(html.H5("Soil moisture"), width="auto")),
@@ -44,7 +35,7 @@ class IrrigationSeriesPage(ComponentPage[IrrigationSeries]):
             dbc.Row(
                 [
                     dbc.Col(
-                        self._build_soil_value(
+                        self._build_value(
                             SoilMoisture.WATER_SUPPLY,
                             color="#68adff",
                             style={"min-width": "14rem"},
@@ -52,7 +43,7 @@ class IrrigationSeriesPage(ComponentPage[IrrigationSeries]):
                         width="auto",
                     ),
                     dbc.Col(
-                        self._build_soil_value(
+                        self._build_value(
                             SoilMoisture.WATER_CONTENT,
                             color="#8fd0ff",
                             style={"min-width": "10rem"},
@@ -65,7 +56,7 @@ class IrrigationSeriesPage(ComponentPage[IrrigationSeries]):
         temperature = [
             dbc.Row(dbc.Col(html.H5("Soil"))),
             dbc.Row(dbc.Col(html.H6("Temperature"))),
-            dbc.Row(dbc.Col(self._build_soil_value(SoilMoisture.TEMPERATURE, color="#ff746c"))),
+            dbc.Row(dbc.Col(self._build_value(SoilMoisture.TEMPERATURE, color="#ff746c"))),
         ]
 
         layout.card.append(html.Div(moisture), focus=True)
@@ -74,53 +65,10 @@ class IrrigationSeriesPage(ComponentPage[IrrigationSeries]):
         layout.append(html.Div(moisture))
         layout.append(html.Div(temperature))
 
-    def _create_data_layout(self, layout: PageLayout, channels: Channels, **kwargs) -> None:
-        super()._create_data_layout(layout, channels + self.soil.data.channels, **kwargs)
-
     # noinspection PyShadowingBuiltins
-    def _build_switch(self) -> html.Div:
-        id = f"{self.id}-state"
-
-        @callback(
-            Input(id, "value"),
-            force_no_output=True,
-        )
-        def _update_state(state: bool) -> None:
-            _state = self.data.watering_state
-            if _state.is_valid() and _state.value != state:
-                _state.write(state)
-
-        @callback(
-            Output(id, "value"),
-            Input(f"{id}-update", "n_intervals"),
-        )
-        def _update_switch(*_) -> bool:
-            _state = self.data.watering_state
-            if _state.is_valid():
-                return _state.value
-            return False
-
-        return html.Div(
-            [
-                html.H5("State"),
-                dbc.Switch(
-                    id=id,
-                    # label="State",
-                    style={"fontSize": "1.5rem"},
-                    value=_update_switch(),
-                ),
-                dcc.Interval(
-                    id=f"{id}-update",
-                    interval=60000,
-                    n_intervals=0,
-                ),
-            ]
-        )
-
-    # noinspection PyShadowingBuiltins
-    def _build_soil_value(self, constant: Constant, *args, **kwargs) -> html.Div:
+    def _build_value(self, constant: Constant, *args, **kwargs) -> html.Div:
         id = f"{self.id}-{constant.key.replace('_', '-')}"
-        channel = self.soil.data[constant.key]
+        channel = self.data[constant.key]
         channel_callback = callback(
             Output(id, "children"),
             Input("view-update", "n_intervals"),

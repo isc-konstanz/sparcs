@@ -19,8 +19,8 @@ from . import components  # noqa: F401
 from .components import (  # noqa: F401
     SolarArray,
     SolarSystem,
-    IrrigationSeries,
-    IrrigationSystem,
+    AgriculturalArea,
+    AgriculturalField,
     ElectricalEnergyStorage,
     ThermalEnergyStorage,
 )

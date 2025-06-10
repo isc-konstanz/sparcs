@@ -84,7 +84,7 @@ class SolarModel(Configurator, ModelChain):
 
         losses = self.results.losses
         if isinstance(losses, pd.Series) or (
-            isinstance(losses, tuple) and all([isinstance(l, pd.Series) for l in losses])
+            isinstance(losses, tuple) and all([isinstance(loss, pd.Series) for loss in losses])
         ):
             if isinstance(losses, tuple):
                 losses = pd.concat(list(losses), axis="columns").mean(axis="columns")

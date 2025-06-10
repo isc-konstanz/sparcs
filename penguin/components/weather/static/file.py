@@ -8,12 +8,12 @@ penguin.components.weather.static.file
 
 from __future__ import annotations
 
-import datetime as dt
 from abc import abstractmethod
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import pandas as pd
 from lori.components.weather import Weather
+from lori.typing import TimestampType
 from penguin.location import Location
 
 
@@ -37,8 +37,8 @@ class WeatherFile(Weather):
 
     def get(
         self,
-        start: pd.Timestamp | dt.datetime = None,
-        end: pd.Timestamp | dt.datetime = None,
+        start: Optional[TimestampType] = None,
+        end: Optional[TimestampType] = None,
         **kwargs,
     ) -> pd.DataFrame:
         """
