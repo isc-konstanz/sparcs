@@ -27,3 +27,6 @@ from .agriculture import (  # noqa: F401
     AgriculturalField,
     Irrigation,
 )
+
+#TODO: remove this import when CostProblem is moved to a different module
+from .control.predictive import GridCostProblem  # noqa: F401

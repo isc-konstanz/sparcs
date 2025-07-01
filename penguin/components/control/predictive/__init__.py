@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-penguin.components.optimization
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+penguin.components.control.predictive
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 """
 
-from .model import PredictiveModel  # noqa: F401
-from .optimization import PredictiveOptimization # noqa: F401
-from .tariff_cost import TariffCostOptimization  # noqa: F401
+from .optimization import Optimization # noqa: F401
+from .model import Model  # noqa: F401
+from .problems import GridCostProblem  # noqa: F401
+
