@@ -25,6 +25,7 @@ from lori.components import Tariff, TariffUnavailableException
 from lori.components.tariff.entsoe import EntsoeProvider
 from penguin import Location
 from penguin.components import ElectricalEnergyStorage, SolarSystem
+from penguin.components.control.predictive.problems import GridCostProblemStochastic
 
 from penguin.components.weather import validate_meteo_inputs, validated_meteo_inputs
 
@@ -232,24 +233,39 @@ class System(lori.System):
         weather = self.weather.get(start, end, **kwargs)
         solar_predictions = self._predict_solar(weather)
 
-        load_predictions = self._predict_load(start, end, index=weather.index)
+        from lori.data.forecast import get_forecast
+        load_predictions = get_forecast(
+            self,
+            System.POWER_EL,
+            start=start,
+            end=end,
+            method="persistence_3weeks",
+        )
+        # upsample load predictions
+        load_predictions = load_predictions.resample("1min").ffill()
         predictions = pd.concat([solar_predictions, load_predictions], axis="columns")
         predictions = self._predict_residual(start, end, predictions)
+        predictions.dropna(axis="index", how="any", inplace=True)
 
-        #if self.components.has_type(Tariff):
-        #    tariff: Tariff = self.components.get_first(Tariff)
-        #    tariff.get(start, end, **kwargs)
+        if self.components.has_type(Tariff):
+            tariff: Tariff = self.components.get_first(Tariff)
+            #tariff_connector = tariff.connectors.get_first(EntsoeConnector)
+            t = tariff.get(start, end, **kwargs)
+
+            pass
         #tariff = self.components..get(start, end, **kwargs)
 
-        forecaster = self.forecast.get()
         tariff = pd.DataFrame(index=weather.index)
         #tariff["import"] = 0.25
-        tariff["import"] = 0.3 + 0.1 * (np.sin(weather.index.hour / 24 * 2 * np.pi) + 1)
+        # map weater.index to int to use in sin function
+        tariff["import"] = 0.2 + 0.2 * np.sin((weather.index.hour+6) * np.pi / 12)**2
+
         tariff["export"] = -0.05
         predictions = pd.concat([predictions, tariff], axis="columns")
 
-        self._predict_optimization(start, end, predictions)
-
+        solution = self._predict_optimization(start, end, predictions)
+        solution = solution.resample("1min").ffill()
+        predictions = pd.concat([predictions, solution], axis="columns")
         pass
 
 
@@ -257,7 +273,7 @@ class System(lori.System):
 
 
 
-        return pd.concat([predictions, weather], axis="columns")
+        return pd.concat([predictions, weather], axis="columns").dropna(axis="index", how="any").sort_index()
 
     def _predict_solar(self, weather: pd.DataFrame) -> pd.DataFrame:
         weather = validate_meteo_inputs(weather, self.location)
@@ -285,175 +301,6 @@ class System(lori.System):
 
 
 
-    def apply_kalman_filter(self, series: pd.Series, process_var=1e-5, meas_var=0.1) -> pd.Series:
-        """
-        Apply a basic 1D Kalman Filter to a pandas Series.
-
-        Parameters:
-            series (pd.Series): The input time series.
-            process_var (float): Process variance (Q).
-            meas_var (float): Measurement variance (R).
-
-        Returns:
-            pd.Series: Smoothed series.
-        """
-        kf = KalmanFilter(dim_x=2, dim_z=1)
-
-        # State: [position, velocity]
-        kf.x = np.array([[series.iloc[0]], [0.]])  # initial state
-        kf.F = np.array([[1., 1.], [0., 1.]])  # state transition matrix
-        kf.H = np.array([[1., 0.]])  # measurement function
-        kf.P *= 1000.  # covariance matrix
-        kf.R = meas_var  # measurement noise
-        kf.Q = np.array([[0.25, 0.5],  # process noise
-                         [0.5, 1.0]]) * process_var
-
-        results = []
-        for z in series:
-            kf.predict()
-            kf.update([z])
-            results.append(kf.x[0, 0])  # position estimate
-
-        return pd.Series(results, index=series.index, name="kalman")
-
-    def persistence_avg_3_week(self,
-        start: TimestampType,
-        column: str,
-        prediction_index: pd.Index
-    ) -> pd.DataFrame:
-        # Define window of past 3 weeks
-        _start = start - pd.Timedelta(weeks=3)
-        _end = start
-
-        # Todo: Remove this, it is only for testing
-        # Shift forward if data is not available before this date
-        while _start < pd.Timestamp("2016-06-01T00:00:00+02:00"):
-            _start += pd.Timedelta(weeks=1)
-            _end += pd.Timedelta(weeks=1)
-
-        def timestamp_to_week(timestamp: pd.Timestamp) -> int:
-            return timestamp.weekday() * 24 * 60 + timestamp.hour * 60 + timestamp.minute
-
-        week_minutes = 7 * 24 * 60
-        week_offset = timestamp_to_week(start)
-
-        # Load historical data
-        past_df = self.data.from_logger([column], start=_start, end=_end)
-        past_df = past_df.copy()
-        past_df.index = pd.to_datetime(past_df.index).tz_convert(None)
-
-        # Normalize time of week
-        past_df["min_of_week"] = (past_df.index.map(timestamp_to_week) - week_offset) % week_minutes
-
-        # Average power per minute offset in week
-        avg_week = past_df.groupby("min_of_week")[column].mean()
-
-        # Align average week data to the prediction time
-        aligned_index = ((prediction_index.map(timestamp_to_week) - week_offset) % week_minutes)
-        aligned_index.index = prediction_index
-
-        # Map predictions
-        predictions = pd.DataFrame(index=prediction_index)
-        predictions.index.name = Channel.TIMESTAMP
-        predictions[column] = aligned_index.map(avg_week.get)
-
-        return predictions
-
-    def deterministic_forecast_model(self, current, forecast_values:pd.Series, t_half, dt=1):
-        """
-        F = external forecast values
-        R = model results
-        R_k+1 = F_k+1 + kappa * (R_k - F_k)
-        kappa = 2^dt/t_half
-        """
-        kappa = 2 ** -(dt / t_half)
-        results = [current]
-        for index in range(1, len(forecast_values)):
-            results.append(forecast_values.iloc[index] + kappa * (results[index - 1] - forecast_values.iloc[index - 1]))
-        print(results)
-        return pd.Series(results, index=forecast_values.index, name=forecast_values.name)
-
-
-
-    def _predict_load(self,
-        start: TimestampType,
-        end: TimestampType,
-        index: pd.Index = None,
-    ) -> pd.DataFrame:
-        real = self.logged_data(start, end, System.POWER_EL)
-        persistence = self.persistence_avg_3_week(start, System.POWER_EL, index)
-        forcast_model = self.deterministic_forecast_model(
-            current=real.iloc[0][System.POWER_EL],
-            forecast_values=persistence[System.POWER_EL],
-            t_half= 6 * 60,  # 6h half-life
-            dt=1,  # 1 minute step
-        )
-
-
-        combined = pd.concat([real, persistence, forcast_model], axis=1, keys=["real", "persistence", "forecast_model"])
-        combined["real_kalman"] = self.apply_kalman_filter(real[System.POWER_EL], process_var=1, meas_var=100_000)
-
-        plot_persistence_against_real = True
-        if plot_persistence_against_real:
-            import matplotlib.pyplot as plt
-
-            plt.figure(figsize=(12, 6))
-            for col in combined.columns:
-                plt.plot(combined.index, combined[col], linestyle='-', label=col)
-            plt.xlabel("Time")
-            plt.ylabel("Power [W]")
-            plt.title("Real vs. Persistence Load Prediction")
-            plt.legend()
-            plt.tight_layout()
-            #plt.show()
-
-
-
-
-
-
-
-
-        """
-        Predicts electric load using 3-week persistence-based average.
-        """
-        # Define window of past 3 weeks
-        _start = start - pd.Timedelta(weeks=3)
-        _end = start
-
-        def timestamp_to_week(timestamp: pd.Timestamp) -> int:
-            return timestamp.weekday() * 24 * 60 + timestamp.hour * 60 + timestamp.minute
-
-        # Todo: Remove this, it is only for testing
-        # Shift forward if data is not available before this date
-        while _start < pd.Timestamp("2016-06-01T00:00:00+02:00"):
-            _start += pd.Timedelta(weeks=1)
-            _end += pd.Timedelta(weeks=1)
-
-        week_minutes = 7 * 24 * 60
-        week_offset = timestamp_to_week(start)
-
-        # Load historical data
-        historical_load = self.data.from_logger([System.POWER_EL], start=_start, end=_end)
-        historical_load = historical_load.copy()
-        historical_load.index = pd.to_datetime(historical_load.index).tz_convert(None)
-
-        # Normalize time of week
-        historical_load["tow_time"] = (historical_load.index.map(timestamp_to_week) - week_offset) % week_minutes
-
-        # Average power per minute offset in week
-        avg_week = historical_load.groupby("tow_time")[System.POWER_EL].mean()
-
-        # Align average week data to the prediction time
-        aligned_index = ((index.map(timestamp_to_week) - week_offset) % week_minutes)
-        aligned_index.index = index
-
-        # Map predictions
-        load_predictions = pd.DataFrame(index=index)
-        load_predictions.index.name = Channel.TIMESTAMP
-        load_predictions[System.POWER_EL] = aligned_index.map(avg_week.get)
-
-        return load_predictions
 
 
     def _predict_residual(
@@ -466,7 +313,8 @@ class System(lori.System):
             solar_column = solar.data[SolarSystem.POWER].column
             if not solar.data.has_logged(SolarSystem.POWER, start, end):
                 # Solar System does not have a measured reference and will be subtracted from residual power
-                predictions[System.POWER_EL] -= predictions[solar_column]
+                predictions["forecast"] -= predictions[solar_column]
+
         return predictions
 
     def _predict_optimization(
@@ -475,8 +323,8 @@ class System(lori.System):
         end: TimestampType,
         predictions: pd.DataFrame,
     ) -> pd.DataFrame:
-        if self.components.has_type(GridCostProblem):
-            problem: GridCostProblem = self.components.get_first(GridCostProblem)
+        if self.components.has_type(GridCostProblem, GridCostProblemStochastic):
+            problem: GridCostProblem = self.components.get_first(GridCostProblem, GridCostProblemStochastic)
             results = problem.solve(predictions, start)
             predictions = pd.concat([predictions, results], axis="columns")
         return predictions

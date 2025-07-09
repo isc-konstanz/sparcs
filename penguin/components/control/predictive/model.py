@@ -81,7 +81,8 @@ class Model:
         time_duration = np.sum(self.step_durations)
         row = data.loc[data.index[0] + pd.Timedelta(seconds=time_duration)]
         for component_id, variables in self.variables.items():
-            self.opti.subject_to(variables["states"][-1] == row[component_id + "_state"])
+            # mostly will lead to unsolvable problem...
+            self.opti.subject_to((variables["states"][-1] - row[component_id + "_state"]) ** 2 <= self.epsilon*100)
 
         pass
 
@@ -149,8 +150,8 @@ class Model:
 
             t_hour = step_duration / 3600
             #TODO: replace placeholders
-            charge_cost = 0.15 * 2 / (3 * component.power_max / 1000)
-            discharge_cost = 0.15 * 2 / (3 * component.power_max / 1000)
+            charge_cost = 0.001 / (component.power_max)
+            discharge_cost = 0.001 / (component.power_max)
             #TODO: square cost
             costs += charge_cost * (inputs_in[index] ** 2) * t_hour
             costs += discharge_cost * (inputs_out[index] ** 2) * t_hour

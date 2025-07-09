@@ -158,7 +158,6 @@ class Optimization(Component, ABC): #TODO: or _Component?
 
             model.set_initials(interval_data)
             if index > 0:
-
                 model.set_finals(results[index-1])
 
             cost = self.cost_function(model)
@@ -171,8 +170,8 @@ class Optimization(Component, ABC): #TODO: or _Component?
 
             timestamps = self._steps_to_datetime(model.step_durations, start_time)
             result = pd.DataFrame(index=timestamps)
-            result = self.extract_results(model, result)
             result = model.extract_results(result)
+            result = self.extract_results(model, result)
             results.append(result)
             pass
 
@@ -180,23 +179,6 @@ class Optimization(Component, ABC): #TODO: or _Component?
         results = results.loc[~results.index.duplicated(keep='last')]
         results = results.sort_index()
 
-
-        plot_df = results.copy()
-        plot_solution = True
-        if plot_solution:
-            import matplotlib.pyplot as plt
-            plt.figure(figsize=(12, 6))
-
-            for col in plot_df.columns:
-                plt.plot(plot_df.index, plot_df[col], marker='x', linestyle='-', label=col)
-
-            plt.legend()
-            plt.xlabel("Time")
-            plt.ylabel("Value")
-            plt.title("Scatter Plot of All Columns")
-            plt.grid(True)
-            plt.tight_layout()
-            plt.show()
 
 
         return results
