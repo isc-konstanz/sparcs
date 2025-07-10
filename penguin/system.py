@@ -25,7 +25,6 @@ from lori.components import Tariff, TariffUnavailableException
 from lori.components.tariff.entsoe import EntsoeProvider
 from penguin import Location
 from penguin.components import ElectricalEnergyStorage, SolarSystem
-from penguin.components.control.predictive.problems import GridCostProblemStochastic
 
 from penguin.components.weather import validate_meteo_inputs, validated_meteo_inputs
 
@@ -323,8 +322,8 @@ class System(lori.System):
         end: TimestampType,
         predictions: pd.DataFrame,
     ) -> pd.DataFrame:
-        if self.components.has_type(GridCostProblem, GridCostProblemStochastic):
-            problem: GridCostProblem = self.components.get_first(GridCostProblem, GridCostProblemStochastic)
+        if self.components.has_type(GridCostProblem):
+            problem: GridCostProblem = self.components.get_first(GridCostProblem)
             results = problem.solve(predictions, start)
             predictions = pd.concat([predictions, results], axis="columns")
         return predictions
