@@ -84,8 +84,9 @@ class SolarArray(Component, pv.pvsystem.Array):
         context: Context,
         configs: Configurations,
         mount: Optional[pv.pvsystem.AbstractMount] = None,
+        **kwargs,
     ) -> None:
-        super().__init__(context=context, configs=configs, mount=mount)
+        super().__init__(context=context, configs=configs, mount=mount, **kwargs)
 
     def __repr__(self) -> str:
         return Component.__repr__(self)
@@ -105,7 +106,7 @@ class SolarArray(Component, pv.pvsystem.Array):
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
-        self.mount = self._new_mount(configs)
+        self.mount = self._create_mount(configs)
 
         self.surface_type = configs.get("surface_type", default=configs.get("ground_type", default=None))
         if "albedo" not in configs:
@@ -169,7 +170,7 @@ class SolarArray(Component, pv.pvsystem.Array):
         return self._module_parametrized and self.is_configured()
 
     @staticmethod
-    def _new_mount(configs: Configurations) -> pv.pvsystem.AbstractMount:
+    def _create_mount(configs: Configurations) -> pv.pvsystem.AbstractMount:
         mounting = configs.get_section("mounting", defaults={})
         if configs.has_section("tracking") and configs.get_section("tracking").enabled:
             tracking = configs.get_section("tracking")

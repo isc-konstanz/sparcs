@@ -91,6 +91,7 @@ class System(lori.System):
         except WeatherUnavailableException:
             pass
 
+    # noinspection PyShadowingBuiltins
     def _register_weather(self, weather: Weather) -> None:
         if not weather.is_enabled():
             return

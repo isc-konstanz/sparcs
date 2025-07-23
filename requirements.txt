@@ -22,6 +22,7 @@ matplotlib~=3.10
 seaborn~=0.13
 tqdm~=4.67
 holidays~=0.52
+entsoe-py~=0.7
 NREL-PySAM~=5.1
 pvlib~=0.11
 lori@git+https://github.com/isc-konstanz/lori.git@stable
