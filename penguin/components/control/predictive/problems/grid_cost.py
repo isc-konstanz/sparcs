@@ -16,7 +16,7 @@ import pandas as pd
 from typing import Callable
 
 from lori import Configurations
-from lori.components import register_component_type
+from lori.components import Tariff, register_component_type
 from penguin.components import ElectricalEnergyStorage
 
 from penguin.components.control.predictive.optimization import Optimization
@@ -38,9 +38,14 @@ class GridCostProblem(Optimization):
     
     grid_expected_std: casadi.MX
 
+    #TODO: not list just itarable(type)
     @property
-    def required_components(self) -> Union:
-        return ElectricalEnergyStorage
+    def required_components(self) -> list[type]:
+        return [Tariff]
+
+    @property
+    def controlled_components(self) -> list[type]:
+        return [ElectricalEnergyStorage]
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
@@ -67,21 +72,21 @@ class GridCostProblem(Optimization):
             tariff += function_arctan(grid, 0, 2, export_tariff, import_tariff)
             
             if objective_config.get("import_limit_active", False):
-                import_limit = objective_config.get("import_limit", 1000)  # Defaults to 1MW
-                import_limit_tariff = objective_config.get("import_limit_tariff", 100)  # Defaults to 100 ct/kW
+                import_limit = objective_config.get("import_limit", default=-10)  # Defaults to 1MW
+                import_limit_tariff = objective_config.get("import_limit_tariff", default=100)  # Defaults to 100 ct/kW
 
                 tariff += function_arctan(grid, import_limit, 10, 0, import_limit_tariff - import_tariff)
 
             if objective_config.get("export_limit_active", False):
-                export_limit = objective_config.get("export_limit", -1000)  # Defaults to -1MW
-                export_limit_tariff = objective_config.get("export_limit_tariff", 100)
+                export_limit = objective_config.get("export_limit", default=-1000)  # Defaults to -1MW
+                export_limit_tariff = objective_config.get("export_limit_tariff", default=100)
                 
                 tariff += function_arctan(grid, export_limit, 2, export_limit_tariff - export_tariff, 0)
                 
-            if objective_config.get("grid_squared", False):
-                cost = tariff / 100 * grid ** 2
+            if objective_config.get("grid_cost_squared", True):
+                cost = tariff * grid ** 2
             else:
-                cost = function_arctan(grid, 0, 2, -1, 1) * tariff / 100 * grid * 100
+                cost = function_arctan(grid, 0, 2, -1, 1) * tariff * grid * 100
                 
             return cost
             
@@ -116,8 +121,9 @@ class GridCostProblem(Optimization):
             self.grid_expected_std = model.opti.parameter(n)  # Standard deviation for stochasticity
 
     def set_initials(self, data: pd.DataFrame, model: Model):
-        model.opti.set_value(self.import_tariff, data["import"].values)
-        model.opti.set_value(self.export_tariff, data["export"].values)
+        #TODO: use predictors here
+        model.opti.set_value(self.import_tariff, data[Tariff.PRICE_IMPORT].values)
+        model.opti.set_value(self.export_tariff, data[Tariff.PRICE_IMPORT].values)
         model.opti.set_value(self.grid_expected, data["forecast"].values / 1000)  # convert to kWh
         
         if self.objective_config.get("stochastic_active", False):
@@ -134,10 +140,6 @@ class GridCostProblem(Optimization):
             self._plot_results(df)
 
         return df
-
-
-
-    
 
     def cost_function(self, model: Model):
         cost = 0
@@ -160,10 +162,12 @@ class GridCostProblem(Optimization):
 
             model.opti.subject_to(self.grid_variable[index] == grid_calculated)
 
-            step_cost = self.objective_function(grid_calculated,
-                                                grid_std,
-                                                pos_tariff,
-                                                neg_tariff)
+            step_cost = self.objective_function(
+                grid_calculated,
+                grid_std,
+                pos_tariff,
+                neg_tariff
+            )
 
             cost += step_cost * step_duration / 3600 # convert to hours
 
@@ -195,31 +199,35 @@ class GridCostProblem(Optimization):
     def _plot_results(self, df: pd.DataFrame):
         import matplotlib.pyplot as plt
 
+        def plot():
+            ax = fig.add_subplot(111)
+            ax.plot(df.index, df["grid_expected"], label="Grid predicted (kWh)")
+            ax.plot(df.index, df["grid_variable"], label="Grid MPC solution (kWh)")
+            ax.plot(df.index, df["import_tariff"], label="Import Tariff (ct/kWh)", linestyle='--')
+            ax.plot(df.index, df["export_tariff"], label="Export Tariff (ct/kWh)", linestyle='--')
+
+            for component_id, component in self.models[0]._components.items():
+                ax.plot(df.index, df[f"{component_id}.ees_soc"], label=f"SoC (%) ({component_id})", linestyle=':')
+                ax.plot(df.index, df[f"{component_id}.ees_charge_power"], label=f"Input (kW) ({component_id})")
+
+            ax.set_xlabel("Time")
+            ax.set_ylabel("Power (kW)")
+            ax.set_xlim(df.index[0], df.index[-1])
+            ax.set_title("Grid power predicted vs MPC solution")
+            ax.legend(loc='upper right')
+            ax.grid(True)
+            plt.tight_layout()
+
+            plt.pause(0.1)
+
         if plt.fignum_exists(1):
             fig = plt.figure(1)
             fig.clf()
+            plot()
 
         else:
             fig = plt.figure(1, figsize=(12, 6))
+            plot()
             plt.waitforbuttonpress()
 
 
-        ax = fig.add_subplot(111)
-        ax.plot(df.index, df["grid_expected"], label="Grid predicted (kWh)")
-        ax.plot(df.index, df["grid_variable"], label="Grid MPC solution (kWh)")
-        ax.plot(df.index, df["import_tariff"]*100, label="Import Tariff (ct/kWh)", linestyle='--')
-        ax.plot(df.index, df["export_tariff"]*100, label="Export Tariff (ct/kWh)", linestyle='--')
-
-        ax.plot(df.index, df["isc.ees_rct_state"], label="EES RCT State (kWh)", linestyle=':')
-        ax.plot(df.index, df["isc.ees_rct_input_in"] - df["isc.ees_rct_input_out"],
-                label="EES RCT Input (kW)")
-
-        ax.set_xlabel("Time")
-        ax.set_ylabel("Power (kW)")
-        ax.set_title("Grid power predicted vs MPC solution")
-        ax.legend()
-        ax.grid(True)
-        plt.tight_layout()
-
-        #show 0.2s
-        plt.pause(0.1)
