@@ -53,17 +53,17 @@ class SoilModelPage(ComponentPage[SoilMoisture]):
                 ],
             ),
         ]
-        temperature = [
-            dbc.Row(dbc.Col(html.H5("Soil"))),
-            dbc.Row(dbc.Col(html.H6("Temperature"))),
-            dbc.Row(dbc.Col(self._build_value(SoilMoisture.TEMPERATURE, color="#ff746c"))),
-        ]
-
         layout.card.append(html.Div(moisture), focus=True)
-        layout.card.append(html.Div(temperature))
-
         layout.append(html.Div(moisture))
-        layout.append(html.Div(temperature))
+
+        if self.data[SoilMoisture.TEMPERATURE].has_connector():
+            temperature = [
+                dbc.Row(dbc.Col(html.H5("Soil"))),
+                dbc.Row(dbc.Col(html.H6("Temperature"))),
+                dbc.Row(dbc.Col(self._build_value(SoilMoisture.TEMPERATURE, color="#ff746c"))),
+            ]
+            layout.card.append(html.Div(temperature))
+            layout.append(html.Div(temperature))
 
     # noinspection PyShadowingBuiltins
     def _build_value(self, constant: Constant, *args, **kwargs) -> html.Div:
