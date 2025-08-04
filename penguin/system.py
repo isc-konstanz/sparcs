@@ -202,53 +202,20 @@ class System(lori.System):
         start: TimestampType = None,
         end: TimestampType = None,
     ) -> pd.DataFrame:
-        weather = validate_meteo_inputs(weather, self.location)
-        predictions = pd.DataFrame(index=weather.index)
-        predictions.index.name = Channel.TIMESTAMP
-
-        if self.components.has_type(SolarSystem):
-            solar_columns = [SolarSystem.POWER, SolarSystem.POWER_DC]
-            predictions[solar_columns] = 0.0
-            for solar_system in self.components.get_all(SolarSystem):
-                solar_column = solar_system.data[SolarSystem.POWER].column
-                solar_prediction = solar_system.predict(weather)
-                predictions[solar_column] = solar_prediction[SolarSystem.POWER]
-                predictions[solar_columns] += solar_prediction[solar_columns].fillna(0)
-
-        #TODO: implement load consumption prediction
-
-        if self.components.has_type(ElectricalEnergyStorage) and self.components.has_type(GridCostProblem):
-            # get el power from logger and simulate ontop
-            opti_df = pd.DataFrame(index=weather.index)
-            opti_df.insert(0, System.POWER_EL, self.data.from_logger([System.POWER_EL], start=start, end=end))
-            for solar in self.components.get_all(SolarSystem):
-                solar_column = solar.data[SolarSystem.POWER].column
-                if not solar.data.has_logged(SolarSystem.POWER, start, end):
-                    # Solar System does not have a measured reference and will be subtracted from residual power
-                    opti_df[System.POWER_EL] -= predictions[solar_column]
-
-            # get tariff data
-            # TODO: Callback of channels
-            # opti_df.insert(0, Tariff.EXPORT, self.data.from_logger([Tariff.EXPORT], start=start, end=end))
-            # opti_df.insert(0, Tariff.IMPORT, self.data.from_logger([Tariff.IMPORT], start=start, end=end))
-            tariff_component:Tariff = self.components.get_first(Tariff)
-            self.connectors.get_first(EntsoeProvider)
-            #tariff_component.
-
-            problem:GridCostProblem = self.components.get_first(GridCostProblem)
-
-
-            #problem.solve()
-
-        return predictions
+        pass
 
     def predict(
         self,
         start: TimestampType = None,
         end: TimestampType = None,
+        prior: Optional[pd.DataFrame] = None,
         **kwargs,
     ) -> pd.DataFrame:
+        _end = end
         if self.components.has_type(Optimization):
+            # if not self.components.has_type(Tariff):
+            #     raise ResourceUnavailableException("Optimization requires a Tariff component to be available.")
+
             optimization_problem = self.components.get_first(Optimization)
             optimization_end = start + pd.Timedelta(seconds=optimization_problem.total_duration)
             if end > optimization_end:
@@ -256,102 +223,72 @@ class System(lori.System):
             end = optimization_end
 
         weather = self.weather.get(start, end, **kwargs)
-        solar_predictions = self._predict_solar(weather)
+        solar = self._predict_solar(weather)
 
+        # add tariff to data
+        tariff_component: Tariff = self.components.get_first(Tariff)
+        tariff = tariff_component.get(start - pd.Timedelta(hours=1), end, **kwargs)
+        tariff = tariff.resample("1min").ffill()
+        tariff[Tariff.PRICE_EXPORT] = -5
+
+        # hacky forecasting #TODO: remove this when predictors are ready
         from lori.data.forecast import get_forecast
-        load_predictions = get_forecast(
+        el_power_forecast = get_forecast(
             self,
             System.POWER_EL,
             start=start,
             end=end,
-            method="persistence_3weeks",
+            method="real",
+            #method="persistence_3weeks",
         )
         # upsample load predictions
-        load_predictions = load_predictions.resample("1min").ffill()
-        predictions = pd.concat([solar_predictions, load_predictions], axis="columns")
-        predictions = self._predict_residual(start, end, predictions)
+        el_power_forecast = el_power_forecast.resample("1min").ffill()
+
+        predictions = pd.concat([solar, tariff, el_power_forecast], axis="columns")
         predictions.dropna(axis="index", how="any", inplace=True)
 
-        if self.components.has_type(Tariff):
-            tariff: Tariff = self.components.get_first(Tariff)
-            #tariff_connector = tariff.connectors.get_first(EntsoeConnector)
-            t = tariff.get(start, end, **kwargs)
+        # simulate solar systems
+        for solar_system in self.components.get_all(SolarSystem):
+            solar_column = solar_system.data[SolarSystem.POWER].column
+            if not solar_system.data.has_logged(SolarSystem.POWER, start, end):
+                # Solar System does not have a measured reference and will be subtracted from residual power
+                predictions["forecast"] -= predictions[solar_column]
 
-            pass
-        #tariff = self.components..get(start, end, **kwargs)
+        # solve mpc if available
+        if self.components.has_type(GridCostProblem):
+            mpc_component: GridCostProblem = self.components.get_first(GridCostProblem)
+            mpc = mpc_component.solve(predictions, start.floor("1min"), prior=prior)
+            mpc = mpc.resample("1min").ffill()
+        else:
+            mpc = None
 
-        tariff = pd.DataFrame(index=weather.index)
-        #tariff["import"] = 0.25
-        # map weater.index to int to use in sin function
-        tariff["import"] = 0.2 + 0.2 * np.sin((weather.index.hour+6) * np.pi / 12)**2
-
-        tariff["export"] = -0.05
-        predictions = pd.concat([predictions, tariff], axis="columns")
-
-        solution = self._predict_optimization(start, end, predictions)
-        solution = solution.resample("1min").ffill()
-        predictions = pd.concat([predictions, solution], axis="columns")
         pass
 
 
 
+        data_df = pd.concat([predictions, mpc], axis="columns").dropna(axis="index", how="any").sort_index()
+        data_df = data_df[:_end]
 
+        drop_col = ["forecast", "forecast_std"]
+        data_df = data_df.drop(columns=drop_col)
 
-
-        return pd.concat([predictions, weather], axis="columns").dropna(axis="index", how="any").sort_index()
+        return data_df
+        #return weather.dropna(axis="index", how="any").sort_index()
 
     def _predict_solar(self, weather: pd.DataFrame) -> pd.DataFrame:
         weather = validate_meteo_inputs(weather, self.location)
-        solar_predictions = pd.DataFrame(index=weather.index)
-        solar_predictions.index.name = Channel.TIMESTAMP
+        predictions = pd.DataFrame(index=weather.index)
+        predictions.index.name = Channel.TIMESTAMP
 
         if self.components.has_type(SolarSystem):
-            solar_columns = [SolarSystem.POWER, SolarSystem.POWER_DC]
-            solar_predictions[solar_columns] = 0.0
+            columns = [SolarSystem.POWER, SolarSystem.POWER_DC]
+            predictions[columns] = 0.0
             for solar_system in self.components.get_all(SolarSystem):
-                solar_column = solar_system.data[SolarSystem.POWER].column
-                solar_prediction = solar_system.predict(weather)
-                solar_predictions[solar_column] = solar_prediction[SolarSystem.POWER]
-                solar_predictions[solar_columns] += solar_prediction[solar_columns].fillna(0)
+                system_column = solar_system.data[SolarSystem.POWER].column
+                system_prediction = solar_system.predict(weather)
+                predictions[system_column] = system_prediction[SolarSystem.POWER]
+                predictions[columns] += system_prediction[columns].fillna(0)
 
-        return solar_predictions
-
-    def logged_data(
-        self,
-        start: TimestampType,
-        end: TimestampType,
-        column: str,
-    ) -> pd.DataFrame:
-        return self.data.from_logger([column], start=start, end=end)
-
-
-
-
-
-    def _predict_residual(
-        self,
-        start: TimestampType,
-        end: TimestampType,
-        predictions: pd.DataFrame,
-    ) -> pd.DataFrame:
-        for solar in self.components.get_all(SolarSystem):
-            solar_column = solar.data[SolarSystem.POWER].column
-            if not solar.data.has_logged(SolarSystem.POWER, start, end):
-                # Solar System does not have a measured reference and will be subtracted from residual power
-                predictions["forecast"] -= predictions[solar_column]
-
-        return predictions
-
-    def _predict_optimization(
-        self,
-        start: TimestampType,
-        end: TimestampType,
-        predictions: pd.DataFrame,
-    ) -> pd.DataFrame:
-        if self.components.has_type(GridCostProblem):
-            problem: GridCostProblem = self.components.get_first(GridCostProblem)
-            results = problem.solve(predictions, start)
-            predictions = pd.concat([predictions, results], axis="columns")
         return predictions
 
 
@@ -363,7 +300,8 @@ class System(lori.System):
         prior: Optional[pd.DataFrame] = None,
         **kwargs: Any,
     ) -> pd.DataFrame:
-        data = self.predict(start, end, **kwargs)
+        data = self.predict(start, end, prior, **kwargs)
+
 
         if System.POWER_EL not in data.columns:
             if self.data.has_logged(System.POWER_EL, start=start, end=end):
@@ -444,6 +382,10 @@ class System(lori.System):
         references = self.data.from_logger(start=results.start, end=results.end).dropna(axis="columns", how="all")
         references.columns = pd.MultiIndex.from_product([["references"], references.columns])
         data = pd.concat([predictions, references], axis="columns")
+
+        # from penguin.plots import SystemPlots
+        # solar_columns = [solar.data[SolarSystem.POWER].column for solar in self.components.get_all(SolarSystem)]
+        # SystemPlots.plot_yield(results.data, solar_columns)
 
         self._evaluate_yield(results, data)
         self._evaluate_storage(results, data)
@@ -543,7 +485,7 @@ class System(lori.System):
                 ylabel="Power [kW]",
                 title="Average Power per Week",
                 file=str(power_avg_week_file),
-                percentile=100,
+                #percentile=100,
                 #hue="Month"
             )
 
