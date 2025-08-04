@@ -24,6 +24,7 @@ from penguin.components.weather import validate_meteo_inputs, validated_meteo_in
 class System(lori.System):
     POWER_EL = Constant(float, "el_power", "Electrical Power", "W")
     POWER_EL_EST = Constant(float, "el_est_power", "Estimate Electrical Power", "W")
+    POWER_EL_CON = Constant(float, "el_cons_power", "Consumption Electrical Power", "W")
     POWER_EL_IMP = Constant(float, "el_import_power", "Import Electrical Power", "W")
     POWER_EL_EXP = Constant(float, "el_export_power", "Export Electrical Power", "W")
 
@@ -33,6 +34,7 @@ class System(lori.System):
     POWER_TH_HT = Constant(float, "th_ht_power", "Heating Water Thermal Power", "W")
 
     ENERGY_EL = Constant(float, "el_energy", "Electrical Energy", "kWh")
+    ENERGY_EL_CON = Constant(float, "el_cons_energy", "Consumed Electrical Energy", "W")
     ENERGY_EL_IMP = Constant(float, "el_import_energy", "Import Electrical Energy", "kWh")
     ENERGY_EL_EXP = Constant(float, "el_export_energy", "Export Electrical Energy", "kWh")
 
@@ -63,6 +65,7 @@ class System(lori.System):
             add_channel(SolarSystem.POWER_DC)
             add_channel(SolarSystem.POWER)
             add_channel(SolarSystem.POWER_EST)
+            add_channel(System.POWER_EL_CON)
 
         if self.components.has_type(ElectricalEnergyStorage):
             add_channel(ElectricalEnergyStorage.POWER_CHARGE)
@@ -91,6 +94,14 @@ class System(lori.System):
         except WeatherUnavailableException:
             pass
 
+        if self.components.has_type(SolarSystem):
+            power_channels = [
+                self.data[SolarSystem.POWER],
+                self.data[System.POWER_EL_CON],
+                self.data[System.POWER_EL],
+            ]
+            self.data.register(self._on_power_received, power_channels, how="any", unique=False)
+
     # noinspection PyShadowingBuiltins
     def _register_weather(self, weather: Weather) -> None:
         if not weather.is_enabled():
@@ -101,11 +112,13 @@ class System(lori.System):
             if input not in weather.data:
                 weather.data.add(key=input, aggregate="mean", connector=None)
                 continue
-            weather_channels.append(weather.data[input])
+            weather_channel = weather.data[input]
+            if weather_channel.has_connector():
+                weather_channels.append(weather_channel)
         weather.data.register(self._on_weather_received, weather_channels, how="all", unique=False)
 
     def _on_weather_received(self, weather: pd.DataFrame) -> None:
-        predictions = self._predict(weather)
+        predictions = self._predict(weather.dropna(axis="columns"))
         timestamp = predictions.index[0]
 
         def update_channel(channel: Channel, column: str) -> None:
@@ -121,6 +134,18 @@ class System(lori.System):
             update_channel(self.data[SolarSystem.POWER_EST], SolarSystem.POWER)
         update_channel(self.data[System.POWER_EL_EST], System.POWER_EL)
         update_channel(self.data[System.POWER_TH_EST], System.POWER_TH)
+
+    def _on_power_received(self, data: pd.DataFrame) -> None:
+        if data[System.POWER_EL_CON].dropna().empty:
+            power = data.loc[:, System.POWER_EL].dropna()
+            power += data.loc[power.index, SolarSystem.POWER].fillna(0)
+            power.name = System.POWER_EL_CON
+            self.data[System.POWER_EL_CON].set(power.index[0], power)
+        elif data[System.POWER_EL].dropna().empty:
+            power = data.loc[:, System.POWER_EL_CON].dropna()
+            power -= data.loc[power.index, SolarSystem.POWER].fillna(0)
+            power.name = System.POWER_EL
+            self.data[System.POWER_EL].set(power.index[0], power)
 
     def _predict(self, weather: pd.DataFrame) -> pd.DataFrame:
         weather = validate_meteo_inputs(weather, self.location)
