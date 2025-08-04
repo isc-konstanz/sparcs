@@ -57,8 +57,8 @@ class SolarSystem(Component, pv.pvsystem.PVSystem):
 
     losses_parameters: dict = {}
 
-    def __init__(self, context: Context, configs: Configurations) -> None:
-        super().__init__(context=context, configs=configs)
+    def __init__(self, context: Context, configs: Configurations, **kwargs) -> None:
+        super().__init__(context=context, configs=configs, **kwargs)
 
     def __repr__(self) -> str:
         return Component.__repr__(self)
