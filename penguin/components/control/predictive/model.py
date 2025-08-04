@@ -11,15 +11,16 @@ import pandas as pd
 import casadi as ca
 from scipy.linalg import expm
 
-from lori import Component, Constant
+from lori import Component, Constant, Channel
 from lori.core import Configurations, ResourceException
 
 from penguin.components.storage import ElectricalEnergyStorage
 
 
 class Model:
-    IPOPT = Constant(str, "ipopt", name="IPOPT Solver")
-    OSQP = Constant(str, "osqp", name="OSQP Solver")
+
+    IPOPT = "ipopt"
+    OSQP = "osqp"
     SOLVERS = [IPOPT, OSQP]
 
     step_durations: list[int]
@@ -33,6 +34,7 @@ class Model:
 
     _system_matrices: dict = {}
     _components: dict[str, Component] = {}
+    _channels: dict[str, dict] = {}
 
 
     def __init__(
@@ -77,13 +79,14 @@ class Model:
 
             self.opti.solver("ipopt", plugin_options, solver_options)
 
-    def set_initials(self, data: pd.DataFrame) -> None:
+
+    def set_initials(self, prior: pd.DataFrame) -> None:
         for component_id, component in self._components.items():
             if isinstance(component, ElectricalEnergyStorage):
-                soc_column = component.data[ElectricalEnergyStorage.STATE_OF_CHARGE].id
-                if soc_column in data.columns:
+                soc_column = f"mpc_{component.data[ElectricalEnergyStorage.STATE_OF_CHARGE].column}"
+                if prior is not None and soc_column in prior.columns:
                     #TODO: 0 or last? is prior or?
-                    state_0 = data[soc_column].values[0] / 100 * component.capacity
+                    state_0 = prior[soc_column].values[0] / 100 * component.capacity
                 else:
                     state_0 = 0
                 self.opti.set_value(self.parameters[component_id]["state_0"], state_0)
@@ -99,7 +102,7 @@ class Model:
                 soc_column = component.data[ElectricalEnergyStorage.STATE_OF_CHARGE].id
                 energy = row[soc_column] / 100 * component.capacity
                 state_var = self.variables[component_id]["states"][-1]
-                self.opti.subject_to((state_var - energy) ** 2 <= self.epsilon*100)
+                self.opti.subject_to((state_var - energy) ** 2 <= self.epsilon * 100)
 
             else:
                 raise ResourceException(f"Unsupported component type for final state: {type(component)}")
@@ -109,12 +112,12 @@ class Model:
             component: Component,
             configs: Configurations,
     ) -> None:
+        self._components[component.id] = component
+
         if isinstance(component, ElectricalEnergyStorage):
             self._add_electrical_energy_storage(component, configs=configs)
         else:
             raise ResourceException(f"Unsupported component type: {type(component)}")
-
-        self._components[component.id] = component
 
     def _add_electrical_energy_storage(
             self,
@@ -181,6 +184,23 @@ class Model:
 
         self.costs[component_id]["usage"] = costs
 
+
+        def mpc_constant(channel: Channel) -> dict:
+            component_configs = channel.to_configs()
+            config = {
+                "type": component_configs["type"],
+                "key": f"mpc_{component_configs["column"]}",
+                "name": f"MPC {component_configs["name"]}",
+                "unit": component_configs["unit"],
+            }
+            return config
+
+        for constant in [ElectricalEnergyStorage.STATE_OF_CHARGE, ElectricalEnergyStorage.POWER_CHARGE]:
+            channel = component.data[constant]
+            self._channels[channel.id] = mpc_constant(channel)
+
+
+
     # noinspection PyShadowingBuiltins
     def extract_results(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
@@ -192,12 +212,14 @@ class Model:
                 state_0 = self.opti.value(parameters["state_0"])
                 states = np.array([state_0, *self.opti.value(variables["states"])[:-1]])
                 socs = states / component.capacity * 100
-                df.loc[:, component.data[component.STATE_OF_CHARGE].id] = socs
+                soc_column = f"mpc_{component.data[ElectricalEnergyStorage.STATE_OF_CHARGE].column}"
+                df.loc[:, soc_column] = socs
 
                 input_in = self.opti.value(variables["inputs_in"])
                 input_out = self.opti.value(variables["inputs_out"])
                 input = input_in - input_out
-                df.loc[:,component.data[component.POWER_CHARGE].id] = input
+                power_column = f"mpc_{component.data[ElectricalEnergyStorage.POWER_CHARGE].column}"
+                df.loc[:, power_column] = input
 
         return df
 

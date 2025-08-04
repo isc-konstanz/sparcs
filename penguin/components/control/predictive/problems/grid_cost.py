@@ -15,7 +15,7 @@ import pandas as pd
 
 from typing import Callable
 
-from lori import Configurations
+from lori import Configurations, Constant
 from lori.components import Tariff, register_component_type
 from penguin.components import ElectricalEnergyStorage
 
@@ -28,6 +28,10 @@ class GridCostProblem(Optimization):
     Component for tariff cost optimization problem.
     """
 
+    # GRID_EXPECTED = Constant(float, "grid_expected", "Expected Grid Power", "kWh")
+    # GRID_STANDARD = Constant(float, "grid_expected_std", "Expected Grid Power Standard Deviation", "kWh")
+    GRID_SOLUTION = Constant(float, "grid_solution", "Grid Power Solution", "kWh")
+
     objective_config: Configurations
     objective_function: Callable
 
@@ -35,26 +39,42 @@ class GridCostProblem(Optimization):
     export_tariff: casadi.MX
     grid_expected: casadi.MX
     grid_variable: casadi.MX
-    
+
+    is_stochastic: bool = False
     grid_expected_std: casadi.MX
 
-    #TODO: not list just itarable(type)
     @property
-    def required_components(self) -> list[type]:
+    def required_components(self) -> Iterable[type]:
         return [Tariff]
 
     @property
-    def controlled_components(self) -> list[type]:
+    def controlled_components(self) -> Iterable[type]:
         return [ElectricalEnergyStorage]
+
+    #TODO: do i want to create channels from that???
+    # or only from the solution?
+    @property
+    def channels(self) -> Iterable[dict]:
+        # channels = [
+        #     GridCostProblem.GRID_EXPECTED,
+        #     GridCostProblem.GRID_SOLUTION
+        # ]
+        # if self.is_stochastic:
+        #     channels.append(GridCostProblem.GRID_STANDARD)
+
+
+
+        channels = [GridCostProblem.GRID_SOLUTION]
+        return [channel.to_dict() for channel in channels]
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
 
         objective_config = configs.get_section("objective")
-        
-        stochastic_active = objective_config.get("stochastic_active", False)
+
+        self.is_stochastic = objective_config.get("stochastic_active", False)
         bayes_factors = []
-        if stochastic_active:
+        if self.is_stochastic:
             n_sigma = objective_config.get("stochastic_order", 2)  # Number of standard deviations to consider
             scale_factor = objective_config.get("stochastic_distance", 1.0)  # Scale factor for standard deviation
 
@@ -91,7 +111,7 @@ class GridCostProblem(Optimization):
             return cost
             
         def objective_function(grid, grid_std, import_tariff, export_tariff) -> casadi.Function:
-            if stochastic_active:
+            if self.is_stochastic:
                 if grid_std is None:
                     raise ValueError("grid_std must be provided for stochastic optimization")
 
@@ -127,19 +147,23 @@ class GridCostProblem(Optimization):
         model.opti.set_value(self.grid_expected, data["forecast"].values / 1000)  # convert to kWh
         
         if self.objective_config.get("stochastic_active", False):
-            model.opti.set_value(self.grid_expected_std, data["forecast_std"].values / 1000)  # convert to kWh
+            model.opti.set_value(self.grid_expected_std, data["forecast_std"].values)  # convert to kWh
 
     def extract_results(self, model: Model, df: pd.DataFrame) -> pd.DataFrame:
-        df = df.copy()
-        df.loc[:, "import_tariff"] = model.opti.value(self.import_tariff)
-        df.loc[:, "export_tariff"] = model.opti.value(self.export_tariff)
-        df.loc[:, "grid_expected"] = model.opti.value(self.grid_expected)
-        df.loc[:, "grid_variable"] = model.opti.value(self.grid_variable)
+        results = df.copy()
+        results[self.data[GridCostProblem.GRID_SOLUTION].key] = model.opti.value(self.grid_variable)
 
         if self.objective_config.get("plot_results", False):
-            self._plot_results(df)
+            plot_df = df.copy()
+            plot_df.loc[:, "import_tariff"] = model.opti.value(self.import_tariff)
+            plot_df.loc[:, "export_tariff"] = model.opti.value(self.export_tariff)
+            plot_df.loc[:, "grid_expected"] = model.opti.value(self.grid_expected)
+            plot_df.loc[:, "grid_solution"] = model.opti.value(self.grid_variable)
+            plot_df.loc[:, "grid_standard"] = model.opti.value(self.grid_expected_std) if self.is_stochastic else None
 
-        return df
+            self._plot_results(plot_df)
+
+        return results
 
     def cost_function(self, model: Model):
         cost = 0
@@ -201,14 +225,22 @@ class GridCostProblem(Optimization):
 
         def plot():
             ax = fig.add_subplot(111)
-            ax.plot(df.index, df["grid_expected"], label="Grid predicted (kWh)")
-            ax.plot(df.index, df["grid_variable"], label="Grid MPC solution (kWh)")
+            ax.plot(df.index, df["grid_expected"], label="Grid expected (kWh)")
+            ax.plot(df.index, df["grid_solution"], label="Grid MPC solution (kWh)")
             ax.plot(df.index, df["import_tariff"], label="Import Tariff (ct/kWh)", linestyle='--')
             ax.plot(df.index, df["export_tariff"], label="Export Tariff (ct/kWh)", linestyle='--')
+            
+            if self.is_stochastic:
+                ax.fill_between(df.index, df["grid_expected"] - df["grid_standard"],
+                                df["grid_expected"] + df["grid_standard"],
+                                color='gray', alpha=0.2, label="Stochastic Range (± std)")
 
             for component_id, component in self.models[0]._components.items():
-                ax.plot(df.index, df[f"{component_id}.ees_soc"], label=f"SoC (%) ({component_id})", linestyle=':')
-                ax.plot(df.index, df[f"{component_id}.ees_charge_power"], label=f"Input (kW) ({component_id})")
+                if isinstance(component, ElectricalEnergyStorage):
+                    soc_column = f"mpc_{component.data[component.STATE_OF_CHARGE].column}"
+                    ax.plot(df.index, df[soc_column], label=f"SoC (%) ({component_id})", linestyle=':')
+                    charge_power_column = f"mpc_{component.data[component.POWER_CHARGE].column}"
+                    ax.plot(df.index, df[charge_power_column], label=f"Charge Power (kW) ({component_id})")
 
             ax.set_xlabel("Time")
             ax.set_ylabel("Power (kW)")

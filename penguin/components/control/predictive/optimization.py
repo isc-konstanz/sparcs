@@ -7,17 +7,18 @@ penguin.components.control.predictive.optimization
 """
 
 from abc import ABC, abstractmethod
+from typing import Optional, Iterable
 
 import numpy as np
 import pandas as pd
 import casadi as ca
 
-from lori.util import to_timedelta, parse_freq
-
+from lori import Constant
 from lori.components import Component, ComponentAccess
-from penguin.components.control.predictive.model import Model
 from lori.core import Configurations, ResourceException
+from lori.util import to_timedelta, parse_freq
 from lori.typing import TimestampType
+from penguin.components.control.predictive.model import Model
 
 
 
@@ -34,12 +35,17 @@ class Optimization(Component, ABC):
 
     @property
     @abstractmethod
-    def required_components(self) -> list[type]:
+    def required_components(self) -> Iterable[type]:
         pass
 
     @property
     @abstractmethod
-    def controlled_components(self) -> list[type]:
+    def controlled_components(self) -> Iterable[type]:
+        pass
+
+    @property
+    @abstractmethod
+    def channels(self) -> Iterable[dict]:
         pass
 
     @abstractmethod
@@ -125,6 +131,10 @@ class Optimization(Component, ABC):
     def activate(self) -> None:
         super().activate()
 
+        for channel in self.channels:
+            self._add_channel(channel, aggregate="last")
+            # self.data.add(**channel)
+
         all_components: ComponentAccess = self.context.components
 
         required_components = all_components.get_all(*self.required_components)
@@ -136,6 +146,7 @@ class Optimization(Component, ABC):
             raise ResourceException(f"No controlled component found in system: {self.controlled_components}")
 
         model_configs = self.configs.get_section("models", defaults={})
+        #constants = []
         for model in self.models:
             for controllable in controlled_components:
                 model_config = model_configs.get_section(controllable.id.replace(".", "_"), defaults={})
@@ -148,10 +159,15 @@ class Optimization(Component, ABC):
                     cost += component_cost
             model.opti.minimize(cost)
 
+        for channel in self.models[0]._channels.values():
+            self._add_channel(channel, aggregate="mean")
+            #self.data.add(**channel)
+
     def solve(
             self,
             data:pd.DataFrame,
-            start_time: TimestampType = None
+            start_time: TimestampType = None,
+            prior: pd.DataFrame = pd.DataFrame(),
     ) -> pd.DataFrame:
         results = []
         for model_index, model in enumerate(self.models):
@@ -159,9 +175,9 @@ class Optimization(Component, ABC):
 
             self.set_initials(interval_data, model)
 
-            model.set_initials(interval_data)
+            model.set_initials(prior)
             
-            #TODO: fix this / nessessary?
+            #TODO: fix this! / nessessary?
             if model_index != 0:
                 model.set_finals(results[-1])
 
@@ -174,10 +190,16 @@ class Optimization(Component, ABC):
             results.append(result)
 
         results = pd.concat(results)
-        results = results.loc[~results.index.duplicated(keep='last')]
-        results = results.sort_index()
+        results = results.loc[~results.index.duplicated(keep='last')].sort_index()
+        results = results.resample("1min").ffill()
 
         return results
+
+    def _add_channel(self, channel: dict, aggregate: str = "mean", **custom) -> None:
+        channel["aggregate"] = aggregate
+        channel["connector"] = None
+        channel.update(custom)
+        self.data.add(**channel)
 
 def _df_to_intervals(
         data: pd.DataFrame,
@@ -196,3 +218,4 @@ def _steps_to_datetime(
     step_durations = [0] + step_durations[:-1]
     target_times = [start + pd.Timedelta(seconds=time_difference) for time_difference in np.cumsum(step_durations)]
     return target_times
+
