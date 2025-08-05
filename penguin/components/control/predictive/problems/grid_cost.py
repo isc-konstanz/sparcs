@@ -147,7 +147,7 @@ class GridCostProblem(Optimization):
         model.opti.set_value(self.grid_expected, data["forecast"].values / 1000)  # convert to kWh
         
         if self.objective_config.get("stochastic_active", False):
-            model.opti.set_value(self.grid_expected_std, data["forecast_std"].values)  # convert to kWh
+            model.opti.set_value(self.grid_expected_std, data["forecast_std"].values / 1000)  # convert to kWh
 
     def extract_results(self, model: Model, df: pd.DataFrame) -> pd.DataFrame:
         results = df.copy()

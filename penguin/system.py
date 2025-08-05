@@ -31,6 +31,8 @@ from penguin.components.weather import validate_meteo_inputs, validated_meteo_in
 from penguin.components.control.predictive import Optimization
 from penguin.components.control.predictive.problems.grid_cost import GridCostProblem
 
+# from lori.data.forecast import get_forecast
+
 
 class System(lori.System):
     POWER_EL = Constant(float, "el_power", "Electrical Power", "W")
@@ -197,12 +199,7 @@ class System(lori.System):
         update_channel(self.data[System.POWER_EL_EST], System.POWER_EL)
         update_channel(self.data[System.POWER_TH_EST], System.POWER_TH)
 
-    def _predict(self,
-        weather: pd.DataFrame,
-        start: TimestampType = None,
-        end: TimestampType = None,
-    ) -> pd.DataFrame:
-        pass
+
 
     def predict(
         self,
@@ -211,71 +208,80 @@ class System(lori.System):
         prior: Optional[pd.DataFrame] = None,
         **kwargs,
     ) -> pd.DataFrame:
-        _end = end
-        if self.components.has_type(Optimization):
-            # if not self.components.has_type(Tariff):
-            #     raise ResourceUnavailableException("Optimization requires a Tariff component to be available.")
+        real_end = end
 
+        has_opti = self.components.has_type(Optimization)
+        if has_opti:
             optimization_problem = self.components.get_first(Optimization)
             optimization_end = start + pd.Timedelta(seconds=optimization_problem.total_duration)
             if end > optimization_end:
                 self._logger.warning(f"Simulation duration is greater than optimization duration")
             end = optimization_end
 
-        weather = self.weather.get(start, end, **kwargs)
-        solar = self._predict_solar(weather)
 
-        # add tariff to data
-        tariff_component: Tariff = self.components.get_first(Tariff)
-        tariff = tariff_component.get(start - pd.Timedelta(hours=1), end, **kwargs)
-        tariff = tariff.resample("1min").ffill()
-        tariff[Tariff.PRICE_EXPORT] = -5
 
-        # hacky forecasting #TODO: remove this when predictors are ready
-        from lori.data.forecast import get_forecast
-        el_power_forecast = get_forecast(
-            self,
-            System.POWER_EL,
-            start=start,
-            end=end,
-            method="real",
-            #method="persistence_3weeks",
-        )
-        # upsample load predictions
-        el_power_forecast = el_power_forecast.resample("1min").ffill()
+        has_solar = self.components.has_type(SolarSystem)
+        if has_solar:
+            weather = self.weather.get(start, end, **kwargs)
+            solar = self._predict_solar(weather)
+        else:
+            weather = pd.DataFrame(index=pd.date_range(start, end, freq="1min"))
+            solar = weather.copy()
 
-        predictions = pd.concat([solar, tariff, el_power_forecast], axis="columns")
-        predictions.dropna(axis="index", how="any", inplace=True)
 
-        # simulate solar systems
-        for solar_system in self.components.get_all(SolarSystem):
-            solar_column = solar_system.data[SolarSystem.POWER].column
-            if not solar_system.data.has_logged(SolarSystem.POWER, start, end):
-                # Solar System does not have a measured reference and will be subtracted from residual power
-                predictions["forecast"] -= predictions[solar_column]
 
         # solve mpc if available
-        if self.components.has_type(GridCostProblem):
-            mpc_component: GridCostProblem = self.components.get_first(GridCostProblem)
-            mpc = mpc_component.solve(predictions, start.floor("1min"), prior=prior)
-            mpc = mpc.resample("1min").ffill()
+        if has_opti:
+            # hacky tariff implementation
+            tariff_component: Tariff = self.components.get_first(Tariff)
+            tariff = tariff_component.get(start - pd.Timedelta(hours=1), end, **kwargs)
+            tariff = tariff.resample("1min").ffill()
+            tariff[Tariff.PRICE_EXPORT] = -5
+
+
+            # hacky forecasting #TODO: remove this when predictors are ready
+            from lori.data.forecast import get_forecast
+            el_power_forecast = get_forecast(
+                self,
+                System.POWER_EL,
+                start=start,
+                end=end,
+                method="real",
+                #method="persistence_3weeks",
+            )
+            # upsample load predictions
+            el_power_forecast = el_power_forecast.resample("1min").ffill()
+
+            opti_input = pd.concat([solar, tariff, el_power_forecast], axis="columns")
+            opti_input.dropna(axis="index", how="any", inplace=True)
+
+            opti_component: GridCostProblem = self.components.get_first(GridCostProblem)
+            opti = opti_component.solve(opti_input, start.floor("1min"), prior=prior)
+            opti = opti.resample("1min").ffill()
+
         else:
-            mpc = None
+            mpc = pd.DataFrame(index=pd.date_range(start, end, freq="1min"))
 
         pass
 
 
 
-        data_df = pd.concat([predictions, mpc], axis="columns").dropna(axis="index", how="any").sort_index()
-        data_df = data_df[:_end]
+        data_df = (
+            pd.concat([weather, solar, opti], axis="columns")
+            .dropna(axis="index", how="any")
+            .sort_index()
 
-        drop_col = ["forecast", "forecast_std"]
-        data_df = data_df.drop(columns=drop_col)
+            [:real_end]
+        )
+
 
         return data_df
-        #return weather.dropna(axis="index", how="any").sort_index()
 
-    def _predict_solar(self, weather: pd.DataFrame) -> pd.DataFrame:
+
+    def _predict_solar(self,
+        weather: pd.DataFrame,
+    ) -> pd.DataFrame:
+
         weather = validate_meteo_inputs(weather, self.location)
         predictions = pd.DataFrame(index=weather.index)
         predictions.index.name = Channel.TIMESTAMP
@@ -290,7 +296,6 @@ class System(lori.System):
                 predictions[columns] += system_prediction[columns].fillna(0)
 
         return predictions
-
 
 
     def simulate(
@@ -313,7 +318,9 @@ class System(lori.System):
         data = self._simulate_solar(data, start, end, prior)
         data = self._simulate_storage(data, start, end, prior)
 
-        return data.dropna(axis="columns", how="all")
+        data = data.dropna(axis="columns", how="all")
+        data = data.dropna(axis="index", how="any")
+        return data
 
     # noinspection PyUnusedLocal
     def _simulate_solar(
@@ -330,7 +337,8 @@ class System(lori.System):
             solar_column = solar.data[SolarSystem.POWER].column
             if not solar.data.has_logged(SolarSystem.POWER, start, end):
                 # Solar System does not have a measured reference and will be subtracted from residual power
-                data[System.POWER_EL] -= data[solar_column]
+                # data[System.POWER_EL] -= data[solar_column]
+                pass
         return data
 
     # noinspection PyUnusedLocal
@@ -599,7 +607,7 @@ class System(lori.System):
                 ylabel="SoC [%]",
                 title="Hourly Electrical Energy Storage SoC Mean",
                 file=str(ees_soc_file),
-                percentile=20,
+                #percentile=20,
                 ylim=(0, 100),
                 hue="Month"
             )
