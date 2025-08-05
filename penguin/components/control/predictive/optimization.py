@@ -7,13 +7,12 @@ penguin.components.control.predictive.optimization
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional, Iterable
+from typing import Optional, Iterable, List
 
 import numpy as np
 import pandas as pd
 import casadi as ca
 
-from lori import Constant
 from lori.components import Component, ComponentAccess
 from lori.core import Configurations, ResourceException
 from lori.util import to_timedelta, parse_freq
@@ -27,10 +26,10 @@ class Optimization(Component, ABC):
     Base class for predictive optimization problems.
     """
 
-    total_duration: int = 0
-    step_durations_list: list[list[int]] = []
+    total_duration: int
+    step_durations_list: List[List[int]]
 
-    models: list[Model] = []
+    models: List[Model]
 
 
     @property
@@ -72,6 +71,7 @@ class Optimization(Component, ABC):
             raise ResourceException("Missing timing configuration")
         self._configure_timing(timing_config)
 
+        self.models = []
         for index, step_durations in enumerate(self.step_durations_list):
             self.models.append(
                 Model(
@@ -94,6 +94,7 @@ class Optimization(Component, ABC):
                 f"Invalid timing configuration: {timing_keys}, expected a list of list of strings"
             )
 
+        self.step_durations_list = []
         for key_set in timing_keys:
             step_durations = []
             for key in key_set:
@@ -161,7 +162,6 @@ class Optimization(Component, ABC):
 
         for channel in self.models[0]._channels.values():
             self._add_channel(channel, aggregate="mean")
-            #self.data.add(**channel)
 
     def solve(
             self,

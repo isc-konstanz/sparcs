@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import casadi as ca
 from scipy.linalg import expm
+from typing import List, Dict, AnyStr, Sequence, Tuple
 
 from lori import Component, Constant, Channel
 from lori.core import Configurations, ResourceException
@@ -23,18 +24,18 @@ class Model:
     OSQP = "osqp"
     SOLVERS = [IPOPT, OSQP]
 
-    step_durations: list[int]
+    step_durations: Sequence[int]
     epsilon: float
 
 
     opti: ca.Opti
-    parameters: dict
-    variables: dict
-    costs: dict
+    parameters: Dict[str, Dict[str, ca.SX]]
+    variables: Dict[str, Dict[str, ca.MX]]
+    costs: Dict[str, Dict[str, ca.MX]]
 
-    _system_matrices: dict = {}
-    _components: dict[str, Component] = {}
-    _channels: dict[str, dict] = {}
+    _system_matrices: Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]]
+    _components: Dict[str, Component]
+    _channels: Dict
 
 
     def __init__(
@@ -49,6 +50,10 @@ class Model:
         self.parameters = {}
         self.variables = {}
         self.costs = {}
+
+        self._system_matrices = {}
+        self._components = {}
+        self._channels = {}
 
         solver = configs.get("solver", default=Model.IPOPT)
         solver_configs = configs.get_section(solver, defaults={})
@@ -99,10 +104,17 @@ class Model:
         row = data.loc[data.index[0] + pd.Timedelta(seconds=time_duration)]
         for component_id, component in self._components.items():
             if isinstance(component, ElectricalEnergyStorage):
-                soc_column = component.data[ElectricalEnergyStorage.STATE_OF_CHARGE].id
+                soc_column = f"mpc_{component.data[ElectricalEnergyStorage.STATE_OF_CHARGE].column}"
                 energy = row[soc_column] / 100 * component.capacity
+                print("Set finals:")
+                print(energy)
+                print("-")
+                print("-")
+                print("-")
+                print("-")
                 state_var = self.variables[component_id]["states"][-1]
-                self.opti.subject_to((state_var - energy) ** 2 <= self.epsilon * 100)
+                self.opti.subject_to((state_var - energy) <= self.epsilon)
+                self.opti.subject_to((state_var - energy) >= -self.epsilon)
 
             else:
                 raise ResourceException(f"Unsupported component type for final state: {type(component)}")
@@ -248,5 +260,5 @@ class Model:
                 h_in += expm(a * (step_duration - i - 1)) @ b_in
                 h_out += expm(a * (step_duration - i - 1)) @ b_out
 
-            self._system_matrices[key] = [phi, h_in, h_out]
+            self._system_matrices[key] = (phi, h_in, h_out)
         return self._system_matrices[key]

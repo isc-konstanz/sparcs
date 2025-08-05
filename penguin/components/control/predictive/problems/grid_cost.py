@@ -13,7 +13,7 @@ import casadi
 import numpy as np
 import pandas as pd
 
-from typing import Callable
+from typing import Callable, Dict
 
 from lori import Configurations, Constant
 from lori.components import Tariff, register_component_type
@@ -27,20 +27,28 @@ class GridCostProblem(Optimization):
     """
     Component for tariff cost optimization problem.
     """
+    IMPORT_TARIFF = "import_tariff"
+    EXPORT_TARIFF = "export_tariff"
+    GRID_EXPECTED = "grid_expected"
+    GRID_EXPECTED_STD = "grid_expected_std"
+    GRID_VARIABLE = "grid_variable"
 
     # GRID_EXPECTED = Constant(float, "grid_expected", "Expected Grid Power", "kWh")
     # GRID_STANDARD = Constant(float, "grid_expected_std", "Expected Grid Power Standard Deviation", "kWh")
     GRID_SOLUTION = Constant(float, "grid_solution", "Grid Power Solution", "kWh")
 
+    model_variables: Dict[Model, Dict[str, casadi.MX]]
+
     objective_config: Configurations
     objective_function: Callable
+
 
     import_tariff: casadi.MX
     export_tariff: casadi.MX
     grid_expected: casadi.MX
     grid_variable: casadi.MX
 
-    is_stochastic: bool = False
+    is_stochastic: bool
     grid_expected_std: casadi.MX
 
     @property
@@ -69,6 +77,8 @@ class GridCostProblem(Optimization):
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
+
+        self.model_variables = {}
 
         objective_config = configs.get_section("objective")
 
@@ -132,34 +142,59 @@ class GridCostProblem(Optimization):
 
     def setup(self, model: Model) -> None:
         n = len(model.step_durations)
-        self.import_tariff = model.opti.parameter(n)
-        self.export_tariff = model.opti.parameter(n)
-        self.grid_expected = model.opti.parameter(n)
-        self.grid_variable = model.opti.variable(n)
-        
-        if self.objective_config.get("stochastic_active", False):
-            self.grid_expected_std = model.opti.parameter(n)  # Standard deviation for stochasticity
+
+        self.model_variables[model] = {
+            GridCostProblem.IMPORT_TARIFF: model.opti.parameter(n),
+            GridCostProblem.EXPORT_TARIFF: model.opti.parameter(n),
+            GridCostProblem.GRID_EXPECTED: model.opti.parameter(n),
+            GridCostProblem.GRID_EXPECTED_STD: model.opti.variable(n) if self.is_stochastic else None,
+            GridCostProblem.GRID_VARIABLE: model.opti.variable(n),
+        }
+
+        # self.import_tariff = model.opti.parameter(n)
+        # self.export_tariff = model.opti.parameter(n)
+        # self.grid_expected = model.opti.parameter(n)
+        # self.grid_variable = model.opti.variable(n)
+        #
+        if self.is_stochastic:
+            self.model_variables[model][GridCostProblem.GRID_EXPECTED_STD] = model.opti.parameter(n)
+            #self.grid_expected_std = model.opti.parameter(n)  # Standard deviation for stochasticity
 
     def set_initials(self, data: pd.DataFrame, model: Model):
-        #TODO: use predictors here
-        model.opti.set_value(self.import_tariff, data[Tariff.PRICE_IMPORT].values)
-        model.opti.set_value(self.export_tariff, data[Tariff.PRICE_IMPORT].values)
-        model.opti.set_value(self.grid_expected, data["forecast"].values / 1000)  # convert to kWh
+        #TODO: use predictors here+
+        params = self.model_variables[model]
+
+        model.opti.set_value(params[GridCostProblem.IMPORT_TARIFF], data[Tariff.PRICE_IMPORT].values)
+        model.opti.set_value(params[GridCostProblem.EXPORT_TARIFF], data[Tariff.PRICE_IMPORT].values)
+        model.opti.set_value(params[GridCostProblem.GRID_EXPECTED], data["forecast"].values / 1000)  # convert to kWh
         
         if self.objective_config.get("stochastic_active", False):
-            model.opti.set_value(self.grid_expected_std, data["forecast_std"].values / 1000)  # convert to kWh
+            model.opti.set_value(params[GridCostProblem.GRID_EXPECTED_STD], data["forecast_std"].values / 1000)  # convert to kWh
 
     def extract_results(self, model: Model, df: pd.DataFrame) -> pd.DataFrame:
         results = df.copy()
-        results[self.data[GridCostProblem.GRID_SOLUTION].key] = model.opti.value(self.grid_variable)
+        params = self.model_variables[model]
+
+        column = self.data[GridCostProblem.GRID_SOLUTION].key
+        #results[column] = model.opti.value(self.grid_variable)
+        results[column] = model.opti.value(params[GridCostProblem.GRID_VARIABLE])
 
         if self.objective_config.get("plot_results", False):
             plot_df = df.copy()
-            plot_df.loc[:, "import_tariff"] = model.opti.value(self.import_tariff)
-            plot_df.loc[:, "export_tariff"] = model.opti.value(self.export_tariff)
-            plot_df.loc[:, "grid_expected"] = model.opti.value(self.grid_expected)
-            plot_df.loc[:, "grid_solution"] = model.opti.value(self.grid_variable)
-            plot_df.loc[:, "grid_standard"] = model.opti.value(self.grid_expected_std) if self.is_stochastic else None
+            # plot_df.loc[:, "import_tariff"] = model.opti.value(self.import_tariff)
+            # plot_df.loc[:, "export_tariff"] = model.opti.value(self.export_tariff)
+            # plot_df.loc[:, "grid_expected"] = model.opti.value(self.grid_expected)
+            # plot_df.loc[:, "grid_solution"] = model.opti.value(self.grid_variable)
+            # plot_df.loc[:, "grid_standard"] = model.opti.value(self.grid_expected_std) if self.is_stochastic else None
+
+            plot_df.loc[:, "import_tariff"] = model.opti.value(params[GridCostProblem.IMPORT_TARIFF])
+            plot_df.loc[:, "export_tariff"] = model.opti.value(params[GridCostProblem.EXPORT_TARIFF])
+            plot_df.loc[:, "grid_expected"] = model.opti.value(params[GridCostProblem.GRID_EXPECTED])
+            plot_df.loc[:, "grid_solution"] = model.opti.value(params[GridCostProblem.GRID_VARIABLE])
+            if self.is_stochastic:
+                plot_df.loc[:, "grid_standard"] = model.opti.value(params[GridCostProblem.GRID_EXPECTED_STD])
+            else:
+                plot_df.loc[:, "grid_standard"] = None
 
             self._plot_results(plot_df)
 
@@ -167,15 +202,22 @@ class GridCostProblem(Optimization):
 
     def cost_function(self, model: Model):
         cost = 0
+        params = self.model_variables[model]
+
 
         for index, step_duration in enumerate(model.step_durations):
-            grid_calculated = self.grid_expected[index] # convert to kWh
-            pos_tariff = self.import_tariff[index]
-            neg_tariff = self.export_tariff[index]
+            # grid_calculated = self.grid_expected[index]
+            # pos_tariff = self.import_tariff[index]
+            # neg_tariff = self.export_tariff[index]
+
+            grid_calculated = params[GridCostProblem.GRID_EXPECTED][index]
+            pos_tariff = params[GridCostProblem.IMPORT_TARIFF][index]
+            neg_tariff = params[GridCostProblem.EXPORT_TARIFF][index]
 
             grid_std = None
             if self.objective_config.get("stochastic_active", False):
-                grid_std = self.grid_expected_std[index]
+                #grid_std = self.grid_expected_std[index]
+                grid_std = params[GridCostProblem.GRID_EXPECTED_STD][index]
 
             for component_id, variables in model.variables.items():
                 energy_in = variables["inputs_in"][index]
@@ -184,7 +226,9 @@ class GridCostProblem(Optimization):
                 grid_calculated += energy_in
                 grid_calculated -= energy_out
 
-            model.opti.subject_to(self.grid_variable[index] == grid_calculated)
+            grid_variable = params[GridCostProblem.GRID_VARIABLE][index]
+            # model.opti.subject_to(self.grid_variable[index] == grid_calculated)
+            model.opti.subject_to(grid_variable == grid_calculated)
 
             step_cost = self.objective_function(
                 grid_calculated,
