@@ -14,6 +14,7 @@ from typing import Any, Optional
 import lori
 import pandas as pd
 from lori import Channel, ChannelState, Configurations, Constant, Weather, WeatherUnavailableException
+from lori.components.tariff import Tariff, TariffUnavailableException
 from lori.simulation import Result, Results
 from lori.typing import TimestampType
 from penguin import Location
@@ -43,6 +44,17 @@ class System(lori.System):
     ENERGY_TH_DOM = Constant(float, "th_dom_energy", "Domestic Water Thermal Energy", "kWh")
 
     _location: Optional[Location] = None
+
+    def has_tariff(self) -> bool:
+        return self.components.has_type(Tariff)
+
+    # noinspection PyTypeChecker
+    @property
+    def tariff(self) -> Tariff:
+        tariff = self.components.get_first(Tariff)
+        if tariff is None:
+            raise TariffUnavailableException(f"System '{self.name}' has no tariff configured")
+        return tariff
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
