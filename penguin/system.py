@@ -213,6 +213,8 @@ class System(lori.System):
 
 
 
+
+
     def predict(
         self,
         start: TimestampType = None,
@@ -220,6 +222,7 @@ class System(lori.System):
         prior: Optional[pd.DataFrame] = None,
         **kwargs,
     ) -> pd.DataFrame:
+        start = start.floor("min")
         real_end = end
 
         has_opti = self.components.has_type(Optimization)
@@ -242,44 +245,64 @@ class System(lori.System):
 
 
 
-        # solve mpc if available
-        if has_opti:
-            # hacky tariff implementation
-            tariff_component: Tariff = self.components.get_first(Tariff)
-            tariff = tariff_component.get(start - pd.Timedelta(hours=1), end, **kwargs)
-            tariff = tariff.resample("1min").ffill()
+        # hacky tariff implementation
+        tariff_component: Tariff = self.components.get_first(Tariff)
+        if tariff_component is None:
+            # df with index start:end, columns: [Tariff.PRICE_IMPORT, Tariff.PRICE_EXPORT]
+            tariff = pd.DataFrame(index=pd.date_range(start - pd.Timedelta(hours=1), end, freq="1min"))
+            tariff[Tariff.PRICE_IMPORT] = 25
             tariff[Tariff.PRICE_EXPORT] = -5
 
-
-            # hacky forecasting #TODO: remove this when predictors are ready
-            from lori.data.forecast import get_forecast
-            el_power_forecast = get_forecast(
-                self,
-                System.POWER_EL,
-                start=start,
-                end=end,
-                method="real",
-                #method="persistence_3weeks",
+        tariff = tariff_component.get(start - pd.Timedelta(hours=1), end, **kwargs)
+        tariff = tariff.resample("1min").ffill().resample("1min").ffill()
+        tariff[Tariff.PRICE_EXPORT] = -5
+        tariff_mode = tariff_component.configs.get("mode", default=None)
+        if tariff_mode == "static":
+            tariff[Tariff.PRICE_IMPORT] = 25
+        elif tariff_mode == "sinus":
+            tariff[Tariff.PRICE_IMPORT] = 25 + 10 * np.sin(
+                (tariff.index - tariff.index[0]).total_seconds() / (20 * 3600) * 2 * np.pi
             )
-            # upsample load predictions
-            el_power_forecast = el_power_forecast.resample("1min").ffill()
 
-            opti_input = pd.concat([solar, tariff, el_power_forecast], axis="columns")
-            opti_input.dropna(axis="index", how="any", inplace=True)
 
-            opti_component: GridCostProblem = self.components.get_first(GridCostProblem)
-            opti = opti_component.solve(opti_input, start.floor("1min"), prior=prior)
-            opti = opti.resample("1min").ffill()
+        # solve mpc if available
+        if has_opti:
+            required_components = self.components.get_all(*self.components.get_first(Optimization).required_components)
+            if not required_components:
+                opti = pd.DataFrame(index=pd.date_range(start, end, freq="1min"))
+            else:
+
+                # hacky forecasting #TODO: remove this when predictors are ready
+                #from lori.data.forecast import get_forecast
+                #el_power_forecast = get_forecast(
+                #    self,
+                #    System.POWER_EL,
+                #    start=start,
+                #    end=end,
+                #    method="real",
+                #    #method="persistence_3weeks",
+                #)
+                # upsample load predictions
+                el_power_forecast = self.residual_forecast(start, end)
+                el_power_forecast = el_power_forecast.resample("1min").ffill()
+                el_power_forecast["forecast"] = el_power_forecast["forecast"] - solar[SolarSystem.POWER]
+
+                opti_input = pd.concat([solar, tariff, el_power_forecast], axis="columns")
+                opti_input.dropna(axis="index", how="any", inplace=True)
+
+                opti_component: GridCostProblem = self.components.get_first(GridCostProblem)
+                opti = opti_component.solve(opti_input, start.floor("1min"), prior=prior)
+                opti = opti.resample("1min").ffill()
 
         else:
-            mpc = pd.DataFrame(index=pd.date_range(start, end, freq="1min"))
+            opti = pd.DataFrame(index=pd.date_range(start, end, freq="1min"))
 
         pass
 
 
 
         data_df = (
-            pd.concat([weather, solar, opti], axis="columns")
+            pd.concat([weather, solar, opti, tariff], axis="columns")
             .dropna(axis="index", how="any")
             .sort_index()
 
@@ -319,7 +342,6 @@ class System(lori.System):
     ) -> pd.DataFrame:
         data = self.predict(start, end, prior, **kwargs)
 
-
         if System.POWER_EL not in data.columns:
             if self.data.has_logged(System.POWER_EL, start=start, end=end):
                 self._logger.debug(f"Reference {System.POWER_EL.name} will be as missing prediction.")
@@ -349,7 +371,7 @@ class System(lori.System):
             solar_column = solar.data[SolarSystem.POWER].column
             if not solar.data.has_logged(SolarSystem.POWER, start, end):
                 # Solar System does not have a measured reference and will be subtracted from residual power
-                # data[System.POWER_EL] -= data[solar_column]
+                data[System.POWER_EL] -= data[solar_column]
                 pass
         return data
 
@@ -380,7 +402,7 @@ class System(lori.System):
                 ees_columns = [ees.data[c].column for c in columns]
                 ees_soc_column = ees.data[ElectricalEnergyStorage.STATE_OF_CHARGE].column
                 ees_soc = prior.iloc[-1][ees_soc_column] if prior is not None else 50.0
-                ees_data = ees.predict(data, ees_soc)
+                ees_data = ees.predict(data=data, soc=ees_soc)
                 ees_power = ees_data[ElectricalEnergyStorage.POWER_CHARGE]
 
                 data[ees_columns] = ees_data[columns]
@@ -403,14 +425,12 @@ class System(lori.System):
         references.columns = pd.MultiIndex.from_product([["references"], references.columns])
         data = pd.concat([predictions, references], axis="columns")
 
-        # from penguin.plots import SystemPlots
-        # solar_columns = [solar.data[SolarSystem.POWER].column for solar in self.components.get_all(SolarSystem)]
-        # SystemPlots.plot_yield(results.data, solar_columns)
-
         self._evaluate_yield(results, data)
         self._evaluate_storage(results, data)
         self._evaluate_system(results, data)
         self._evaluate_weather(results, data)
+        self._evaluate_costs(results, data)
+
 
         if "references" in data.columns.get_level_values(0):
             errors = (data["predictions"] - data["references"]).dropna(axis="columns", how="all")
@@ -418,13 +438,22 @@ class System(lori.System):
             data = pd.concat([data, errors], axis="columns")
         return data
 
+    def _plot(self, data: pd.DataFrame) -> None:
+        from penguin.simulation.report import plots
+        pass
+
+
+        del plots
+
     def _evaluate_yield(self, results: Results, data: pd.DataFrame) -> None:
         if not self.components.has_type(SolarSystem) or SolarSystem.POWER not in data["predictions"].columns:
             return
 
         solar_simulated = False
+        solar_columns = [SolarSystem.POWER]
         for solar in self.components.get_all(SolarSystem):
             solar_column = solar.data[SolarSystem.POWER].column
+            solar_columns.append(solar_column)
             solar_reference = solar.data.from_logger(start=results.start, end=results.end)
             if solar_reference.empty:
                 solar_simulated = True
@@ -438,105 +467,134 @@ class System(lori.System):
                 if column in data["references"].columns:
                     data.drop(columns=[("references", column)], inplace=True)
 
-        hours = pd.Series(data.index, index=data.index)
-        hours = (hours - hours.shift(1)).bfill().dt.total_seconds() / 3600.0
+        data = data.copy()
+        data = data.drop(columns=[("predictions", col) for col in solar_columns if col in data["references"].columns])
+        data = data.droplevel(0, axis=1)
 
-        solar_kwp = sum(solar.power_max / 1000.0 for solar in self.components.get_all(SolarSystem))
-        solar_power = data[("predictions", SolarSystem.POWER)]
-        solar_energy = solar_power / 1000.0 * hours
-        solar_energy.name = SolarSystem.ENERGY
+        solar_kwps = pd.DataFrame([{solar.id: solar.power_max for solar in self.components.get_all(SolarSystem)}])
+        solar_kwps["total"] = solar_kwps.sum(axis=1)
+        print("")
+        print("kWp of solar systems:")
+        print(solar_kwps.iloc[0])
+
+        solar_kwp = solar_kwps["total"].iloc[0]
+
+        data["time"] = data.index
+        data["hours"] =  (data["time"] - data["time"].shift(1)).bfill().dt.total_seconds() / 3600.0
+
+        solar_powers = data[solar_columns]
+        solar_energies = (solar_powers / 1000.0).multiply(data["hours"], axis=0)
+        solar_energies.columns = [col.replace("power", "energy") for col in solar_energies.columns]
+        solar_yield = solar_energies.sum(axis=0)
+        print("")
+        print("yeald per year:")
+        print(solar_yield)
+
+        # percentage against pv_energy column
+        share = solar_yield / solar_yield["pv_energy"] * 100
+        print("")
+        print("share of total yield:")
+        print(share)
+
+        solar_energy = solar_energies[SolarSystem.ENERGY]
+
+        plot_data = pd.concat([solar_energies, solar_powers], axis="columns")
+
+        from penguin.simulation.report.plots import plot_yield
+        plot_yield(plot_data)
 
         yield_months_file = results.dirs.tmp.joinpath("yield_months.png")
         yield_hours_file = results.dirs.tmp.joinpath("yield_hours.png")
         yield_hours_stats_file = results.dirs.tmp.joinpath("yield_hours_stats.png")
-        power_avg_week_file = results.dirs.tmp.joinpath("power_avg_week.png")
-        try:
-            from lori.io import plot
-
-            # Monthly Yeald
-            plot_data = solar_energy.to_frame().groupby(data.index.month).sum()
-            plot.bar(
-                x=plot_data.index,
-                y=SolarSystem.ENERGY,
-                data=plot_data,
-                xlabel="Month",
-                ylabel="Energy [kWh]",
-                title="Monthly Yield",
-                colors=list(reversed(plot.COLORS)),
-                file=str(yield_months_file),
-            )
-
-            # Hourly Yield
-            plot_data = solar_energy.to_frame().groupby(data.index.hour).mean()
-            plot.bar(
-                x=plot_data.index,
-                y=SolarSystem.ENERGY,
-                data=plot_data,
-                xlabel="Hour of day",
-                ylabel="Power [kW]",
-                title="Hourly Yield Mean",
-                colors=list(reversed(plot.COLORS)),
-                file=str(yield_hours_file),
-            )
-
-            # Hourly Yield Boxplot
-            plot_data = solar_energy.to_frame()
-            plot_data["Hour"] = plot_data.index.hour
-            plot_data["Month"] = plot_data.index.month_name()
-            plot.quartiles(
-                x=plot_data["Hour"],
-                y=SolarSystem.ENERGY,
-                data=plot_data,
-                xlabel="Hour of day",
-                ylabel="Power [kW]",
-                title="Hourly Yield Statistics",
-                colors=list(reversed(plot.COLORS)),
-                file=str(yield_hours_stats_file),
-                hue="Month",
-                width=48,
-            )
-
-            plot_data["time_of_week"] = plot_data.index.dayofweek + plot_data.index.hour / 24.0 + plot_data.index.minute / 1440.0
-            plot.line(
-                x="time_of_week",
-                y=SolarSystem.ENERGY,
-                data=plot_data,
-                xlabel="Week",
-                ylabel="Power [kW]",
-                title="Average Power per Week",
-                file=str(power_avg_week_file),
-                #percentile=100,
-                #hue="Month"
-            )
-
-            # TODO: safe for report, show only total?
-            summary_stats = plot_data.groupby(['Month', 'Hour'])[SolarSystem.ENERGY].agg(['mean', 'std'])
-            #print(summary_stats)
-
-            # plot_data = pd.concat(
-            #     [
-            #         pd.Series(
-            #             data=solar_power[solar_power.index.month == m]/1000.,
-            #             name=calendar.month_name[m],
-            #         ) for m in range(1, 13)
-            #     ],
-            #     axis='columns',
-            # )
-            # plot_data['hour'] = plot_data.index.hour + plot_data.index.minute/60.
-            # plot_melt = plot_data.melt(id_vars='hour', var_name='Months')
-            # plot.line(
-            #     x='hour',
-            #     y='value',
-            #     data=plot_melt,
-            #     xlabel='Hour of the Day',
-            #     ylabel='Power [kW]',
-            #     title='Yield Profile',
-            #     hue='Months',
-            #     colors=list(reversed(plot.COLORS)),
-            #     file=str(yield_profiles_file),
-            # )
-        except ImportError:
-            pass
+        # power_avg_week_file = results.dirs.tmp.joinpath("power_avg_week.png")
+        # try:
+        #     from lori.io import plot
+        #
+        #
+        #     # Monthly Yield
+        #     plot_data = solar_energys.groupby(data.index.month).sum()
+        #     plot.bar(
+        #         x=plot_data.index,
+        #         y=SolarSystem.ENERGY,
+        #         data=plot_data,
+        #         xlabel="Month",
+        #         ylabel="Energy [kWh]",
+        #         title="Monthly Yield",
+        #         colors=list(reversed(plot.COLORS)),
+        #         file=str(yield_months_file),
+        #     )
+        #
+        #     # Hourly Yield
+        #     plot_data = solar_energy.to_frame().groupby(data.index.hour).mean()
+        #     plot.bar(
+        #         x=plot_data.index,
+        #         y=SolarSystem.ENERGY,
+        #         data=plot_data,
+        #         xlabel="Hour of day",
+        #         ylabel="Power [kW]",
+        #         title="Hourly Yield Mean",
+        #         colors=list(reversed(plot.COLORS)),
+        #         file=str(yield_hours_file),
+        #     )
+        #
+        #     # Hourly Yield Boxplot
+        #     plot_data = solar_energy.to_frame()
+        #     plot_data["Hour"] = plot_data.index.hour
+        #     plot_data["Month"] = plot_data.index.month_name()
+        #     plot.quartiles(
+        #         x=plot_data["Hour"],
+        #         y=SolarSystem.ENERGY,
+        #         data=plot_data,
+        #         xlabel="Hour of day",
+        #         ylabel="Power [kW]",
+        #         title="Hourly Yield Statistics",
+        #         colors=list(reversed(plot.COLORS)),
+        #         file=str(yield_hours_stats_file),
+        #         hue="Month",
+        #         width=48,
+        #     )
+        #
+        #     plot_data["time_of_week"] = plot_data.index.dayofweek + plot_data.index.hour / 24.0 + plot_data.index.minute / 1440.0
+        #     plot.line(
+        #         x="time_of_week",
+        #         y=SolarSystem.ENERGY,
+        #         data=plot_data,
+        #         xlabel="Week",
+        #         ylabel="Power [kW]",
+        #         title="Average Power per Week",
+        #         file=str(power_avg_week_file),
+        #         #percentile=100,
+        #         #hue="Month"
+        #     )
+        #
+        #     # TODO: safe for report, show only total?
+        #     summary_stats = plot_data.groupby(['Month', 'Hour'])[SolarSystem.ENERGY].agg(['mean', 'std'])
+        #     #print(summary_stats)
+        #
+        #     # plot_data = pd.concat(
+        #     #     [
+        #     #         pd.Series(
+        #     #             data=solar_power[solar_power.index.month == m]/1000.,
+        #     #             name=calendar.month_name[m],
+        #     #         ) for m in range(1, 13)
+        #     #     ],
+        #     #     axis='columns',
+        #     # )
+        #     # plot_data['hour'] = plot_data.index.hour + plot_data.index.minute/60.
+        #     # plot_melt = plot_data.melt(id_vars='hour', var_name='Months')
+        #     # plot.line(
+        #     #     x='hour',
+        #     #     y='value',
+        #     #     data=plot_melt,
+        #     #     xlabel='Hour of the Day',
+        #     #     ylabel='Power [kW]',
+        #     #     title='Yield Profile',
+        #     #     hue='Months',
+        #     #     colors=list(reversed(plot.COLORS)),
+        #     #     file=str(yield_profiles_file),
+        #     # )
+        # except ImportError:
+        #     pass
 
         yield_specific = round((solar_energy / solar_kwp).sum(), 2)
         yield_energy = solar_energy.sum()
@@ -548,8 +606,8 @@ class System(lori.System):
         results.append(Result.from_const(SolarSystem.YIELD_SPECIFIC, yield_specific, header="Yield"))
         results.append(Result.from_const(SolarSystem.YIELD_ENERGY, yield_energy, header="Yield", images=yield_images))
 
-        if SolarSystem.POWER_DC in data["predictions"].columns:
-            dc_energy = (data[("predictions", SolarSystem.POWER_DC)] / 1000.0 * hours).sum()
+        if SolarSystem.POWER_DC in data.columns:
+            dc_energy = (data[SolarSystem.POWER_DC] / 1000.0 * data["hours"]).sum()
             results.append(Result.from_const(SolarSystem.YIELD_ENERGY_DC, dc_energy, header="Yield"))
 
     def _evaluate_storage(self, results: Results, data: pd.DataFrame) -> None:
@@ -669,9 +727,16 @@ class System(lori.System):
             #     file=str(results.dirs.tmp.joinpath("power_peak.png")),
             #     width=16,
             # )
+            #from penguin.simulation.report.plots import plot_system
 
             import_week_energy = import_energy.groupby(import_energy.index.isocalendar().week).sum()
             import_week_energy_max = import_week_energy[import_week_energy == import_week_energy.max()].index[0]
+            #plot_system(
+            #    data["predictions"][data.index.isocalendar().week == import_week_energy_max],
+            #    title="Week with highest Grid Import",
+            #    file=str(results.dirs.tmp.joinpath("week_max_import.png")),
+            #)
+
             self._plot_system(
                 data["predictions"][data.index.isocalendar().week == import_week_energy_max],
                 title="Week with highest Grid Import",
@@ -709,6 +774,44 @@ class System(lori.System):
         results.add(Weather.GHI, f"{Weather.GHI.name} [kWh/m²]", ghi, header="Weather")
         results.add(Weather.DHI, f"{Weather.DHI.name} [kWh/m²]", dhi, header="Weather")
 
+    def _evaluate_costs(self, results: Results, data: pd.DataFrame) -> None:
+        dynamic = True
+        if not self.components.has_type(Tariff):
+            pass
+            #return
+
+            dynamic = False
+
+        data = data.copy()
+
+        hours = pd.Series(data.index, index=data.index)
+        hours = (hours - hours.shift(1)).bfill().dt.total_seconds() / 3600.0
+
+        power = data[("predictions", System.POWER_EL)]
+        energy = power * hours / 1000.0  # kWh
+        neg_energy = energy.where(energy < 0, other=0)
+        pos_energy = energy.where(energy > 0, other=0)
+        price_import = data[("predictions", Tariff.PRICE_IMPORT)]
+        price_export = data[("predictions", Tariff.PRICE_EXPORT)]
+        pos_cost = (pos_energy * price_import / 1000.0).sum() # € (kWh * €/kWh)
+        neg_cost = (neg_energy * price_export / 1000.0).sum() # € (kWh * €/kWh)
+
+        peak_power = power.resample("15min").mean().max()
+        peak_price = 137 # €/kW
+        peak_cost = peak_power * peak_price / 1000.0 # €
+
+
+        results.add(Tariff.PRICE_IMPORT, "Import Price [€/kWh]", price_import.mean(), header="Tariff")
+        results.add(Tariff.PRICE_EXPORT, "Export Price [€/kWh]", price_export.mean(), header="Tariff")
+        results.add("tariff_dynamic", "Dynamic Tariff", "y" if dynamic else "n", header="Tariff")
+        results.add("tariff_costs_import", "Tariff Costs [€]", pos_cost, header="Tariff")
+        results.add("tariff_costs_export", "Tariff Revenue [€]", neg_cost, header="Tariff")
+        results.add("tariff_costs_peak", "Tariff Peak Costs [€]", peak_cost, header="Tariff")
+        results.add("tariff_costs_total", "Tariff Total Costs [€]", pos_cost - neg_cost + peak_cost, header="Tariff")
+
+
+
+
     # noinspection PyTypeChecker
     def _plot_system(
         self,
@@ -728,6 +831,8 @@ class System(lori.System):
         import seaborn as sns
 
         from lori.io import plot
+
+        data = data.copy().resample("15min").mean()
 
         warnings.filterwarnings(
             "ignore",
@@ -865,3 +970,168 @@ class System(lori.System):
 
         plt.close(figure)
         plt.clf()
+
+    def residual_forecast(self, start, end):
+
+        def apply_kalman_filter(series: pd.Series, process_var=1e-4, meas_var=0.1) -> pd.Series:
+            """
+            Apply a basic 1D Kalman Filter to a pandas Series.
+
+            Parameters:
+                series (pd.Series): The input time series.
+                process_var (float): Process variance (Q).
+                meas_var (float): Measurement variance (R).
+
+            Returns:
+                pd.Series: Smoothed series.
+            """
+            kf = KalmanFilter(dim_x=2, dim_z=1)
+
+            # State: [position, velocity]
+            kf.x = np.array([[series.iloc[0]], [0.]])  # initial state
+            kf.F = np.array([[1., 1.], [0., 1.]])  # linear state transition matrix
+            kf.H = np.array([[1., 0.]])  # measurement function
+            kf.P *= 1000.  # covariance matrix
+            kf.R = meas_var  # measurement noise
+            kf.Q = np.array([[0.25, 0.5],  # process noise
+                             [0.5, 1.0]]) * process_var
+
+            results = []
+            for z in series:
+                kf.predict()
+                kf.update([z])
+                results.append(kf.x[0, 0])  # position estimate
+
+            return pd.Series(results, index=series.index, name="kalman")
+
+        def persistence_3_week(
+                start: TimestampType,
+                last_3w_ts: pd.DataFrame,
+        ) -> (pd.Series, pd.Series):
+            past_ts = last_3w_ts.copy()
+
+            def timestamp_to_week(timestamp: pd.Timestamp) -> int:
+                return timestamp.weekday() * 24 * 60 + timestamp.hour * 60 + timestamp.minute
+
+            week_minutes = 7 * 24 * 60  # Total minutes in a week
+            start = past_ts.index[0].floor("h")
+            week_offset = timestamp_to_week(start)
+            past_ts.index = pd.to_datetime(past_ts.index).tz_convert(None)
+            past_ts.index = (past_ts.index.map(timestamp_to_week) - week_offset) % week_minutes
+
+            agg_df = past_ts.groupby(past_ts.index).agg(['mean', 'std'])
+
+            # Align aggregated df to start time  till start + 1 week
+            aligned_index = ((pd.Series(range(week_minutes)) + week_offset) % week_minutes)
+            aligned_index.index = pd.date_range(
+                start=start,  # + pd.Timedelta(weeks=20),
+                periods=week_minutes,
+                freq="min")
+
+            persistence_mean = agg_df['mean']
+            persistence_mean.index = aligned_index.index
+
+            persistence_std = agg_df['std']
+            persistence_std.index = aligned_index.index
+
+            return persistence_mean, persistence_std
+
+        def deterministic_forecast_model(
+                current,
+                forecast_values: pd.Series,
+                t_half,
+                dt=1):
+            """
+            F = external forecast values
+            R = model results
+            R_k+1 = F_k+1 + kappa * (R_k - F_k)
+            kappa = 2^dt/t_half
+            """
+            kappa = 2 ** -(dt / t_half)
+            results = [current]
+            for index in range(1, len(forecast_values)):
+                results.append(
+                    forecast_values.iloc[index] + kappa * (results[index - 1] - forecast_values.iloc[index - 1]))
+            return pd.Series(results, index=forecast_values.index, name=forecast_values.name)
+
+        column = System.POWER_EL
+        try:
+            if start > self.buffered_forecast.index[0] and end < self.buffered_forecast.index[-1]:
+                return self.buffered_forecast
+        except Exception:
+            pass
+
+        start = pd.Timestamp(start).floor("h")
+        _start = start - pd.Timedelta(weeks=3)
+        _end = start
+
+        # Todo: Remove this, it is only for testing
+        # Shift forward if data is not available before this date
+        while _start < pd.Timestamp("2016-06-01T00:00:00+02:00"):
+            _start += pd.Timedelta(weeks=1)
+            _end += pd.Timedelta(weeks=1)
+
+        # Load the last 3 weeks of data
+        # last_3w_ts = last_3w_ts.resample("15min").mean()
+
+        last_3w_ts = self.data.from_logger([column], start=_start, end=_end)[column]
+
+        persistence_mean, persistence_std = persistence_3_week(start, last_3w_ts)
+
+        persistence_mean.index = persistence_mean.index + pd.Timedelta(weeks=3)
+        persistence_std.index = persistence_std.index + pd.Timedelta(weeks=3)
+
+        last_3w_filtered_ts = apply_kalman_filter(last_3w_ts[_end - pd.Timedelta(hours=1):_end])
+
+        current_filtered = last_3w_filtered_ts.iloc[-1]
+
+        deterministic = deterministic_forecast_model(
+            current=current_filtered,
+            forecast_values=persistence_mean,
+            t_half=12,  # Default half-life of 12 hours
+            dt=60  # Default time step of 1 hour
+        )
+
+        # resample last_3w_ts to 10 frequency
+        if self.configs.get_bool("no_forecast", default=False):
+            deterministic = self.data.from_logger([column], start=_start + pd.Timedelta(weeks=3), end=_start + pd.Timedelta(weeks=4))[column]
+
+
+        plot_model = False
+        if plot_model == True:
+            real = self.data.from_logger([column], start=_start + pd.Timedelta(weeks=3), end=_start + pd.Timedelta(weeks=4))[column]
+            real = real.resample("15min").mean()
+            import matplotlib.pyplot as plt
+            plt.figure(figsize=(12, 6))
+            plt.plot(last_3w_ts.index, last_3w_ts, label='Last 3 Weeks', color='C0', alpha=0.5)
+            plt.plot(last_3w_filtered_ts.index, last_3w_filtered_ts, label='Kalman Filtered', color='C0')
+            plt.plot(persistence_mean.index, persistence_mean, label='Persistence Mean', color='C1', alpha=0.5)
+            plt.plot(deterministic.index, deterministic, label='Deterministic Forecast', color='C1')
+            plt.plot(real.index, real, label='Real Data', color='C2', alpha=0.5)
+            plt.fill_between(
+                deterministic.index,
+                deterministic - persistence_std,
+                deterministic + persistence_std,
+                color='C1',
+                alpha=0.2,
+                label='Persistence Std'
+            )
+            plt.legend()
+
+            plt.show()
+            pass
+
+
+
+        return_df = pd.DataFrame({
+            'forecast': deterministic,
+            'forecast_std': persistence_std
+        })
+
+        self.buffered_forecast = return_df.copy()
+
+        # shift index to index[0] = start time
+        t_diff = start - return_df.index[0]
+        return_df.index = return_df.index + t_diff
+
+        return return_df
