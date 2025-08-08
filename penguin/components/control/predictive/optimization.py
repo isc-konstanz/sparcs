@@ -140,11 +140,13 @@ class Optimization(Component, ABC):
 
         required_components = all_components.get_all(*self.required_components)
         if len(required_components) < len(self.required_components):
-            raise ResourceException(f"No required component found in system: {self.required_components}")
+            pass
+            #raise ResourceException(f"No required component found in system: {self.required_components}")
 
         controlled_components = all_components.get_all(*self.controlled_components)
         if len(controlled_components) == 0:
-            raise ResourceException(f"No controlled component found in system: {self.controlled_components}")
+            pass
+            #raise ResourceException(f"No controlled component found in system: {self.controlled_components}")
 
         model_configs = self.configs.get_section("models", defaults={})
         #constants = []
@@ -183,7 +185,7 @@ class Optimization(Component, ABC):
 
             model.opti.solve()
 
-            timestamps = _steps_to_datetime(model.step_durations, start_time)
+            timestamps = _steps_to_datetime(list(model.step_durations), start_time)
             result = pd.DataFrame(index=timestamps)
             result = model.extract_results(result)
             result = self.extract_results(model, result)

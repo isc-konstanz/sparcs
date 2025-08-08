@@ -24,7 +24,7 @@ class Model:
     OSQP = "osqp"
     SOLVERS = [IPOPT, OSQP]
 
-    step_durations: Sequence[int]
+    step_durations: list[int]
     epsilon: float
 
 
@@ -229,7 +229,7 @@ class Model:
 
                 input_in = self.opti.value(variables["inputs_in"])
                 input_out = self.opti.value(variables["inputs_out"])
-                input = input_in - input_out
+                input = (input_in - input_out) * 1000
                 power_column = f"mpc_{component.data[ElectricalEnergyStorage.POWER_CHARGE].column}"
                 df.loc[:, power_column] = input
 

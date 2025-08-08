@@ -85,8 +85,8 @@ class GridCostProblem(Optimization):
         self.is_stochastic = objective_config.get("stochastic_active", False)
         bayes_factors = []
         if self.is_stochastic:
-            n_sigma = objective_config.get("stochastic_order", 2)  # Number of standard deviations to consider
-            scale_factor = objective_config.get("stochastic_distance", 1.0)  # Scale factor for standard deviation
+            n_sigma = objective_config.get_int("stochastic_order", 2)  # Number of standard deviations to consider
+            scale_factor = objective_config.get_float("stochastic_distance", 1.0)  # Scale factor for standard deviation
 
             bayes_factors = [1/np.sqrt(2 * np.pi) * np.exp(-0.5 * (index * scale_factor)**2) 
                              for index in range(-n_sigma, n_sigma + 1)]
@@ -177,7 +177,7 @@ class GridCostProblem(Optimization):
 
         column = self.data[GridCostProblem.GRID_SOLUTION].key
         #results[column] = model.opti.value(self.grid_variable)
-        results[column] = model.opti.value(params[GridCostProblem.GRID_VARIABLE])
+        results[column] = model.opti.value(params[GridCostProblem.GRID_VARIABLE]) * 1000
 
         if self.objective_config.get("plot_results", False):
             plot_df = df.copy()
@@ -284,7 +284,7 @@ class GridCostProblem(Optimization):
                     soc_column = f"mpc_{component.data[component.STATE_OF_CHARGE].column}"
                     ax.plot(df.index, df[soc_column], label=f"SoC (%) ({component_id})", linestyle=':')
                     charge_power_column = f"mpc_{component.data[component.POWER_CHARGE].column}"
-                    ax.plot(df.index, df[charge_power_column], label=f"Charge Power (kW) ({component_id})")
+                    ax.plot(df.index, df[charge_power_column] / 1000, label=f"Charge Power (kW) ({component_id})")
 
             ax.set_xlabel("Time")
             ax.set_ylabel("Power (kW)")
