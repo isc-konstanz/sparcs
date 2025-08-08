@@ -7,11 +7,13 @@ penguin.components.storage.electrical
 """
 
 from collections.abc import Callable
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import pandas as pd
 from lori.components import Component, register_component_type
 from lori.core import Configurations, Constant
+from lori.typing import TimestampType
+
 
 
 @register_component_type("ees")
@@ -90,10 +92,16 @@ class ElectricalEnergyStorage(Component):
         return energy / self.capacity * 100
 
     # noinspection PyUnresolvedReferences
-    def predict(self, data: pd.DataFrame, soc: float = 50.0) -> pd.DataFrame:
+    def predict(
+            self,
+            start: Optional[TimestampType | str] = None,
+            end: Optional[TimestampType | str] = None,
+            data: Optional[pd.DataFrame] = None,
+            soc: float = 50.0
+    ) -> pd.DataFrame:
         from penguin.system import System
 
-        if System.POWER_EL not in data.columns:
+        if data is None or System.POWER_EL not in data.columns:
             raise ValueError("Unable to predict battery storage state of charge without import/export power")
 
         columns = [self.STATE_OF_CHARGE, self.POWER_CHARGE]
@@ -107,7 +115,14 @@ class ElectricalEnergyStorage(Component):
                 grid_power = row[System.POWER_EL]
                 hours = (index - prior).total_seconds() / 3600.0
 
-                charge_power = self._predict_charge_power(hours, soc, grid_power)
+                # Use the MPC predicted charge power if available
+                mpc_power_charge_column = f"mpc_{self.data[self.POWER_CHARGE].column}"
+                if mpc_power_charge_column in row:
+                    charge_power = row[mpc_power_charge_column]
+                    charge_power = self._limit_charge_power(hours, soc, charge_power)
+                else:
+                    charge_power = self._predict_charge_power(hours, soc, grid_power)
+
                 if charge_power != 0:
                     soc += self.energy_to_percent(charge_power / 1000.0 * hours)
 
