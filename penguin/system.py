@@ -250,17 +250,17 @@ class System(lori.System):
         if tariff_component is None:
             # df with index start:end, columns: [Tariff.PRICE_IMPORT, Tariff.PRICE_EXPORT]
             tariff = pd.DataFrame(index=pd.date_range(start - pd.Timedelta(hours=1), end, freq="1min"))
-            tariff[Tariff.PRICE_IMPORT] = 25
-            tariff[Tariff.PRICE_EXPORT] = -5
+            tariff[Tariff.PRICE_IMPORT] = 25.0
+            tariff[Tariff.PRICE_EXPORT] = -5.0
 
         tariff = tariff_component.get(start - pd.Timedelta(hours=1), end, **kwargs)
         tariff = tariff.resample("1min").ffill().resample("1min").ffill()
         tariff[Tariff.PRICE_EXPORT] = -5
         tariff_mode = tariff_component.configs.get("mode", default=None)
         if tariff_mode == "static":
-            tariff[Tariff.PRICE_IMPORT] = 25
+            tariff[Tariff.PRICE_IMPORT] = 25.0
         elif tariff_mode == "sinus":
-            tariff[Tariff.PRICE_IMPORT] = 25 + 10 * np.sin(
+            tariff[Tariff.PRICE_IMPORT] = 25.0 + 10 * np.sin(
                 (tariff.index - tariff.index[0]).total_seconds() / (20 * 3600) * 2 * np.pi
             )
 

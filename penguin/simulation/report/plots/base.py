@@ -82,6 +82,8 @@ class Color:
     def range(self, n: int) -> list[str]:
         if n <= 0:
             return []
+        elif n == 1:
+            return [self.hex_color]
         colors = []
         for i in range(n):
             color = self.copy()

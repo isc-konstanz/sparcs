@@ -172,28 +172,34 @@ class Optimization(Component, ABC):
             prior: pd.DataFrame = pd.DataFrame(),
     ) -> pd.DataFrame:
         results = []
-        for model_index, model in enumerate(self.models):
-            interval_data = _df_to_intervals(data, model.step_durations, start_time)
+        
+        try:
+            for model_index, model in enumerate(self.models):
+                interval_data = _df_to_intervals(data, model.step_durations, start_time)
 
-            self.set_initials(interval_data, model)
+                self.set_initials(interval_data, model)
 
-            model.set_initials(prior)
-            
-            #TODO: fix this! / nessessary?
-            if model_index != 0:
-                model.set_finals(results[-1])
+                model.set_initials(prior)
+                
+                #TODO: fix this! / nessessary?
+                if model_index != 0:
+                    model.set_finals(results[-1])
 
-            model.opti.solve()
+                model.opti.solve()
 
-            timestamps = _steps_to_datetime(list(model.step_durations), start_time)
-            result = pd.DataFrame(index=timestamps)
-            result = model.extract_results(result)
-            result = self.extract_results(model, result)
-            results.append(result)
+                timestamps = _steps_to_datetime(list(model.step_durations), start_time)
+                result = pd.DataFrame(index=timestamps)
+                result = model.extract_results(result)
+                result = self.extract_results(model, result)
+                results.append(result)
 
-        results = pd.concat(results)
-        results = results.loc[~results.index.duplicated(keep='last')].sort_index()
-        results = results.resample("1min").ffill()
+            results = pd.concat(results)
+            results = results.loc[~results.index.duplicated(keep='last')].sort_index()
+            results = results.resample("1min").ffill()
+            self.results_buffer = results
+        except ca.OptiError as e:
+            print(f"Unable to solve optimization problem @ {start_time}: {e}")
+            results = self.results_buffer
 
         return results
 
