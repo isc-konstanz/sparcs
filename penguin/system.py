@@ -795,7 +795,7 @@ class System(lori.System):
         neg_energy = energy.where(energy < 0, other=0)
         pos_energy = energy.where(energy > 0, other=0)
         price_import = data[("predictions", Tariff.PRICE_IMPORT)]
-        price_export = data[("predictions", Tariff.PRICE_EXPORT)]
+        price_export = -5.0
         pos_cost = (pos_energy * price_import / 1000.0).sum() # € (kWh * €/kWh)
         neg_cost = (neg_energy * price_export / 1000.0).sum() # € (kWh * €/kWh)
 
@@ -804,8 +804,8 @@ class System(lori.System):
         peak_cost = peak_power * peak_price / 1000.0 # €
 
 
-        results.add(Tariff.PRICE_IMPORT, "Import Price [€/kWh]", price_import.mean(), header="Tariff")
-        results.add(Tariff.PRICE_EXPORT, "Export Price [€/kWh]", price_export.mean(), header="Tariff")
+        results.add(Tariff.PRICE_IMPORT, "Import Price [ct/kWh]", price_import.mean(), header="Tariff")
+        results.add(Tariff.PRICE_EXPORT, "Export Price [ct/kWh]", price_export, header="Tariff")
         results.add("tariff_dynamic", "Dynamic Tariff", "y" if dynamic else "n", header="Tariff")
         results.add("tariff_costs_import", "Tariff Costs [€]", pos_cost, header="Tariff")
         results.add("tariff_costs_export", "Tariff Revenue [€]", neg_cost, header="Tariff")
