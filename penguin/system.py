@@ -354,8 +354,11 @@ class System(lori.System):
 
         data = data.dropna(axis="columns", how="all")
         data = data.dropna(axis="index", how="any")
+        
+        if Tariff.PRICE_EXPORT in data.columns:
+            data.drop(columns=[Tariff.PRICE_EXPORT], inplace=True)
         return data
-
+    
     # noinspection PyUnusedLocal
     def _simulate_solar(
         self,
