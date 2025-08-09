@@ -197,9 +197,13 @@ class Optimization(Component, ABC):
             results = results.loc[~results.index.duplicated(keep='last')].sort_index()
             results = results.resample("1min").ffill()
             self.results_buffer = results
-        except ca.OptiError as e:
+        except Exception as e:
             print(f"Unable to solve optimization problem @ {start_time}: {e}")
-            results = self.results_buffer
+            if self.results_buffer is not None:
+                results = self.results_buffer
+            else:
+                results = pd.DataFrame(index=pd.date_range(start_time, periods=self.total_duration, freq="1min"))
+                
 
         return results
 
