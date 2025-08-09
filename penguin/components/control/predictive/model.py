@@ -201,8 +201,8 @@ class Model:
             component_configs = channel.to_configs()
             config = {
                 "type": component_configs["type"],
-                "key": f"mpc_{component_configs["column"]}",
-                "name": f"MPC {component_configs["name"]}",
+                "key": f"mpc_{component_configs['column']}",
+                "name": f"MPC {component_configs['name']}",
                 "unit": component_configs["unit"],
             }
             return config
