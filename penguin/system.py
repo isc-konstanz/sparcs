@@ -694,6 +694,10 @@ class System(lori.System):
     def _evaluate_system(self, results: Results, data: pd.DataFrame) -> None:
         if System.POWER_EL not in data["predictions"].columns:
             return
+        
+        data = data.copy()
+        data = data.resample("15min").mean()
+        
         hours = pd.Series(data.index, index=data.index)
         hours = (hours - hours.shift(1)).bfill().dt.total_seconds() / 3600.0
 

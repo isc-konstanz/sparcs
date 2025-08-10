@@ -195,6 +195,7 @@ class Optimization(Component, ABC):
 
             results = pd.concat(results)
             results = results.loc[~results.index.duplicated(keep='last')].sort_index()
+            results.index = results.index - pd.Timedelta(hour=1)
             results = results.resample("1min").ffill()
             self.results_buffer = results
         except Exception as e:
