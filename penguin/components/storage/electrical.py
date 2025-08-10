@@ -118,8 +118,14 @@ class ElectricalEnergyStorage(Component):
                 # Use the MPC predicted charge power if available
                 mpc_power_charge_column = f"mpc_{self.data[self.POWER_CHARGE].column}"
                 if mpc_power_charge_column in row:
-                    charge_power = row[mpc_power_charge_column]
-                    charge_power = self._limit_charge_power(hours, soc, charge_power)
+
+                    # Calculate the charge power based on the grid power and the grid power min
+                    charge_power = row["grid_solution"] - grid_power
+                    charge_power = self._limit_charge_power(hours, soc, charge_power, hard_max=True)
+
+
+                    #charge_power = row[mpc_power_charge_column]
+                    #charge_power = self._limit_charge_power(hours, soc, charge_power)
                 else:
                     charge_power = self._predict_charge_power(hours, soc, grid_power)
 

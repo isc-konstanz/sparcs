@@ -31,6 +31,8 @@ class Optimization(Component, ABC):
 
     models: List[Model]
 
+    results_buffer: Optional[pd.DataFrame] = None
+
 
     @property
     @abstractmethod
@@ -79,6 +81,8 @@ class Optimization(Component, ABC):
                     configs=configs.get_section("casadi", defaults={}),
                 )
             )
+
+            self.results_buffer = None
 
     def _configure_timing(self, configs: Configurations) -> None:
         timing_keys = configs.get("timing_keys")
@@ -171,6 +175,7 @@ class Optimization(Component, ABC):
             start_time: TimestampType = None,
             prior: pd.DataFrame = pd.DataFrame(),
     ) -> pd.DataFrame:
+        data = data.copy()
         results = []
         
         try:
@@ -195,15 +200,15 @@ class Optimization(Component, ABC):
 
             results = pd.concat(results)
             results = results.loc[~results.index.duplicated(keep='last')].sort_index()
-            results.index = results.index - pd.Timedelta(hour=1)
             results = results.resample("1min").ffill()
+            #results.index = results.index + pd.Timedelta("1min")
             self.results_buffer = results
         except Exception as e:
             print(f"Unable to solve optimization problem @ {start_time}: {e}")
             if self.results_buffer is not None:
                 results = self.results_buffer
             else:
-                results = pd.DataFrame(index=pd.date_range(start_time, periods=self.total_duration, freq="1min"))
+                results = pd.DataFrame(index=pd.date_range(start_time, start_time + pd.Timedelta("7days"), freq="1min"))
                 
 
         return results

@@ -285,7 +285,11 @@ class System(lori.System):
                 # upsample load predictions
                 el_power_forecast = self.residual_forecast(start, end)
                 el_power_forecast = el_power_forecast.resample("1min").ffill()
-                el_power_forecast["forecast"] = el_power_forecast["forecast"] - solar[SolarSystem.POWER]
+                # is not has logged solar power, subtract that power from the forecast
+                for solar_system in self.components.get_all(SolarSystem):
+                    if not solar_system.data.has_logged(SolarSystem.POWER, start, end):
+                        solar_column = solar_system.data[SolarSystem.POWER].column
+                        el_power_forecast["forecast"] -= solar[solar_column]
 
                 opti_input = pd.concat([solar, tariff, el_power_forecast], axis="columns")
                 opti_input.dropna(axis="index", how="any", inplace=True)
@@ -1080,6 +1084,8 @@ class System(lori.System):
 
         # Load the last 3 weeks of data
         # last_3w_ts = last_3w_ts.resample("15min").mean()
+
+
 
         last_3w_ts = self.data.from_logger([column], start=_start, end=_end)[column]
 
