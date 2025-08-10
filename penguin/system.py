@@ -804,8 +804,8 @@ class System(lori.System):
         pos_energy = energy.where(energy > 0, other=0)
         price_import = data[("predictions", Tariff.PRICE_IMPORT)]
         price_export = -5.0
-        pos_cost = (pos_energy * price_import / 1000.0).sum() # € (kWh * €/kWh)
-        neg_cost = (neg_energy * price_export / 1000.0).sum() # € (kWh * €/kWh)
+        pos_cost = (pos_energy * price_import / 100.0).sum()
+        neg_cost = (neg_energy * price_export / 100.0).sum()
 
         peak_power = power.resample("15min").mean().max()
         peak_price = 137 # €/kW

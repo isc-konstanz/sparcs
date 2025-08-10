@@ -140,8 +140,9 @@ class Model:
 
         order = 1
         a = np.array([[0]])
-        b_in = np.array([component.efficiency / 3600])
-        b_out = np.array([component.efficiency / 3600])
+        b_in = np.array([1 / 3600])
+        #b_out = np.array([component.efficiency / 3600])
+        b_out = np.array([1 / 3600])
 
         state_0 = self.opti.parameter(order)
 
@@ -171,7 +172,7 @@ class Model:
             x_k1 = states[:, index]
 
             # limit state
-            self.opti.subject_to(self.opti.bounded([0], states[:, index], [component.capacity]))
+            self.opti.subject_to(self.opti.bounded([component.capacity * 0.05], states[:, index], [component.capacity]))
 
             # limit input
             self.opti.subject_to(self.opti.bounded(0, u_k_in, component.power_max / 1000))
