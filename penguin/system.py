@@ -283,6 +283,9 @@ class System(lori.System):
                 #    #method="persistence_3weeks",
                 #)
                 # upsample load predictions
+                real = self.data.from_logger(["el_power"], start=start, end=end)["el_power"].copy()
+
+
                 el_power_forecast = self.residual_forecast(start, end)
                 el_power_forecast = el_power_forecast.resample("1min").ffill()
                 # is not has logged solar power, subtract that power from the forecast
@@ -290,6 +293,21 @@ class System(lori.System):
                     if not solar_system.data.has_logged(SolarSystem.POWER, start, end):
                         solar_column = solar_system.data[SolarSystem.POWER].column
                         el_power_forecast["forecast"] -= solar[solar_column]
+                        real -= solar[solar_column]
+
+
+                # plot real vs forecast
+                # import matplotlib.pyplot as plt
+                # plt.figure(figsize=(10, 5))
+                # plt.plot(real.index, real, label="Real Power", color="blue")
+                # plt.plot(el_power_forecast.index, el_power_forecast["forecast"], label="Forecast Power", color="orange")
+                # plt.xlabel("Time")
+                # plt.ylabel("Power (W)")
+                # plt.legend()
+                # plt.show()
+
+                el_power_forecast["forecast"] = real
+
 
                 opti_input = pd.concat([solar, tariff, el_power_forecast], axis="columns")
                 opti_input.dropna(axis="index", how="any", inplace=True)
@@ -853,13 +871,17 @@ class System(lori.System):
         columns_power = [System.POWER_EL]
 
         # TODO: Replace with tariff component constants
-        has_tariff = "tariff" in data.columns
+        has_tariff = Tariff.PRICE_IMPORT in data.columns
         has_solar = self.components.has_type(SolarSystem)
         if has_solar:
             columns_power.append(SolarSystem.POWER)
         has_ees = self.components.has_type(ElectricalEnergyStorage)
         if has_ees:
             columns_power.append(ElectricalEnergyStorage.POWER_CHARGE)
+        if "grid_expected" in data.columns:
+            columns_power.append("grid_expected")
+        if "grid_solution" in data.columns:
+            columns_power.append("grid_solution")
 
         data_power = deepcopy(data[columns_power])
         data_power /= 1000
@@ -889,6 +911,20 @@ class System(lori.System):
                 label="_hidden",
                 ax=ax_power,
             )
+            # sns.lineplot(
+            #     data_power["grid_expected"],
+            #     linewidth=0.5,
+            #     color="#00a0F0",
+            #     label="_hidden",
+            #     ax=ax_power,
+            # )
+            # sns.lineplot(
+            #     data_power["grid_solution"],
+            #     linewidth=0.5,
+            #     color="#0060B0",
+            #     label="_hidden",
+            #     ax=ax_power,
+            # )
             sns.lineplot(
                 data[ElectricalEnergyStorage.STATE_OF_CHARGE],
                 linewidth=1,
@@ -942,7 +978,7 @@ class System(lori.System):
 
         if has_tariff:
             # TODO: Replace with tariff component constants
-            tariff = data["tariff"]
+            tariff = data[Tariff.PRICE_IMPORT]
 
             ax_price = axes[0].twinx()
             axes.append(ax_price)
@@ -950,8 +986,8 @@ class System(lori.System):
             sns.lineplot(tariff, linewidth=1, color="#999999", label="Dynamic Tariff", ax=ax_price)
 
             ax_price.spines.right.set_position(("axes", 1.07))
-            ax_price.set_ylim(min(tariff.min() - 0.05), max(tariff.max()) + 0.1)
-            ax_price.yaxis.set_label_text("Price [€/kWh]")
+            ax_price.set_ylim(tariff.min() - 1, tariff.max() + 1)
+            ax_price.yaxis.set_label_text("Price [ct/kWh]")
             ax_price.legend(ncol=1, loc="upper right", frameon=False)
 
         ax_power.set_xlim(data_power.index[0], data_power.index[-1])

@@ -201,7 +201,7 @@ class Optimization(Component, ABC):
             results = pd.concat(results)
             results = results.loc[~results.index.duplicated(keep='last')].sort_index()
             results = results.resample("1min").ffill()
-            #results.index = results.index + pd.Timedelta("1min")
+            # results.index = results.index# - pd.Timedelta("15min")
             self.results_buffer = results
         except Exception as e:
             print(f"Unable to solve optimization problem @ {start_time}: {e}")

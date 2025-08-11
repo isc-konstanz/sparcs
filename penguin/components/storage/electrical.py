@@ -125,7 +125,7 @@ class ElectricalEnergyStorage(Component):
 
 
                     #charge_power = row[mpc_power_charge_column]
-                    #charge_power = self._limit_charge_power(hours, soc, charge_power)
+                    #charge_power = self._limit_charge_power(hours, soc, charge_power, hard_max=True)
                 else:
                     charge_power = self._predict_charge_power(hours, soc, grid_power)
 

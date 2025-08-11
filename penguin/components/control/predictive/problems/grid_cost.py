@@ -33,7 +33,7 @@ class GridCostProblem(Optimization):
     GRID_EXPECTED_STD = "grid_expected_std"
     GRID_VARIABLE = "grid_variable"
 
-    # GRID_EXPECTED = Constant(float, "grid_expected", "Expected Grid Power", "kWh")
+    GRID_EXPECTED_ = Constant(float, "grid_expected", "Expected Grid Power", "kWh")
     # GRID_STANDARD = Constant(float, "grid_expected_std", "Expected Grid Power Standard Deviation", "kWh")
     GRID_SOLUTION = Constant(float, "grid_solution", "Grid Power Solution", "kWh")
 
@@ -72,7 +72,7 @@ class GridCostProblem(Optimization):
 
 
 
-        channels = [GridCostProblem.GRID_SOLUTION]
+        channels = [GridCostProblem.GRID_SOLUTION, GridCostProblem.GRID_EXPECTED_]
         return [channel.to_dict() for channel in channels]
 
     def configure(self, configs: Configurations) -> None:
@@ -178,6 +178,7 @@ class GridCostProblem(Optimization):
         column = self.data[GridCostProblem.GRID_SOLUTION].key
         #results[column] = model.opti.value(self.grid_variable)
         results[column] = model.opti.value(params[GridCostProblem.GRID_VARIABLE]) * 1000
+        results["grid_expected"] = model.opti.value(params[GridCostProblem.GRID_EXPECTED]) * 1000
 
         if self.objective_config.get("plot_results", False):
             plot_df = df.copy()
