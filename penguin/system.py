@@ -263,6 +263,8 @@ class System(lori.System):
             tariff[Tariff.PRICE_IMPORT] = 25.0 + 10 * np.sin(
                 (tariff.index - tariff.index[0]).total_seconds() / (20 * 3600) * 2 * np.pi
             )
+        elif tariff_mode == "2025":
+            tariff[Tariff.PRICE_IMPORT] = (tariff[Tariff.PRICE_IMPORT] - 20) * 4 + 20
 
 
         # solve mpc if available
