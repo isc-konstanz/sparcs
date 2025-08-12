@@ -112,7 +112,7 @@ class GridCostProblem(Optimization):
             if self.import_limit_active:
                 tariff += function_arctan(grid, self.import_limit, 10, 0, self.import_limit_tariff - import_tariff)
 
-            if self.export_limit_active
+            if self.export_limit_active:
                 tariff += function_arctan(grid, self.export_limit, 2, self.export_limit_tariff - export_tariff, 0)
                 
             if objective_config.get("grid_cost_squared", True):
