@@ -80,19 +80,27 @@ class GridCostProblem(Optimization):
 
         self.model_variables = {}
 
-        objective_config = configs.get_section("objective")
+        objective_config = configs.get_section("objective", defaults={})
+        self.import_limit_active = objective_config.get_bool("import_limit_active", False)
+        self.import_limit = objective_config.get_float("import_limit", 1000.0) # Defaults to 1MW
+        self.import_limit_tariff = objective_config.get_float("import_limit_tariff", 100.0)  # Defaults to 100 ct/kW
+        self.export_limit_active = objective_config.get("export_limit_active", False)
+        self.export_limit = objective_config.get_float("export_limit", -1000.0)  #
+        self.export_limit_tariff = objective_config.get_float("export_limit_tariff", 100.0)  # Defaults to 100 ct/kW
+        self.is_stochastic = objective_config.get_bool("stochastic_active", False)
+        self.n_sigma = objective_config.get_int("stochastic_order", 2)  # Number of standard deviations to consider
+        self.scale_factor = objective_config.get_float("stochastic_distance", 1.0)
 
-        self.is_stochastic = objective_config.get("stochastic_active", False)
         bayes_factors = []
         if self.is_stochastic:
-            n_sigma = objective_config.get_int("stochastic_order", 2)  # Number of standard deviations to consider
-            scale_factor = objective_config.get_float("stochastic_distance", 1.0)  # Scale factor for standard deviation
+            n_sigma = self.n_sigma  # Number of standard deviations to consider
+            scale_factor = self.scale_factor  # Scale factor for the standard deviation
 
             bayes_factors = [1/np.sqrt(2 * np.pi) * np.exp(-0.5 * (index * scale_factor)**2) 
                              for index in range(-n_sigma, n_sigma + 1)]
             bayes_factors = np.array(bayes_factors) / np.sum(bayes_factors)
         
-        def function_arctan(x, center, width=1, left=0, right=1):
+        def function_arctan(x, center, width=1.0, left=0.0, right=1.0):
             # x_threshold = np.tan(0.9 * np.pi / 2) * 2
             x_threshold = 6.313
             return left + (right - left) * (np.arctan((x - center) * x_threshold / width) / np.pi + 0.5)
@@ -101,17 +109,11 @@ class GridCostProblem(Optimization):
             tariff = 0
             tariff += function_arctan(grid, 0, 2, export_tariff, import_tariff)
             
-            if objective_config.get("import_limit_active", False):
-                import_limit = objective_config.get("import_limit", default=-10)  # Defaults to 1MW
-                import_limit_tariff = objective_config.get("import_limit_tariff", default=100)  # Defaults to 100 ct/kW
+            if self.import_limit_active:
+                tariff += function_arctan(grid, self.import_limit, 10, 0, self.import_limit_tariff - import_tariff)
 
-                tariff += function_arctan(grid, import_limit, 10, 0, import_limit_tariff - import_tariff)
-
-            if objective_config.get("export_limit_active", False):
-                export_limit = objective_config.get("export_limit", default=-1000)  # Defaults to -1MW
-                export_limit_tariff = objective_config.get("export_limit_tariff", default=100)
-                
-                tariff += function_arctan(grid, export_limit, 2, export_limit_tariff - export_tariff, 0)
+            if self.export_limit_active
+                tariff += function_arctan(grid, self.export_limit, 2, self.export_limit_tariff - export_tariff, 0)
                 
             if objective_config.get("grid_cost_squared", True):
                 cost = tariff * grid ** 2
