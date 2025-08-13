@@ -222,7 +222,14 @@ class System(lori.System):
         prior: Optional[pd.DataFrame] = None,
         **kwargs,
     ) -> pd.DataFrame:
-        start = start.floor("min")
+        # Cannot infer dst time from 2016-10-30 02:00:00, try using the 'ambiguous' argument
+        try:
+            start = start.floor("min")
+        except Exception:
+            start = start - pd.Timedelta(hours=1)
+            start = start.floor("min")
+
+        print(start)
         real_end = end
 
         has_opti = self.components.has_type(Optimization)
@@ -254,7 +261,7 @@ class System(lori.System):
             tariff[Tariff.PRICE_EXPORT] = -5.0
 
         tariff = tariff_component.get(start - pd.Timedelta(hours=1), end, **kwargs)
-        tariff = tariff.resample("1min").ffill().resample("1min").ffill()
+        tariff = tariff.resample("1min").ffill()
         tariff[Tariff.PRICE_EXPORT] = -5
         tariff_mode = tariff_component.configs.get("mode", default=None)
         if tariff_mode == "static":
