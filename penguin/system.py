@@ -222,14 +222,6 @@ class System(lori.System):
         prior: Optional[pd.DataFrame] = None,
         **kwargs,
     ) -> pd.DataFrame:
-        # Cannot infer dst time from 2016-10-30 02:00:00, try using the 'ambiguous' argument
-        try:
-            start = start.floor("min")
-        except Exception:
-            start = start - pd.Timedelta(hours=1)
-            start = start.floor("min")
-
-        print(start)
         real_end = end
 
         has_opti = self.components.has_type(Optimization)
@@ -322,7 +314,7 @@ class System(lori.System):
                 opti_input.dropna(axis="index", how="any", inplace=True)
 
                 opti_component: GridCostProblem = self.components.get_first(GridCostProblem)
-                opti = opti_component.solve(opti_input, start.floor("1min"), prior=prior)
+                opti = opti_component.solve(opti_input, start, prior=prior)
                 opti = opti.resample("1min").ffill()
 
         else:
@@ -1117,7 +1109,6 @@ class System(lori.System):
         except Exception:
             pass
 
-        start = pd.Timestamp(start).floor("h")
         _start = start - pd.Timedelta(weeks=3)
         _end = start
 
