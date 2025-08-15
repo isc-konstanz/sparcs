@@ -284,7 +284,7 @@ class System(lori.System):
                 #    #method="persistence_3weeks",
                 #)
                 # upsample load predictions
-                real = self.data.from_logger(["el_power"], start=start, end=end)["el_power"].copy()
+                #real = self.data.from_logger(["el_power"], start=start, end=end)["el_power"].copy()
 
 
                 el_power_forecast = self.residual_forecast(start, end)
@@ -294,7 +294,7 @@ class System(lori.System):
                     if not solar_system.data.has_logged(SolarSystem.POWER, start, end):
                         solar_column = solar_system.data[SolarSystem.POWER].column
                         el_power_forecast["forecast"] -= solar[solar_column]
-                        real -= solar[solar_column]
+                        #real -= solar[solar_column]
 
 
                 # plot real vs forecast
@@ -1178,6 +1178,8 @@ class System(lori.System):
 
 
 
+
+
         return_df = pd.DataFrame({
             'forecast': deterministic,
             'forecast_std': persistence_std
@@ -1188,5 +1190,12 @@ class System(lori.System):
         # shift index to index[0] = start time
         t_diff = start - return_df.index[0]
         return_df.index = return_df.index + t_diff
+
+        if self.configs.get_bool("no_forecast", default=False):
+            real =  self.data.from_logger([column], start=start, end=start + pd.Timedelta(weeks=1))[column]
+            return_df = pd.DataFrame({
+                "forecast" : real,
+                "forecast_std": real * 0.0 + 5000
+            })
 
         return return_df
