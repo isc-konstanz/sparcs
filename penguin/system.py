@@ -308,8 +308,6 @@ class System(lori.System):
                 # plt.legend()
                 # plt.show()
 
-                el_power_forecast["forecast"] = real
-
 
                 opti_input = pd.concat([solar, tariff, el_power_forecast], axis="columns")
                 opti_input.dropna(axis="index", how="any", inplace=True)
