@@ -254,6 +254,7 @@ class System(lori.System):
 
         tariff = tariff_component.get(start - pd.Timedelta(hours=1), end, **kwargs)
         tariff = tariff.resample("1min").ffill()
+        tariff.index = tariff.index + pd.Timedelta(seconds=1)
         tariff[Tariff.PRICE_EXPORT] = -5
         tariff_mode = tariff_component.configs.get("mode", default=None)
         if tariff_mode == "static":
@@ -326,6 +327,7 @@ class System(lori.System):
 
         data_df = (
             pd.concat([weather, solar, opti, tariff], axis="columns")
+            .dropna(axis="columns", how="any")
             .dropna(axis="index", how="any")
             .sort_index()
 
@@ -368,7 +370,10 @@ class System(lori.System):
         if System.POWER_EL not in data.columns:
             if self.data.has_logged(System.POWER_EL, start=start, end=end):
                 self._logger.debug(f"Reference {System.POWER_EL.name} will be as missing prediction.")
-                data.insert(0, System.POWER_EL, self.data.from_logger([System.POWER_EL], start=start, end=end))
+                #data.insert(0, System.POWER_EL, self.data.from_logger([System.POWER_EL], start=start, end=end))
+                data = pd.concat([data, self.data.from_logger([System.POWER_EL], start=start, end=end)], axis="columns")
+                data = data.ffill().bfill()
+                data = data.resample("1min").mean()
             else:
                 self._logger.debug(f"Reference {System.POWER_EL.name} cannot be found.")
 
@@ -450,8 +455,9 @@ class System(lori.System):
         references = self.data.from_logger(start=results.start, end=results.end).dropna(axis="columns", how="all")
         references.columns = pd.MultiIndex.from_product([["references"], references.columns])
         data = pd.concat([predictions, references], axis="columns")
+        data = data.ffill().bfill()
 
-        self._evaluate_yield(results, data)
+        #self._evaluate_yield(results, data)
         self._evaluate_storage(results, data)
         self._evaluate_system(results, data)
         self._evaluate_weather(results, data)
@@ -527,7 +533,7 @@ class System(lori.System):
         plot_data = pd.concat([solar_energies, solar_powers], axis="columns")
 
         from penguin.simulation.report.plots import plot_yield
-        plot_yield(plot_data)
+        #plot_yield(plot_data)
 
         yield_months_file = results.dirs.tmp.joinpath("yield_months.png")
         yield_hours_file = results.dirs.tmp.joinpath("yield_hours.png")
@@ -637,6 +643,7 @@ class System(lori.System):
             results.append(Result.from_const(SolarSystem.YIELD_ENERGY_DC, dc_energy, header="Yield"))
 
     def _evaluate_storage(self, results: Results, data: pd.DataFrame) -> None:
+        data = data.copy()
         if not self.components.has_type(ElectricalEnergyStorage):
             return
 
@@ -657,8 +664,12 @@ class System(lori.System):
             # One or more solar system does not have reference measurements.
             # The reference value does not correspond to the total prediction and should be dropped
             for column in [System.POWER_EL, *columns]:
-                if column in data["references"].columns:
-                    data.drop(columns=[("references", column)], inplace=True)
+                try:
+                    if column in data["references"].columns:
+                        data.drop(columns=[("references", column)], inplace=True)
+                except KeyError:
+                    # nno references left
+                    pass
 
         hours = pd.Series(data.index, index=data.index)
         hours = (hours - hours.shift(1)).bfill().dt.total_seconds() / 3600.0
@@ -817,7 +828,12 @@ class System(lori.System):
         hours = pd.Series(data.index, index=data.index)
         hours = (hours - hours.shift(1)).bfill().dt.total_seconds() / 3600.0
 
-        power = data[("predictions", System.POWER_EL)]
+        if System.POWER_EL in data["predictions"].columns:
+            power = data[("predictions", System.POWER_EL)]
+        elif System.POWER_EL in data["references"].columns:
+            power = data[("references", System.POWER_EL)]
+        else:
+            return
         energy = power * hours / 1000.0  # kWh
         neg_energy = energy.where(energy < 0, other=0)
         pos_energy = energy.where(energy > 0, other=0)
