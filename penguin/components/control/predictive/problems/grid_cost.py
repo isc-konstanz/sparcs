@@ -177,9 +177,11 @@ class GridCostProblem(Optimization):
         results = df.copy()
         params = self.model_variables[model]
 
+        mpc_offset = self.configs.get("mpc_offset", 0.0)
+
         column = self.data[GridCostProblem.GRID_SOLUTION].key
         #results[column] = model.opti.value(self.grid_variable)
-        results[column] = model.opti.value(params[GridCostProblem.GRID_VARIABLE]) * 1000
+        results[column] = model.opti.value(params[GridCostProblem.GRID_VARIABLE]) * 1000 + mpc_offset
         results["grid_expected"] = model.opti.value(params[GridCostProblem.GRID_EXPECTED]) * 1000
 
         if self.objective_config.get("plot_results", False):

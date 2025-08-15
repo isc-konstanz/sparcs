@@ -121,7 +121,7 @@ class ElectricalEnergyStorage(Component):
 
                     # Calculate the charge power based on the grid power and the grid power min
 
-                    charge_power = row["grid_solution"] - grid_power + self.configs.get_float("mpc_offset", 0)
+                    charge_power = row["grid_solution"] - grid_power
                     charge_power = self._limit_charge_power(hours, soc, charge_power, hard_max=True)
 
 
