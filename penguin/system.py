@@ -655,8 +655,12 @@ class System(lori.System):
             # One or more solar system does not have reference measurements.
             # The reference value does not correspond to the total prediction and should be dropped
             for column in [System.POWER_EL, *columns]:
-                if column in data["references"].columns:
-                    data.drop(columns=[("references", column)], inplace=True)
+                try:
+                    if column in data["references"].columns:
+                        data.drop(columns=[("references", column)], inplace=True)
+                except KeyError:
+                    # "references" is not in the columns...
+                    pass
 
         hours = pd.Series(data.index, index=data.index)
         hours = (hours - hours.shift(1)).bfill().dt.total_seconds() / 3600.0
@@ -1116,6 +1120,10 @@ class System(lori.System):
             _start += pd.Timedelta(weeks=1)
             _end += pd.Timedelta(weeks=1)
 
+        if _start > pd.Timestamp("2020-01-01T00:00:00+01:00"):
+            while _start < pd.Timestamp("2024-01-01T00:00:00+01:00"):
+                _start += pd.Timedelta(weeks=1)
+                _end += pd.Timedelta(weeks=1)
         # Load the last 3 weeks of data
         # last_3w_ts = last_3w_ts.resample("15min").mean()
 
