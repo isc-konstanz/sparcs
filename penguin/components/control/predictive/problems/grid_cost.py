@@ -88,13 +88,14 @@ class GridCostProblem(Optimization):
         self.export_limit = objective_config.get_float("export_limit", -1000.0)  #
         self.export_limit_tariff = objective_config.get_float("export_limit_tariff", 100.0)  # Defaults to 100 ct/kW
         self.stochastic_active = objective_config.get_bool("stochastic_active", False)
-        self.n_sigma = objective_config.get_int("stochastic_order", 2)  # Number of standard deviations to consider
-        self.scale_factor = objective_config.get_float("stochastic_distance", 1.0)
+        self.stochastic_order = objective_config.get_int("stochastic_order", 2)  # Number of standard deviations to consider
+        self.stochastic_distance = objective_config.get_float("stochastic_distance", 1.0)
+        self.mpc_offset = objective_config.get_float("mpc_offset", 0.0)  # Offset for the MPC solution
 
         bayes_factors = []
         if self.stochastic_active:
-            n_sigma = self.n_sigma  # Number of standard deviations to consider
-            scale_factor = self.scale_factor  # Scale factor for the standard deviation
+            n_sigma = self.stochastic_order  # Number of standard deviations to consider
+            scale_factor = self.stochastic_distance  # Scale factor for the standard deviation
 
             bayes_factors = [1/np.sqrt(2 * np.pi) * np.exp(-0.5 * (index * scale_factor)**2) 
                              for index in range(-n_sigma, n_sigma + 1)]
@@ -177,11 +178,11 @@ class GridCostProblem(Optimization):
         results = df.copy()
         params = self.model_variables[model]
 
-        mpc_offset = self.configs.get("mpc_offset", 0.0)
+        #mpc_offset = self.configs.get("mpc_offset", 0.0)
 
         column = self.data[GridCostProblem.GRID_SOLUTION].key
         #results[column] = model.opti.value(self.grid_variable)
-        results[column] = model.opti.value(params[GridCostProblem.GRID_VARIABLE]) * 1000 + mpc_offset
+        results[column] = model.opti.value(params[GridCostProblem.GRID_VARIABLE]) * 1000 + self.mpc_offset
         results["grid_expected"] = model.opti.value(params[GridCostProblem.GRID_EXPECTED]) * 1000
 
         if self.objective_config.get("plot_results", False):
