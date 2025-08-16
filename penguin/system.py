@@ -449,6 +449,8 @@ class System(lori.System):
         references.columns = pd.MultiIndex.from_product([["references"], references.columns])
         data = pd.concat([predictions, references], axis="columns")
 
+        data = data.iloc[15:] # drop first 15 minutes to avoid initialization issues
+
         self._evaluate_yield(results, data)
         self._evaluate_storage(results, data)
         self._evaluate_system(results, data)
@@ -524,8 +526,8 @@ class System(lori.System):
 
         plot_data = pd.concat([solar_energies, solar_powers], axis="columns")
 
-        from penguin.simulation.report.plots import plot_yield
-        plot_yield(plot_data)
+        # from penguin.simulation.report.plots import plot_yield
+        # plot_yield(plot_data)
 
         yield_months_file = results.dirs.tmp.joinpath("yield_months.png")
         yield_hours_file = results.dirs.tmp.joinpath("yield_hours.png")
