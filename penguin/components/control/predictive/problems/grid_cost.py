@@ -48,7 +48,7 @@ class GridCostProblem(Optimization):
     grid_expected: casadi.MX
     grid_variable: casadi.MX
 
-    is_stochastic: bool
+    stochastic_active: bool
     grid_expected_std: casadi.MX
 
     @property
@@ -123,7 +123,7 @@ class GridCostProblem(Optimization):
             return cost
             
         def objective_function(grid, grid_std, import_tariff, export_tariff) -> casadi.Function:
-            if self.is_stochastic:
+            if self.stochastic_active:
                 if grid_std is None:
                     raise ValueError("grid_std must be provided for stochastic optimization")
 
@@ -196,7 +196,7 @@ class GridCostProblem(Optimization):
             plot_df.loc[:, "export_tariff"] = model.opti.value(params[GridCostProblem.EXPORT_TARIFF])
             plot_df.loc[:, "grid_expected"] = model.opti.value(params[GridCostProblem.GRID_EXPECTED])
             plot_df.loc[:, "grid_solution"] = model.opti.value(params[GridCostProblem.GRID_VARIABLE])
-            if self.is_stochastic:
+            if self.stochastic_active:
                 plot_df.loc[:, "grid_standard"] = model.opti.value(params[GridCostProblem.GRID_EXPECTED_STD])
             else:
                 plot_df.loc[:, "grid_standard"] = None
@@ -279,7 +279,7 @@ class GridCostProblem(Optimization):
             ax.plot(df.index, df["import_tariff"], label="Import Tariff (ct/kWh)", linestyle='--')
             ax.plot(df.index, df["export_tariff"], label="Export Tariff (ct/kWh)", linestyle='--')
             
-            if self.is_stochastic:
+            if self.stochastic_active:
                 ax.fill_between(df.index, df["grid_expected"] - df["grid_standard"],
                                 df["grid_expected"] + df["grid_standard"],
                                 color='gray', alpha=0.2, label="Stochastic Range (± std)")
