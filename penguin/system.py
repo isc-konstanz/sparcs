@@ -765,6 +765,9 @@ class System(lori.System):
 
             import_week_energy = import_energy.groupby(import_energy.index.isocalendar().week).sum()
             import_week_energy_max = import_week_energy[import_week_energy == import_week_energy.max()].index[0]
+
+            import_week_peak = import_power.groupby(import_power.index.isocalendar().week).max()
+            import_week_peak_max = import_week_peak[import_week_peak == import_week_peak.max()].index[0]
             #plot_system(
             #    data["predictions"][data.index.isocalendar().week == import_week_energy_max],
             #    title="Week with highest Grid Import",
@@ -775,6 +778,11 @@ class System(lori.System):
                 data["predictions"][data.index.isocalendar().week == import_week_energy_max],
                 title="Week with highest Grid Import",
                 file=str(results.dirs.tmp.joinpath("week_max_import.png")),
+            )
+            self._plot_system(
+                data["predictions"][data.index.isocalendar().week == import_week_peak_max],
+                title="Week with highest Peak",
+                file=str(results.dirs.tmp.joinpath("week_max_peak.png")),
             )
 
             if self.components.has_type(SolarSystem):
