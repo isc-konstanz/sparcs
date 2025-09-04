@@ -14,13 +14,17 @@ import dash_bootstrap_components as dbc
 from dash import Input, Output, callback, html
 
 from lori.application.view.pages import ComponentGroup, PageLayout, register_component_group, register_component_page
-from penguin.components.agriculture import AgriculturalArea
+from penguin.components.agriculture import AgriculturalArea, AgriculturalField
 from penguin.components.storage import WaterStorage
 
 
 @register_component_page(AgriculturalArea)
 @register_component_group(AgriculturalArea, name="Agriculture")
 class AgriculturalAreaPage(ComponentGroup[AgriculturalArea]):
+    @property
+    def fields(self) -> Sequence[AgriculturalField]:
+        return self._component.fields
+
     @property
     def water_storage(self) -> Optional[WaterStorage]:
         return self._component.water_storage

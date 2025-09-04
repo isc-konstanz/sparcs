@@ -9,6 +9,7 @@ penguin.components.agriculture.soil.model
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -83,7 +84,7 @@ class Genuchten(SoilModel):
 
     l: float  # noqa: E741
 
-    def __init__(self, theta_r: float, theta_s: float, alpha: float, n: float, k_s: float, l: float = 0.5):  # noqa: E741
+    def __init__(self, theta_r: float, theta_s: float, alpha: float, n: float, k_s: Optional[float] = None, l: float = 0.5):  # noqa: E741
         """
         Mualem-van Genuchten Soil Model
 

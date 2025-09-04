@@ -95,6 +95,8 @@ class SoilMoisture(Component):
                 water_tension = water_tension.iloc[0]
             water_content = self.model.water_content(water_tension)
             water_supply = (water_content - self.wilting_point) / self.water_capacity_available
+            if water_supply < 0:
+                water_supply = 0
             self.data[SoilMoisture.WATER_SUPPLY].set(timestamp, water_supply * 100)
         else:
             self.data[SoilMoisture.WATER_SUPPLY].state = ChannelState.NOT_AVAILABLE
