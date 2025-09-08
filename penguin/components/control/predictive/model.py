@@ -93,7 +93,7 @@ class Model:
                     #TODO: 0 or last? is prior or?
                     state_0 = prior[soc_column].values[0] / 100 * component.capacity
                 else:
-                    state_0 = 0
+                    state_0 = component.capacity / 2 # 50% initial state
                 self.opti.set_value(self.parameters[component_id]["state_0"], state_0)
 
             else:
@@ -172,7 +172,7 @@ class Model:
             x_k1 = states[:, index]
 
             # limit state
-            self.opti.subject_to(self.opti.bounded([component.capacity * 0.05], states[:, index], [component.capacity]))
+            self.opti.subject_to(self.opti.bounded([0.0], states[:, index], [component.capacity]))
 
             # limit input
             self.opti.subject_to(self.opti.bounded(0, u_k_in, component.power_max / 1000))
@@ -188,13 +188,19 @@ class Model:
             x_k1_calculated = phi * x_k + h_in * u_k_in - h_out * u_k_out
             self.opti.subject_to((x_k1_calculated - x_k1) ** 2 <= self.epsilon)
 
-            x_k = x_k1
 
             #TODO: square cost
             t_hour = step_duration / 3600
-            costs += charge_cost * (inputs_in[index] ** 2) * t_hour
-            costs += discharge_cost * (inputs_out[index] ** 2) * t_hour
+            #costs += charge_cost * (inputs_in[index] ** 2) * t_hour
+            #costs += discharge_cost * (inputs_out[index] ** 2) * t_hour
 
+            soc = states[:, index] / component.capacity * 100
+            costs += 1000 * ((soc - 50) / 25) ** 4 * t_hour
+            #costs += 1 / soc  - 1 / (100 - soc)
+            #costs += 2 / (soc + 0.1)
+            #costs += 2 / ((100-soc) + 0.1)
+
+            x_k = x_k1
         self.costs[component_id]["usage"] = costs
 
 

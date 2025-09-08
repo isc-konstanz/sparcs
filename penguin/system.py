@@ -24,6 +24,8 @@ from lori.simulation import Result, Results
 from lori.typing import TimestampType
 from lori.components import Tariff, TariffUnavailableException
 from lori.components.tariff.entsoe import EntsoeProvider
+from lori.util import slice_range, to_timedelta
+
 from penguin import Location
 from penguin.components import ElectricalEnergyStorage, SolarSystem
 
@@ -212,146 +214,259 @@ class System(lori.System):
         update_channel(self.data[System.POWER_TH_EST], System.POWER_TH)
 
 
-
-
-
-    def predict(
+    def predict_solar(
         self,
         start: TimestampType = None,
         end: TimestampType = None,
-        prior: Optional[pd.DataFrame] = None,
         **kwargs,
     ) -> pd.DataFrame:
-        real_end = end
 
-        has_opti = self.components.has_type(Optimization)
-        if has_opti:
-            optimization_problem = self.components.get_first(Optimization)
-            optimization_end = start + pd.Timedelta(seconds=optimization_problem.total_duration)
-            if end > optimization_end:
-                self._logger.warning(f"Simulation duration is greater than optimization duration")
-            end = optimization_end
-
-
-
+        # solar predictions
+        solar_df = None
         has_solar = self.components.has_type(SolarSystem)
         if has_solar:
             weather = self.weather.get(start, end, **kwargs)
-            solar = self._predict_solar(weather)
-        else:
-            weather = pd.DataFrame(index=pd.date_range(start, end, freq="1min"))
-            solar = weather.copy()
+            weather = validate_meteo_inputs(weather, self.location)
+            solar_df = pd.DataFrame(index=weather.index)
+            solar_df.index.name = Channel.TIMESTAMP
 
-
-
-        # hacky tariff implementation
-        tariff_component: Tariff = self.components.get_first(Tariff)
-        if tariff_component is None:
-            # df with index start:end, columns: [Tariff.PRICE_IMPORT, Tariff.PRICE_EXPORT]
-            tariff = pd.DataFrame(index=pd.date_range(start - pd.Timedelta(hours=1), end, freq="1min"))
-            tariff[Tariff.PRICE_IMPORT] = 25.0
-            tariff[Tariff.PRICE_EXPORT] = -5.0
-
-        tariff = tariff_component.get(start - pd.Timedelta(hours=1), end, **kwargs)
-        tariff = tariff.resample("1min").ffill()
-        tariff[Tariff.PRICE_EXPORT] = -5
-        tariff_mode = tariff_component.configs.get("mode", default=None)
-        if tariff_mode == "static":
-            tariff[Tariff.PRICE_IMPORT] = 25.0
-        elif tariff_mode == "sinus":
-            tariff[Tariff.PRICE_IMPORT] = 25.0 + 10 * np.sin(
-                (tariff.index - tariff.index[0]).total_seconds() / (20 * 3600) * 2 * np.pi
-            )
-        elif tariff_mode == "2025":
-            tariff[Tariff.PRICE_IMPORT] = (tariff[Tariff.PRICE_IMPORT] - 20) * 4 + 20
-
-
-        # solve mpc if available
-        if has_opti:
-            required_components = self.components.get_all(*self.components.get_first(Optimization).required_components)
-            if not required_components:
-                opti = pd.DataFrame(index=pd.date_range(start, end, freq="1min"))
-            else:
-
-                # hacky forecasting #TODO: remove this when predictors are ready
-                #from lori.data.forecast import get_forecast
-                #el_power_forecast = get_forecast(
-                #    self,
-                #    System.POWER_EL,
-                #    start=start,
-                #    end=end,
-                #    method="real",
-                #    #method="persistence_3weeks",
-                #)
-                # upsample load predictions
-                #real = self.data.from_logger(["el_power"], start=start, end=end)["el_power"].copy()
-
-
-                el_power_forecast = self.residual_forecast(start, end)
-                el_power_forecast = el_power_forecast.resample("1min").ffill()
-                # is not has logged solar power, subtract that power from the forecast
+            if self.components.has_type(SolarSystem):
+                columns = [SolarSystem.POWER, SolarSystem.POWER_DC]
+                solar_df[columns] = 0.0
                 for solar_system in self.components.get_all(SolarSystem):
-                    if not solar_system.data.has_logged(SolarSystem.POWER, start, end):
-                        solar_column = solar_system.data[SolarSystem.POWER].column
-                        el_power_forecast["forecast"] -= solar[solar_column]
-                        #real -= solar[solar_column]
+                    solar_system_column = solar_system.data[SolarSystem.POWER].column
+                    system_prediction = solar_system.predict(weather)
+                    solar_df[columns] += system_prediction[columns].fillna(0)
+                    solar_df[solar_system_column] = system_prediction[SolarSystem.POWER]
+        return solar_df
 
+    def predict_tariff(
+            self,
+            start: TimestampType = None,
+            end: TimestampType = None,
+            **kwargs,
+    ) -> pd.DataFrame:
+        # tariff predictions
+        tariff_df = None
+        has_tariff = self.components.has_type(Tariff)
+        if has_tariff:
+            tariff: Tariff = self.components.get_first(Tariff)
 
-                # plot real vs forecast
-                # import matplotlib.pyplot as plt
-                # plt.figure(figsize=(10, 5))
-                # plt.plot(real.index, real, label="Real Power", color="blue")
-                # plt.plot(el_power_forecast.index, el_power_forecast["forecast"], label="Forecast Power", color="orange")
-                # plt.xlabel("Time")
-                # plt.ylabel("Power (W)")
-                # plt.legend()
-                # plt.show()
+            tariff_df = tariff.get(start, end, **kwargs)
+            tariff_df[Tariff.PRICE_EXPORT] = -5
+            if tariff.configs.get("mode", default="") == "static":
+                tariff_df[Tariff.PRICE_IMPORT] = 25.0
+        return tariff_df
 
-
-                opti_input = pd.concat([solar, tariff, el_power_forecast], axis="columns")
-                opti_input.dropna(axis="index", how="any", inplace=True)
-
-                opti_component: GridCostProblem = self.components.get_first(GridCostProblem)
-                opti = opti_component.solve(opti_input, start, prior=prior)
-                opti = opti.resample("1min").ffill()
-
-        else:
-            opti = pd.DataFrame(index=pd.date_range(start, end, freq="1min"))
-
-        pass
-
-
-
-        data_df = (
-            pd.concat([weather, solar, opti, tariff], axis="columns")
-            .dropna(axis="index", how="any")
-            .sort_index()
-
-            [:real_end]
-        )
-
-
-        return data_df
-
-
-    def _predict_solar(self,
-        weather: pd.DataFrame,
+    def predict_residual(
+            self,
+            start: TimestampType = None,
+            end: TimestampType = None,
+            solar_df: Optional[pd.DataFrame] = None,
+            **kwargs,
     ) -> pd.DataFrame:
 
-        weather = validate_meteo_inputs(weather, self.location)
-        predictions = pd.DataFrame(index=weather.index)
-        predictions.index.name = Channel.TIMESTAMP
+        # power predictions
+        residual_df = None
+        if self.data.has_logged(System.POWER_EL, start=start, end=end):
+            residual_df = self.data.from_logger([System.POWER_EL], start=start, end=end)
+        else:
+            residual_df = pd.DataFrame(index=pd.date_range(start, end, freq="1min"))
+            residual_df[System.POWER_EL] = 0
 
-        if self.components.has_type(SolarSystem):
-            columns = [SolarSystem.POWER, SolarSystem.POWER_DC]
-            predictions[columns] = 0.0
-            for solar_system in self.components.get_all(SolarSystem):
-                system_column = solar_system.data[SolarSystem.POWER].column
-                system_prediction = solar_system.predict(weather)
-                predictions[system_column] = system_prediction[SolarSystem.POWER]
-                predictions[columns] += system_prediction[columns].fillna(0)
+        has_solar = self.components.has_type(SolarSystem)
+        if has_solar and solar_df is not None:
+            for solar in self.components.get_all(SolarSystem):
+                solar_column = solar.data[SolarSystem.POWER].column
+                if not solar.data.has_logged(SolarSystem.POWER, start, end):
+                    # Solar System does not have a measured reference and will be subtracted from residual power
+                    residual_df[System.POWER_EL] -= solar_df[solar_column]
+                    pass
 
-        return predictions
+        return residual_df
+
+    # def predict_ees(
+    #     self,
+    #     data: pd.DataFrame,
+    #     prior: Optional[pd.DataFrame] = None,
+    #     start: TimestampType = None,
+    #     end: TimestampType = None,
+    #     **kwargs,
+    # ) -> pd.DataFrame:
+    #     has_ees = self.components.has_type(ElectricalEnergyStorage)
+    #     if has_ees:
+    #         ees_columns = [
+    #             ElectricalEnergyStorage.STATE_OF_CHARGE,
+    #             ElectricalEnergyStorage.POWER_CHARGE,
+    #         ]
+    #
+    #         # if ElectricalEnergyStorage.POWER_CHARGE not in data.columns:
+    #         #     data[ElectricalEnergyStorage.POWER_CHARGE] = 0
+    #
+    #         total_capacity = 0
+    #         total_energy = pd.Series(index=data.index, data=0)
+    #
+    #         all_ees = self.components.get_all(ElectricalEnergyStorage)
+    #
+    #         for index, row in data.iterrows():
+    #
+    #             for ees in all_ees:
+    #                 ees_column = [ees.data[c].column for c in ees_columns]
+    #                 ees_soc_column = ees.data[ElectricalEnergyStorage.STATE_OF_CHARGE].column
+    #                 ees_soc = prior.iloc[-1][ees_soc_column] if prior is not None else 50.0
+    #                 ees_data = ees.predict(data=data, soc=ees_soc)
+    #                 ees_power = ees_data[ElectricalEnergyStorage.POWER_CHARGE]
+    #
+    #                 data[ees_column] = ees_data[ees_columns]
+    #                 data[ElectricalEnergyStorage.POWER_CHARGE] += ees_power
+    #
+    #                 # EES does not have a measured reference and will be added to residual power
+    #                 data[System.POWER_EL] += ees_power
+    #
+    #                 total_capacity += ees.capacity
+    #                 total_energy += ees_data[ElectricalEnergyStorage.STATE_OF_CHARGE] / 100 * ees.capacity
+    #
+    #     data[ElectricalEnergyStorage.STATE_OF_CHARGE] = total_energy / total_capacity * 100
+
+    # def predict(
+    #     self,
+    #     start: TimestampType = None,
+    #     end: TimestampType = None,
+    #     prior: Optional[pd.DataFrame] = None,
+    #     **kwargs,
+    # ) -> pd.DataFrame:
+    #     real_end = end
+
+    #     has_opti = self.components.has_type(Optimization)
+    #     if has_opti:
+    #         optimization_problem = self.components.get_first(Optimization)
+    #         optimization_end = start + pd.Timedelta(seconds=optimization_problem.total_duration)
+    #         if end > optimization_end:
+    #             self._logger.warning(f"Simulation duration is greater than optimization duration")
+    #         end = optimization_end
+
+
+
+    #     has_solar = self.components.has_type(SolarSystem)
+    #     if has_solar:
+    #         weather = self.weather.get(start, end, **kwargs)
+    #         solar = self._predict_solar(weather)
+    #     else:
+    #         weather = pd.DataFrame(index=pd.date_range(start, end, freq="1min"))
+    #         solar = weather.copy()
+
+
+
+    #     # hacky tariff implementation
+    #     tariff_component: Tariff = self.components.get_first(Tariff)
+    #     if tariff_component is None:
+    #         # df with index start:end, columns: [Tariff.PRICE_IMPORT, Tariff.PRICE_EXPORT]
+    #         tariff = pd.DataFrame(index=pd.date_range(start - pd.Timedelta(hours=1), end, freq="1min"))
+    #         tariff[Tariff.PRICE_IMPORT] = 25.0
+    #         tariff[Tariff.PRICE_EXPORT] = -5.0
+
+    #     tariff = tariff_component.get(start - pd.Timedelta(hours=1), end, **kwargs)
+    #     tariff = tariff.resample("1min").ffill()
+    #     tariff[Tariff.PRICE_EXPORT] = -5
+    #     tariff_mode = tariff_component.configs.get("mode", default=None)
+    #     if tariff_mode == "static":
+    #         tariff[Tariff.PRICE_IMPORT] = 25.0
+    #     elif tariff_mode == "sinus":
+    #         tariff[Tariff.PRICE_IMPORT] = 25.0 + 10 * np.sin(
+    #             (tariff.index - tariff.index[0]).total_seconds() / (20 * 3600) * 2 * np.pi
+    #         )
+    #     elif tariff_mode == "2025":
+    #         tariff[Tariff.PRICE_IMPORT] = (tariff[Tariff.PRICE_IMPORT] - 20) * 4 + 20
+
+
+    #     # solve mpc if available
+    #     if has_opti:
+    #         required_components = self.components.get_all(*self.components.get_first(Optimization).required_components)
+    #         if not required_components:
+    #             opti = pd.DataFrame(index=pd.date_range(start, end, freq="1min"))
+    #         else:
+
+    #             # hacky forecasting #TODO: remove this when predictors are ready
+    #             #from lori.data.forecast import get_forecast
+    #             #el_power_forecast = get_forecast(
+    #             #    self,
+    #             #    System.POWER_EL,
+    #             #    start=start,
+    #             #    end=end,
+    #             #    method="real",
+    #             #    #method="persistence_3weeks",
+    #             #)
+    #             # upsample load predictions
+    #             #real = self.data.from_logger(["el_power"], start=start, end=end)["el_power"].copy()
+
+
+    #             el_power_forecast = self.residual_forecast(start, end)
+    #             el_power_forecast = el_power_forecast.resample("1min").ffill()
+    #             # is not has logged solar power, subtract that power from the forecast
+    #             for solar_system in self.components.get_all(SolarSystem):
+    #                 if not solar_system.data.has_logged(SolarSystem.POWER, start, end):
+    #                     solar_column = solar_system.data[SolarSystem.POWER].column
+    #                     el_power_forecast["forecast"] -= solar[solar_column]
+    #                     #real -= solar[solar_column]
+
+
+    #             # plot real vs forecast
+    #             # import matplotlib.pyplot as plt
+    #             # plt.figure(figsize=(10, 5))
+    #             # plt.plot(real.index, real, label="Real Power", color="blue")
+    #             # plt.plot(el_power_forecast.index, el_power_forecast["forecast"], label="Forecast Power", color="orange")
+    #             # plt.xlabel("Time")
+    #             # plt.ylabel("Power (W)")
+    #             # plt.legend()
+    #             # plt.show()
+
+
+    #             opti_input = pd.concat([solar, tariff, el_power_forecast], axis="columns")
+    #             opti_input.dropna(axis="index", how="any", inplace=True)
+
+    #             opti_component: GridCostProblem = self.components.get_first(GridCostProblem)
+    #             opti = opti_component.solve(opti_input, start, prior=prior)
+    #             opti = opti.resample("1min").ffill()
+
+    #     else:
+    #         opti = pd.DataFrame(index=pd.date_range(start, end, freq="1min"))
+
+    #     pass
+
+
+
+    #     data_df = (
+    #         pd.concat([weather, solar, opti, tariff], axis="columns")
+    #         .dropna(axis="index", how="any")
+    #         .sort_index()
+
+    #         [:real_end]
+    #     )
+
+
+    #     return data_df
+
+
+    # def _predict_solar(self,
+    #     weather: pd.DataFrame,
+    # ) -> pd.DataFrame:
+
+
+
+    #     weather = validate_meteo_inputs(weather, self.location)
+    #     predictions = pd.DataFrame(index=weather.index)
+    #     predictions.index.name = Channel.TIMESTAMP
+
+    #     if self.components.has_type(SolarSystem):
+    #         columns = [SolarSystem.POWER, SolarSystem.POWER_DC]
+    #         predictions[columns] = 0.0
+    #         for solar_system in self.components.get_all(SolarSystem):
+    #             system_column = solar_system.data[SolarSystem.POWER].column
+    #             system_prediction = solar_system.predict(weather)
+    #             predictions[system_column] = system_prediction[SolarSystem.POWER]
+    #             predictions[columns] += system_prediction[columns].fillna(0)
+
+    #     return predictions
 
 
     def simulate(
@@ -361,23 +476,121 @@ class System(lori.System):
         prior: Optional[pd.DataFrame] = None,
         **kwargs: Any,
     ) -> pd.DataFrame:
-        data = self.predict(start, end, prior, **kwargs)
+        real_end = end
+        if self.components.has_type(Optimization):
+            end = end + pd.Timedelta(days=7)
 
-        if System.POWER_EL not in data.columns:
-            if self.data.has_logged(System.POWER_EL, start=start, end=end):
-                self._logger.debug(f"Reference {System.POWER_EL.name} will be as missing prediction.")
-                data.insert(0, System.POWER_EL, self.data.from_logger([System.POWER_EL], start=start, end=end))
-            else:
-                self._logger.debug(f"Reference {System.POWER_EL.name} cannot be found.")
 
-        data = self._simulate_solar(data, start, end, prior)
-        data = self._simulate_storage(data, start, end, prior)
 
-        data = data.dropna(axis="columns", how="all")
-        data = data.dropna(axis="index", how="any")
-        
+        # data = self.__predict(start, end, **kwargs)
+
+        solar_df = self.predict_solar(start, end, **kwargs)
+        tariff_df = self.predict_tariff(start, end, **kwargs)
+        residual_df = self.predict_residual(start, end, solar_df, **kwargs)
+
+        data = pd.concat([solar_df, tariff_df, residual_df], axis="columns")
+        data = data.resample("1min").mean().ffill()
+        #shift 15 minutes to the past
+        #data.index = data.index - pd.Timedelta(minutes=15)
+
+
+        # if System.POWER_EL not in data.columns:
+        #     if self.data.has_logged(System.POWER_EL, start=start, end=end):
+        #         self._logger.debug(f"Reference {System.POWER_EL.name} will be as missing prediction.")
+        #         data.insert(0, System.POWER_EL, self.data.from_logger([System.POWER_EL], start=start, end=end))
+        #     else:
+        #         self._logger.debug(f"Reference {System.POWER_EL.name} cannot be found.")
+
+        # # data = self._simulate_solar(data, start, end, prior)
+        # if self.components.has_type(SolarSystem):
+        #     for solar in self.components.get_all(SolarSystem):
+        #         solar_column = solar.data[SolarSystem.POWER].column
+        #         if not solar.data.has_logged(SolarSystem.POWER, start, end):
+        #             # Solar System does not have a measured reference and will be subtracted from residual power
+        #             data[System.POWER_EL] -= data[solar_column]
+        #             pass
+
+        has_opti = self.components.has_type(Optimization)
+        if has_opti:
+            if len(self.components.get_all(Optimization)) > 1:
+                raise ValueError("Multiple optimization components are not supported")
+            optimization = self.components.get_first(Optimization)
+            slices = slice_range(start, real_end, timezone=self.location.timezone, freq=optimization.freq)
+        else:
+            slices = [(start, end)]
+
+        # data = self._simulate_storage(data, start, end, prior)
+        has_ees = self.components.has_type(ElectricalEnergyStorage)
+        if has_ees:
+            ees_columns = [
+                ElectricalEnergyStorage.STATE_OF_CHARGE,
+                ElectricalEnergyStorage.POWER_CHARGE,
+            ]
+
+            # if ElectricalEnergyStorage.POWER_CHARGE not in data.columns:
+            #     data[ElectricalEnergyStorage.POWER_CHARGE] = 0
+
+            total_capacity = 0.0
+            total_energy = pd.Series(index=data.index, data=0.0)
+            data[ElectricalEnergyStorage.POWER_CHARGE] = 0.0
+            data[ElectricalEnergyStorage.STATE_OF_CHARGE] = 0.0
+
+            all_ees = self.components.get_all(ElectricalEnergyStorage)
+
+            has_ess_opti = self.components.has_type(GridCostProblem)
+            if has_ess_opti:
+                grid_cost_problem = self.components.get_first(GridCostProblem)
+
+
+
+
+            for _start, _end in slices:
+                print(f"start: {_start}")
+                if has_ess_opti:
+                    #opti_input = pd.concat([solar, tariff, el_power_forecast], axis="columns")
+                    #opti_input.dropna(axis="index", how="any", inplace=True)
+
+                    opti = grid_cost_problem.solve(data, _start, prior=prior)
+                    opti = opti.resample("1min").ffill()
+                    # check if columns alread exits in data (append with 0 if not)
+                    # then insert data at correct timestamp
+                    for column in opti.columns:
+                        if column not in data.columns:
+                            data[column] = 0.0
+                        data.loc[_start:_end, column] = opti.loc[_start:_end, column]
+
+                for ees in all_ees:
+                    ees_data = ees.data.from_logger(ees_columns, _start, _end)
+                    if ees_data.empty:
+                        # ees_soc_column = ees.data[ElectricalEnergyStorage.STATE_OF_CHARGE].column
+                        # ees_soc = prior.iloc[-1][ees_soc_column] if prior is not None else 50.0
+                        # if ees_soc == 50.0:
+                        #     pass
+                        ees_data = ees.predict(data=data[_start:_end].copy(), prior=(prior.iloc[-1] if prior is not None else None))
+                        ees_power = ees_data[ElectricalEnergyStorage.POWER_CHARGE]
+
+                        for column in ees_columns:
+                            data.loc[_start:_end, ees.data[column].column] = ees_data[column]
+                        data.loc[_start:_end, ElectricalEnergyStorage.POWER_CHARGE] += ees_power
+
+                        # EES does not have a measured reference and will be added to residual power
+                        data.loc[_start:_end, System.POWER_EL] += ees_power
+
+                    total_energy.loc[_start:_end] += ees_data[ElectricalEnergyStorage.STATE_OF_CHARGE] / 100 * ees.capacity
+
+                prior = data.loc[_start:_end]
+
+            for ees in all_ees:
+                total_capacity += ees.capacity
+
+            data[ElectricalEnergyStorage.STATE_OF_CHARGE] = total_energy / total_capacity * 100
+        # data = data.dropna(axis="columns", how="all")
+        # data = data.dropna(axis="index", how="any")
+
         if Tariff.PRICE_EXPORT in data.columns:
             data.drop(columns=[Tariff.PRICE_EXPORT], inplace=True)
+
+        data = data.loc[start:real_end]
         return data
     
     # noinspection PyUnusedLocal
@@ -724,6 +937,8 @@ class System(lori.System):
         
         data = data.copy()
         data = data.resample("15min").mean()
+        data = data.resample("1min").ffill()
+
         
         hours = pd.Series(data.index, index=data.index)
         hours = (hours - hours.shift(1)).bfill().dt.total_seconds() / 3600.0
@@ -874,7 +1089,7 @@ class System(lori.System):
 
         from lori.io import plot
 
-        data = data.copy().resample("15min").mean()
+        #data = data.copy().resample("15min").mean()
 
         warnings.filterwarnings(
             "ignore",

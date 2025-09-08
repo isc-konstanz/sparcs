@@ -116,8 +116,10 @@ class GridCostProblem(Optimization):
             if self.export_limit_active:
                 tariff += function_arctan(grid, self.export_limit, 2, self.export_limit_tariff - export_tariff, 0)
                 
+            #TODO: refactor config
             if objective_config.get("grid_cost_squared", True):
-                cost = tariff * grid ** 2
+                cost = function_arctan(grid, 0, 2, -1, 1) * tariff * grid
+                cost += 0.00001 * grid**2
             else:
                 cost = function_arctan(grid, 0, 2, -1, 1) * tariff * grid * 100
                 
@@ -169,7 +171,7 @@ class GridCostProblem(Optimization):
 
         model.opti.set_value(params[GridCostProblem.IMPORT_TARIFF], data[Tariff.PRICE_IMPORT].values)
         model.opti.set_value(params[GridCostProblem.EXPORT_TARIFF], data[Tariff.PRICE_IMPORT].values)
-        model.opti.set_value(params[GridCostProblem.GRID_EXPECTED], data["forecast"].values / 1000)  # convert to kWh
+        model.opti.set_value(params[GridCostProblem.GRID_EXPECTED], data["el_power"].values / 1000)  # convert to kWh
         
         if self.stochastic_active:
             model.opti.set_value(params[GridCostProblem.GRID_EXPECTED_STD], data["forecast_std"].values / 1000)  # convert to kWh
@@ -285,7 +287,7 @@ class GridCostProblem(Optimization):
                                 df["grid_expected"] + df["grid_standard"],
                                 color='gray', alpha=0.2, label="Stochastic Range (± std)")
 
-            for component_id, component in self.models[0]._components.items():
+            for component_id, component in self.model._components.items():
                 if isinstance(component, ElectricalEnergyStorage):
                     soc_column = f"mpc_{component.data[component.STATE_OF_CHARGE].column}"
                     ax.plot(df.index, df[soc_column], label=f"SoC (%) ({component_id})", linestyle=':')
@@ -301,6 +303,7 @@ class GridCostProblem(Optimization):
             plt.tight_layout()
 
             plt.pause(0.1)
+            #plt.show()
 
         if plt.fignum_exists(1):
             fig = plt.figure(1)

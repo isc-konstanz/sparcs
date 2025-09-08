@@ -97,7 +97,7 @@ class ElectricalEnergyStorage(Component):
             start: Optional[TimestampType | str] = None,
             end: Optional[TimestampType | str] = None,
             data: Optional[pd.DataFrame] = None,
-            soc: float = 50.0
+            prior: Optional[pd.DataFrame] = None,
     ) -> pd.DataFrame:
         from penguin.system import System
 
@@ -108,12 +108,18 @@ class ElectricalEnergyStorage(Component):
 
         results = []
 
-        prior = None
+        if prior is not None and not prior.empty:
+            prior_index = prior.name
+            soc = prior[self.data[self.STATE_OF_CHARGE].column]
+        else:
+            prior_index = None
+            soc = 50.0
+
         for index, row in data.iterrows():
             charge_power = 0
-            if prior is not None:
+            if prior_index is not None:
                 grid_power = row[System.POWER_EL]
-                hours = (index - prior).total_seconds() / 3600.0
+                hours = (index - prior_index).total_seconds() / 3600.0
 
                 # Use the MPC predicted charge power if available
                 mpc_power_charge_column = f"mpc_{self.data[self.POWER_CHARGE].column}"
@@ -133,7 +139,7 @@ class ElectricalEnergyStorage(Component):
                 if charge_power != 0:
                     soc += self.energy_to_percent(charge_power / 1000.0 * hours)
 
-            prior = index
+            prior_index = index
             results.append([soc, charge_power])
         return pd.DataFrame(results, index=data.index, columns=columns)
 

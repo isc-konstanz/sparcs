@@ -25,13 +25,12 @@ class Optimization(Component, ABC):
     """
     Base class for predictive optimization problems.
     """
-
+    freq: str
     total_duration: int
-    step_durations_list: List[List[int]]
+    step_durations: list[int]
+    model: Model
 
-    models: List[Model]
-
-    results_buffer: Optional[pd.DataFrame] = None
+    results_buffer: Optional[pd.DataFrame]
 
 
     @property
@@ -73,64 +72,50 @@ class Optimization(Component, ABC):
             raise ResourceException("Missing timing configuration")
         self._configure_timing(timing_config)
 
-        self.models = []
-        for index, step_durations in enumerate(self.step_durations_list):
-            self.models.append(
-                Model(
-                    step_durations,
-                    configs=configs.get_section("casadi", defaults={}),
-                )
-            )
+        self.model = Model(self.step_durations, configs=configs.get_section("casadi", defaults={}))
 
-            self.results_buffer = None
+        self.results_buffer = None
 
     def _configure_timing(self, configs: Configurations) -> None:
+        self.freq = configs.get("freq", default="1h")
         timing_keys = configs.get("timing_keys")
 
-        def is_list_of_list_of_str(obj):
+        def is_list_of_str(obj):
             return (
                 isinstance(obj, list) and
-                all(isinstance(inner, list) and all(isinstance(s, str) for s in inner) for inner in obj)
+                all(isinstance(o, str) for o in obj)
             )
 
-        if not is_list_of_list_of_str(timing_keys):
+        if not is_list_of_str(timing_keys):
             raise ResourceException(
-                f"Invalid timing configuration: {timing_keys}, expected a list of list of strings"
+                f"Invalid timing configuration: {timing_keys}, expected a list of strings"
             )
 
-        self.step_durations_list = []
-        for key_set in timing_keys:
-            step_durations = []
-            for key in key_set:
-                #TODO: automatically raise exception if not all keys are present?
-                t_config = configs.get_section(key)
-                if not t_config:
-                    raise ResourceException(f"Missing timing configuration for {key}")
+        self.step_durations = []
+        for timing in timing_keys:
+            #TODO: automatically raise exception if not all keys are present?
+            t_config = configs.get_section(timing)
+            if not t_config:
+                raise ResourceException(f"Missing timing configuration for {timing}")
 
-                duration = to_timedelta(parse_freq(t_config.get("duration")))
-                freq = to_timedelta(parse_freq(t_config.get("freq")))
+            duration = to_timedelta(parse_freq(t_config.get("duration")))
+            freq = to_timedelta(parse_freq(t_config.get("freq")))
 
-                if duration % freq != pd.Timedelta(0):
-                    raise ResourceException((
-                        f"Invalid timing configuration for {key}:"
-                        f"duration {duration} is not a multiple of frequency {freq}"
-                    ))
-                [step_durations.append(int(freq.total_seconds())) for _ in range(int(duration / freq))]
+            if duration % freq != pd.Timedelta(0):
+                raise ResourceException((
+                    f"Invalid timing configuration for {timing}:"
+                    f"duration {duration} is not a multiple of frequency {freq}"
+                ))
 
-            self.step_durations_list.append(step_durations)
+            for _ in range(int(duration / freq)):
+                self.step_durations.append(int(freq.total_seconds()))
 
-        if len(self.step_durations_list) == 0:
+            #self.step_durations_list.append(step_durations)
+
+        if len(self.step_durations) == 0:
             raise ResourceException("No step durations configured, please check your timing configuration")
 
-        elif len(self.step_durations_list) > 1:
-            for index in range(len(self.step_durations_list) - 1):
-                if sum(self.step_durations_list[index + 1]) not in np.cumsum(self.step_durations_list[index]):
-                    raise ResourceException(
-                        self,
-                        f"Invalid timing configuration: {index + 1}th timing key(s) does not match the previous one"
-                    )
-
-        self.total_duration = sum(self.step_durations_list[0])
+        self.total_duration = sum(self.step_durations)
 
 
     def activate(self) -> None:
@@ -154,19 +139,19 @@ class Optimization(Component, ABC):
 
         model_configs = self.configs.get_section("models", defaults={})
         #constants = []
-        for model in self.models:
-            for controllable in controlled_components:
-                model_config = model_configs.get_section(controllable.id.replace(".", "_"), defaults={})
-                model.add_component(controllable, model_config)
 
-            self.setup(model)
-            cost = self.cost_function(model)
-            for component_id, component_costs in model.costs.items():
-                for cost_id, component_cost in component_costs.items():
-                    cost += component_cost
-            model.opti.minimize(cost)
+        for controllable in controlled_components:
+            model_config = model_configs.get_section(controllable.id.replace(".", "_"), defaults={})
+            self.model.add_component(controllable, model_config)
 
-        for channel in self.models[0]._channels.values():
+        self.setup(self.model)
+        cost = self.cost_function(self.model)
+        for component_id, component_costs in self.model.costs.items():
+            for cost_id, component_cost in component_costs.items():
+                cost += component_cost
+        self.model.opti.minimize(cost)
+
+        for channel in self.model._channels.values():
             self._add_channel(channel, aggregate="mean")
 
     def solve(
@@ -179,39 +164,33 @@ class Optimization(Component, ABC):
         results = []
         
         try:
-            for model_index, model in enumerate(self.models):
-                interval_data = _df_to_intervals(data, model.step_durations, start_time)
+            interval_data = self._df_to_intervals(data, start_time)
 
-                self.set_initials(interval_data, model)
+            self.set_initials(interval_data, self.model)
 
-                model.set_initials(prior)
-                
-                #TODO: fix this! / nessessary?
-                if model_index != 0:
-                    model.set_finals(results[-1])
+            self.model.set_initials(prior)
 
-                model.opti.solve()
 
-                timestamps = _steps_to_datetime(list(model.step_durations), start_time)
-                result = pd.DataFrame(index=timestamps)
-                result = model.extract_results(result)
-                result = self.extract_results(model, result)
-                results.append(result)
+            self.model.opti.solve()
 
-            results = pd.concat(results)
-            results = results.loc[~results.index.duplicated(keep='last')].sort_index()
-            results = results.resample("1min").ffill()
+            timestamps = self._steps_to_datetime(start_time - pd.Timedelta("15min"))
+
+            result = pd.DataFrame(index=timestamps)
+            result = self.model.extract_results(result)
+            result = self.extract_results(self.model, result)
+
+            result = result.resample("1min").ffill().bfill()
             # results.index = results.index# - pd.Timedelta("15min")
-            self.results_buffer = results
+            self.result_buffer = result
         except Exception as e:
             print(f"Unable to solve optimization problem @ {start_time}: {e}")
             if self.results_buffer is not None:
-                results = self.results_buffer
+                result = self.results_buffer
             else:
-                results = pd.DataFrame(index=pd.date_range(start_time, start_time + pd.Timedelta("7days"), freq="1min"))
+                result = pd.DataFrame(index=pd.date_range(start_time, start_time + pd.Timedelta("7days"), freq="1min"))
                 
 
-        return results
+        return result
 
     def _add_channel(self, channel: dict, aggregate: str = "mean", **custom) -> None:
         channel["aggregate"] = aggregate
@@ -219,21 +198,21 @@ class Optimization(Component, ABC):
         channel.update(custom)
         self.data.add(**channel)
 
-def _df_to_intervals(
-        data: pd.DataFrame,
-        step_durations: list[int],
-        start: TimestampType,
-) -> pd.DataFrame:
-    target_times = _steps_to_datetime(step_durations, start)
-    data = data.iloc[[data.index.get_indexer([ts], method='nearest')[0] for ts in target_times]]
-    data.reset_index(drop=True, inplace=True)
-    return data
+    def _df_to_intervals(
+            self,
+            data: pd.DataFrame,
+            start: TimestampType,
+    ) -> pd.DataFrame:
+        target_times = self._steps_to_datetime(start)
+        data = data.iloc[[data.index.get_indexer([ts], method='nearest')[0] for ts in target_times]]
+        data.reset_index(drop=True, inplace=True)
+        return data
 
-def _steps_to_datetime(
-        step_durations: list[int],
-        start: pd.Timestamp,
-) -> list[pd.Timestamp]:
-    step_durations = [0] + step_durations[:-1]
-    target_times = [start + pd.Timedelta(seconds=time_difference) for time_difference in np.cumsum(step_durations)]
-    return target_times
+    def _steps_to_datetime(
+            self,
+            start: TimestampType,
+    ) -> list[pd.Timestamp]:
+        step_durations = [0] + self.step_durations[:-1]
+        target_times = [start + pd.Timedelta(seconds=time_difference) for time_difference in np.cumsum(step_durations)]
+        return target_times
 
