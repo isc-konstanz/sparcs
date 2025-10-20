@@ -3,7 +3,7 @@ build-backend = "setuptools.build_meta"
 requires = ['setuptools >= 61.0', 'versioneer[toml]']
 
 [project]
-name = "penguin"
+name = "sparcs"
 description = """\
 This repository provides a set of core functions for several \
 Photovoltaic Energy Generation and Utility Integration systems of \
@@ -17,8 +17,8 @@ maintainers = [
 ]
 
 urls.author = "https://isc-konstanz.de"
-urls.source = "https://github.com/isc-konstanz/penguin/"
-urls.issues = "https://github.com/isc-konstanz/penguin/issues"
+urls.source = "https://github.com/isc-konstanz/sparcs/"
+urls.issues = "https://github.com/isc-konstanz/sparcs/issues"
 
 classifiers = [
     "License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)",
@@ -42,7 +42,7 @@ dynamic = ["version"]
 dependencies = [
     "pvlib >= 0.10.1",
     "NREL-PySAM >= 4.0",
-    "lori @ git+https://github.com/isc-konstanz/lori.git@stable"
+    "lories @ git+https://github.com/isc-konstanz/lories.git@stable"
 ]
 
 [project.optional-dependencies]
@@ -52,7 +52,7 @@ dev = [
 ]
 
 [tool.setuptools.package-data]
-penguin = []
+sparcs = []
 
 [tool.setuptools.packages.find]
 namespaces = false
@@ -64,19 +64,19 @@ exclude = [
 [tool.versioneer]
 VCS = "git"
 style = "pep440"
-versionfile_source = "penguin/_version.py"
-versionfile_build = "penguin/_version.py"
-parentdir_prefix = "penguin-"
+versionfile_source = "sparcs/_version.py"
+versionfile_build = "sparcs/_version.py"
+parentdir_prefix = "sparcs-"
 tag_prefix = "v"
 
 [project.scripts]
-penguin = "penguin.__main__:main"
+sparcs = "sparcs.__main__:main"
 
 [tool.ruff]
 indent-width = 4
 line-length = 120
 target-version = "py37"
-exclude = ["penguin/_version.py"]
+exclude = ["sparcs/_version.py"]
 
 [tool.ruff.lint]
 select = [
@@ -91,4 +91,4 @@ select = [
 
 [tool.ruff.lint.isort]
 extra-standard-library = ["dateutil"]
-known-first-party = ["penguin", "lori", "numpy", "pandas", "pytz"]
+known-first-party = ["sparcs", "lories", "numpy", "pandas", "pytz"]

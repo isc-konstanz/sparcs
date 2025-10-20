@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-penguin
-~~~~~~~
+sparcs
+~~~~~~
 
-Legacy compatibility setup script for the penguin package.
+Legacy compatibility setup script for the sparcs package.
 
 """
 
