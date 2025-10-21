@@ -55,9 +55,9 @@ elif echo "$version" | grep -q '\.dirty$'; then
 	exit 1
 fi
 
-sed -i "s/<version>/$version/g" "$build_dir/debian/changelog"
-sed -i "s/<version>/$version/g" "$build_dir/debian/control"
-sed -i "s/<version>/$version/g" "$build_dir/debian/postinst"
+sed -i "s/<version>/$version/g" "$build_dir/sparcs/debian/changelog"
+sed -i "s/<version>/$version/g" "$build_dir/sparcs/debian/control"
+sed -i "s/<version>/$version/g" "$build_dir/sparcs/debian/postinst"
 
 cp -r "$sparcs_dir/lib/etc" "$build_dir/sparcs/"
 cp -r "$sparcs_dir/lib/usr" "$build_dir/sparcs/"
