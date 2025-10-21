@@ -8,5 +8,5 @@
 
 override_dh_auto_install:
 	dh_auto_install
-	dh_systemd_enable --name=SPARCS sparcs.service
+	dh_systemd_enable --name=sparcs sparcs.service
 	dh_systemd_start
