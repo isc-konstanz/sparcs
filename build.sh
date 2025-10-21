@@ -2,7 +2,7 @@
 #Scriptname: build.sh
 #Description: script to build sparcs debian packages with dpkg
 
-if [ $(id -u) != 0 ]; then
+if [ "$(id -u)" != 0 ]; then
     echo "DPKG build process should be performed with root privileges." 1>&2
     exit 1
 fi
@@ -62,7 +62,7 @@ sed -i "s/<version>/$version/g" "$build_dir/debian/postinst"
 cp -r "$sparcs_dir/lib/etc" "$build_dir/sparcs/"
 cp -r "$sparcs_dir/lib/usr" "$build_dir/sparcs/"
 
-mkdir "$build_dir/etc/sparcs"
+mkdir "$build_dir/sparcs/etc/sparcs"
 cp "$sparcs_dir/conf/logging.default.conf" "$build_dir/sparcs/etc/sparcs/logging.conf"
 cp "$sparcs_dir/conf/settings.default.conf" "$build_dir/sparcs/etc/sparcs/settings.conf"
 
