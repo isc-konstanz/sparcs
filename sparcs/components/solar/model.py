@@ -32,7 +32,7 @@ class SolarModel(Configurator, ModelChain):
 
     # noinspection PyUnresolvedReferences
     @classmethod
-    def load(cls, pvsystem, include_file: str = f"{TYPE}.conf") -> SolarModel:
+    def load(cls, pvsystem, include_file: str = "model.conf") -> SolarModel:
         include_dir = pvsystem.configs.path.replace(".conf", ".d")
         configs_dirs = pvsystem.configs.dirs.to_dict()
         configs_dirs["conf_dir"] = include_dir
@@ -44,8 +44,8 @@ class SolarModel(Configurator, ModelChain):
             require=False,
         )
         params = DEFAULTS
-        if TYPE in configs:
-            params.update(configs.get_member(TYPE))
+        if cls.TYPE in configs:
+            params.update(configs.get_member(cls.TYPE))
 
         return cls(configs, pvsystem, pvsystem.context.location, **params)
 

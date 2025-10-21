@@ -24,8 +24,8 @@ from pvlib.pvsystem import FixedMount, SingleAxisTrackerMount
 from pvlib.tools import _build_kwargs
 
 import pandas as pd
-from lories.core import Configurations, ConfigurationError
 from lories.components import Component
+from lories.core import ConfigurationError, Configurations
 from lories.typing import ContextArgument
 from sparcs.components.solar.db import ModuleDatabase
 

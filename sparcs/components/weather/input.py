@@ -13,7 +13,7 @@ from pvlib.irradiance import complete_irradiance, dirint, disc, dni
 
 import numpy as np
 import pandas as pd
-from lories import Constant, Weather, ResourceError
+from lories import Constant, ResourceError, Weather
 from lories.typing import Location
 
 SOLAR_ELEVATION = Constant(float, "solar_elevation", "Solar Elevation", "°")

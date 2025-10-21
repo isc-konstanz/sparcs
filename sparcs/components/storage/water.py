@@ -9,8 +9,8 @@ sparcs.components.storage.water
 from __future__ import annotations
 
 from lories import Constant
-from lories.typing import Configurations
 from lories.components import Component
+from lories.typing import Configurations
 
 
 class WaterStorage(Component):

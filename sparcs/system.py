@@ -184,7 +184,7 @@ class System(lories.System):
         end: Timestamp = None,
         **kwargs,
     ) -> pd.DataFrame:
-        #predictions = super().predict(start, end, **kwargs)
+        # predictions = super().predict(start, end, **kwargs)
         weather = self.weather.get(start, end, **kwargs)
         predictions = self._predict(weather)
 
