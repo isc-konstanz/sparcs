@@ -12,13 +12,13 @@ fi
 dir="$0"
 # Need this for relative symlinks.
 while [ -h "$dir" ] ; do
-	ls=$(ls -ld "$dir")
-	link=$(expr "$ls" : '.*-> \(.*\)$')
-	if expr "$link" : '/.*' > /dev/null; then
-		dir="$link"
-	else
-		dir=$(dirname "$dir")"/$link"
-	fi
+    ls=$(ls -ld "$dir")
+    link=$(expr "$ls" : '.*-> \(.*\)$')
+    if expr "$link" : '/.*' > /dev/null; then
+        dir="$link"
+    else
+        dir=$(dirname "$dir")"/$link"
+    fi
 done
 cd "$(dirname "$dir")" || exit 1 >/dev/null
 sparcs_dir="$(pwd -P)"
@@ -26,12 +26,12 @@ build_dir="$sparcs_dir/build/dpkg"
 
 # Attempt to determine the Python command
 if [ -x "$sparcs_dir/.venv/bin/python" ] ; then
-	python="$sparcs_dir/.venv/bin/python"
+    python="$sparcs_dir/.venv/bin/python"
 else
-	python="/usr/bin/python"
+    python="/usr/bin/python"
 fi
 if [ ! -x "$python" ] ; then
-	die "ERROR: Python is set to an invalid entry point: $python
+    die "ERROR: Python is set to an invalid entry point: $python
 
 Please setup a local virtual environment '.venv' or Python 3 to be available as '/usr/bin/python'."
 fi
@@ -51,10 +51,11 @@ if [ -z "$version" ]; then
     echo "Could not determine version from setup.py" 1>&2
     exit 1
 elif echo "$version" | grep -q '\.dirty$'; then
-	echo "Invalid determined dirty version from setup.py: $version" 1>&2
-	exit 1
+    echo "Invalid determined dirty version from setup.py: $version" 1>&2
+    exit 1
+elif echo "$version" | grep -q '\+'; then
+    version=$(echo $version | sed "s/[+].*//")
 fi
-
 sed -i "s/<version>/$version/g" "$build_dir/sparcs/debian/changelog"
 sed -i "s/<version>/$version/g" "$build_dir/sparcs/debian/control"
 sed -i "s/<version>/$version/g" "$build_dir/sparcs/debian/postinst"
