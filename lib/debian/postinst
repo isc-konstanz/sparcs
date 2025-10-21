@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+
+# Set permissions of the application directories
+chown sparcs:sparcs -R /var/lib/sparcs /var/log/sparcs /var/tmp/sparcs
+
+# Install the current specific version package
+/usr/lib/lories/bin/pip install sparcs==<version>
+
+#DEBHELPER#
+
+exit 0

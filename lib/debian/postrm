@@ -1,0 +1,33 @@
+#!/bin/sh
+set -e
+
+#DEBHELPER#
+
+case "$1" in
+    remove | purge)
+        # Reset permissions of the application directories
+        chown root:root -R /etc/sparcs /var/lib/sparcs /var/log/sparcs /var/tmp/sparcs 2>/dev/null
+
+        # Delete the Solar Prediction, Analytics & Resource Control System user, if it exists
+        if grep -E "^sparcs:" /etc/passwd > /dev/null 2>&1; then
+            userdel -f "sparcs"
+        fi
+
+        # Uninstall the package via git, if the virtual environment does still exist
+        python=/opt/lories/bin/python
+        if [ ! -e $python ]; then
+            $python -m pip uninstall sparcs
+        fi
+        ;;
+    *)
+        ;;
+esac
+case "$1" in
+    purge)
+        rm -rf /etc/sparcs /var/lib/sparcs /var/log/sparcs /var/tmp/sparcs
+        ;;
+    *)
+        ;;
+esac
+
+exit 0

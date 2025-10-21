@@ -1,0 +1,24 @@
+#!/bin/sh
+set -e
+
+#DEBHELPER#
+
+case "$1" in
+    install)
+        # Add the Solar Prediction, Analytics & Resource Control System user, if it does not exist
+        if ! grep -E "^sparcs:" /etc/passwd > /dev/null 2>&1; then
+            useradd \
+			  --system \
+			  --no-create-home \
+			  --comment="Solar Prediction, Analytics & Resource Control System" \
+			  "sparcs"
+        fi
+        ;;
+    *)
+        ;;
+esac
+
+# Make sure all application related directories exist
+mkdir -p /var/lib/sparcs /var/log/sparcs /var/tmp/sparcs
+
+exit 0

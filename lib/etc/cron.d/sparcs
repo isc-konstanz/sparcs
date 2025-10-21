@@ -1,0 +1,2 @@
+# /etc/cron.d/sparcs: crontab entries for sparcs database supervision
+*/15 * * * *   sparcs   /usr/lib/lories/bin/sparcs -c /etc/sparcs replicate >/dev/null 2>&1

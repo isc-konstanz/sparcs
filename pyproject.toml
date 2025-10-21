@@ -5,9 +5,9 @@ requires = ['setuptools >= 61.0', 'versioneer[toml]']
 [project]
 name = "sparcs"
 description = """\
-This repository provides a set of core functions for several \
-Photovoltaic Energy Generation and Utility Integration systems of \
-ISC Konstanz e.V."""
+This project provides a set of functions and applications for \
+Solar Prediction, Analytics and Resource Control Systems \
+by ISC Konstanz e.V."""
 
 authors = [
     {name = "ISC Konstanz e.V."}
