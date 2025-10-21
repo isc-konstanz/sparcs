@@ -15,7 +15,7 @@ case "$1" in
 
         # Uninstall the package via git, if the virtual environment does still exist
         python=/opt/lories/bin/python
-        if [ ! -e $python ]; then
+        if [ -e $python ]; then
             $python -m pip uninstall sparcs
         fi
         ;;
