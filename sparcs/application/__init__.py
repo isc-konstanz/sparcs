@@ -9,7 +9,6 @@ sparcs.application
 try:
     from .view import (  # noqa: F401
         AgriculturePage,
-        WeatherPage,
     )
 except ModuleNotFoundError:
     pass

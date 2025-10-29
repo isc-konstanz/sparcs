@@ -14,6 +14,3 @@ from .agriculture import (  # noqa: F401
 
 from . import storage  # noqa: F401
 from .storage import WaterStoragePage  # noqa: F401
-
-from . import weather  # noqa: F401
-from .weather import WeatherPage  # noqa: F401
