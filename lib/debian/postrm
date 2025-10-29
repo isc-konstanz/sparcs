@@ -6,7 +6,7 @@ set -e
 case "$1" in
     remove | purge)
         # Reset permissions of the application directories
-        chown root:root -R /etc/sparcs /var/lib/sparcs /var/log/sparcs /var/tmp/sparcs 2>/dev/null
+        chown root:root -R /etc/sparcs /var/lib/sparcs /var/log/sparcs /var/tmp/sparcs 2>/dev/null || true
 
         # Delete the Solar Prediction, Analytics & Resource Control System user, if it exists
         if grep -E "^sparcs:" /etc/passwd > /dev/null 2>&1; then
@@ -14,9 +14,9 @@ case "$1" in
         fi
 
         # Uninstall the package via git, if the virtual environment does still exist
-        python=/opt/lories/bin/python
+        python=/usr/lib/lories/bin/python
         if [ -e $python ]; then
-            $python -m pip uninstall sparcs
+            $python -m pip uninstall sparcs || true
         fi
         ;;
     *)
@@ -24,7 +24,7 @@ case "$1" in
 esac
 case "$1" in
     purge)
-        rm -rf /etc/sparcs /var/lib/sparcs /var/log/sparcs /var/tmp/sparcs
+        rm -rf /etc/sparcs /var/lib/sparcs /var/log/sparcs /var/tmp/sparcs || true
         ;;
     *)
         ;;

@@ -2,10 +2,10 @@
 set -e
 
 # Set permissions of the application directories
-chown sparcs:sparcs -R /var/lib/sparcs /var/log/sparcs /var/tmp/sparcs
+chown sparcs:sparcs -R /var/lib/sparcs /var/log/sparcs /var/tmp/sparcs || true
 
 # Install the current specific version package
-/usr/lib/lories/bin/pip install sparcs==<version>
+/usr/lib/lories/bin/pip install sparcs==<version> || true
 
 #DEBHELPER#
 

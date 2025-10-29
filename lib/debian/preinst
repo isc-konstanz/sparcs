@@ -19,6 +19,6 @@ case "$1" in
 esac
 
 # Make sure all application related directories exist
-mkdir -p /var/lib/sparcs /var/log/sparcs /var/tmp/sparcs
+mkdir -p /var/lib/sparcs /var/log/sparcs /var/tmp/sparcs || true
 
 exit 0
