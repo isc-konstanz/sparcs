@@ -41,7 +41,6 @@ dynamic = ["version"]
 dependencies = [
     "lories >= 0.15",
     "pvlib >= 0.10.1",
-    "NREL-PySAM >= 4.0",
 ]
 
 [project.optional-dependencies]
