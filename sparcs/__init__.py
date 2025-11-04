@@ -25,6 +25,8 @@ from .components import (  # noqa: F401
     ThermalEnergyStorage,
 )
 
+from . import devices # noqa: F401
+
 from . import system  # noqa: F401
 from .system import System  # noqa: F401
 
