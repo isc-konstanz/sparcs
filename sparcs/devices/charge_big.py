@@ -13,7 +13,7 @@ from lories.typing import Configurations
 
 
 @register_component_type("charge_big")
-class ChargeBigDevice(Component):
+class ChargeBig(Component):
     SETPOINT_ENABLED = Constant(bool, "charge_big_setpoint_enabled", "Charge Big Setpoint Enabled", "")
     SETPOINT = Constant(float, "charge_big_setpoint", "Charge Big Setpoint", "kW")
 
@@ -69,27 +69,27 @@ class ChargeBigDevice(Component):
             channel.update(custom)
             self.data.add(**channel)
 
-        add_channel(ChargeBigDevice.SETPOINT_ENABLED, "Summen_Grenzwert_aktiv", aggregate="last")
-        add_channel(ChargeBigDevice.SETPOINT, "Sollwert_aktiv")
+        add_channel(ChargeBig.SETPOINT_ENABLED, "Summen_Grenzwert_aktiv", aggregate="last")
+        add_channel(ChargeBig.SETPOINT, "Sollwert_aktiv")
 
-        add_channel(ChargeBigDevice.L1_POWER, "Zähler_Leistung_Phase1")
-        add_channel(ChargeBigDevice.L2_POWER, "Zähler_Leistung_Phase2")
-        add_channel(ChargeBigDevice.L3_POWER, "Zähler_Leistung_Phase3")
+        add_channel(ChargeBig.L1_POWER, "Zähler_Leistung_Phase1")
+        add_channel(ChargeBig.L2_POWER, "Zähler_Leistung_Phase2")
+        add_channel(ChargeBig.L3_POWER, "Zähler_Leistung_Phase3")
 
-        add_channel(ChargeBigDevice.L1_ENERGY, "Zähler_Energiebezug_Phase1", aggregate="last")
-        add_channel(ChargeBigDevice.L2_ENERGY, "Zähler_Energiebezug_Phase2", aggregate="last")
-        add_channel(ChargeBigDevice.L3_ENERGY, "Zähler_Energiebezug_Phase3", aggregate="last")
+        add_channel(ChargeBig.L1_ENERGY, "Zähler_Energiebezug_Phase1", aggregate="last")
+        add_channel(ChargeBig.L2_ENERGY, "Zähler_Energiebezug_Phase2", aggregate="last")
+        add_channel(ChargeBig.L3_ENERGY, "Zähler_Energiebezug_Phase3", aggregate="last")
 
-        add_channel(ChargeBigDevice.L1_CURRENT, "Zähler_Strom_Phase1")
-        add_channel(ChargeBigDevice.L2_CURRENT, "Zähler_Strom_Phase2")
-        add_channel(ChargeBigDevice.L3_CURRENT, "Zähler_Strom_Phase3")
+        add_channel(ChargeBig.L1_CURRENT, "Zähler_Strom_Phase1")
+        add_channel(ChargeBig.L2_CURRENT, "Zähler_Strom_Phase2")
+        add_channel(ChargeBig.L3_CURRENT, "Zähler_Strom_Phase3")
 
-        add_channel(ChargeBigDevice.L1_COS_PHI, "Zähler_CosPhi_Phase1")
-        add_channel(ChargeBigDevice.L2_COS_PHI, "Zähler_CosPhi_Phase2")
-        add_channel(ChargeBigDevice.L3_COS_PHI, "Zähler_CosPhi_Phase3")
+        add_channel(ChargeBig.L1_COS_PHI, "Zähler_CosPhi_Phase1")
+        add_channel(ChargeBig.L2_COS_PHI, "Zähler_CosPhi_Phase2")
+        add_channel(ChargeBig.L3_COS_PHI, "Zähler_CosPhi_Phase3")
 
         self._stations = configs.get_int("stations", default=1)
 
         for station in range(self._stations):
-            add_channel(ChargeBigDevice.STATION_STATE, "Ladepunkt_id_Status", station_index=station, aggregate="last")
-            add_channel(ChargeBigDevice.STATION_LIMIT, "Ladepunkt_id_Grenzwert", station_index=station, aggregate="last")
+            add_channel(ChargeBig.STATION_STATE, "Ladepunkt_id_Status", station_index=station, aggregate="last")
+            add_channel(ChargeBig.STATION_LIMIT, "Ladepunkt_id_Grenzwert", station_index=station, aggregate="last")
