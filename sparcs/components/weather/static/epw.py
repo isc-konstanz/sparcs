@@ -35,12 +35,6 @@ class EPWWeather(WeatherFile):
         self.file = epw.get("file", default="weather.epw")
         self.path = self.file if os.path.isabs(self.file) else os.path.join(configs.dirs.data, self.file)
 
-    def activate(self) -> None:
-        super().activate()
-        if not os.path.isfile(self.path):
-            os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            self._download(self.location)
-
     # noinspection PyPackageRequirements
     def _download(self, location: Location) -> None:
         import requests
@@ -85,6 +79,10 @@ class EPWWeather(WeatherFile):
             response.raise_for_status()
 
     def _read_from_file(self) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+        if not os.path.isfile(self.path):
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            self._download(self.location)
+
         return read_epw(filename=self.path, coerce_year=self.year)
 
     # noinspection PyMethodMayBeStatic

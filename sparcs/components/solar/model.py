@@ -11,8 +11,8 @@ from __future__ import annotations
 from pvlib.modelchain import ModelChain
 
 import pandas as pd
-from lories import Configurator
-from lories.typing import Configurations, Location
+from lories import Configurations, Configurator
+from lories.typing import Location
 
 # noinspection SpellCheckingInspection
 DEFAULTS = dict(

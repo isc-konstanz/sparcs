@@ -13,9 +13,10 @@ from typing import Any, Optional
 
 import lories
 import pandas as pd
-from lories import Channel, ChannelState, Configurations, Constant, Weather
+from lories import Channel, ChannelState, Configurations, Constant
 from lories.components import ComponentUnavailableError
 from lories.components.tariff import Tariff
+from lories.components.weather import Weather, WeatherProvider
 from lories.simulation import Result, Results
 from lories.typing import Timestamp
 from sparcs import Location
@@ -104,7 +105,9 @@ class System(lories.System):
         super().activate()
         try:
             self._register_weather(self.weather)
-            self._register_weather(self.weather.forecast)
+
+            if isinstance(self.weather, WeatherProvider):
+                self._register_weather(self.weather.forecast)
 
         except ComponentUnavailableError:
             pass
