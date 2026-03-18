@@ -342,7 +342,7 @@ class Evapotranspiration(Component):
         Returns
         -------
         pd.Series
-            Net irradiance Rn [W/m^2]
+            Net irradiance [W/m^2]
 
         Notes
         -----
@@ -408,7 +408,7 @@ class Evapotranspiration(Component):
         Returns
         -------
         pd.Series
-            Aerodynamic resistance ra [s/m]
+            Aerodynamic resistance [s/m]
 
         Notes
         -----
@@ -452,12 +452,12 @@ class Evapotranspiration(Component):
         lai : pd.Series
             Leaf Area Index [-]
         net_irradiance : pd.Series
-            Net irradiance Rn [W/m^2]
+            Net irradiance [W/m^2]
 
         Returns
         -------
         pd.Series
-            Soil heat flux G [W/m^2]
+            Soil heat flux [W/m^2]
 
         Notes
         -----
@@ -480,7 +480,7 @@ class Evapotranspiration(Component):
         lai: pd.Series,
     ) -> pd.Series:
         """
-        Compute bulk surface resistance (rs) [s/m] from Leaf Area Index.
+        Compute bulk surface resistance [s/m] from Leaf Area Index.
 
         Parameters
         ----------
@@ -490,7 +490,7 @@ class Evapotranspiration(Component):
         Returns
         -------
         pd.Series
-            Surface resistance rs [s/m]
+            Surface resistance [s/m]
 
         Notes
         -----
@@ -595,22 +595,22 @@ class Evapotranspiration(Component):
         aerodynamic_term : pd.Series
             Aerodynamic component [(kPa·J)/(K·m²·s)]
         vaporization_heat : pd.Series
-            Latent heat of vaporization λ [J/kg]
+            Latent heat of vaporization [J/kg]
         svp_slope : pd.Series
-            Slope of saturation vapor pressure curve Δ [kPa/K]
+            Slope of saturation vapor pressure [kPa/K]
         surface_resistance : pd.Series
-            Surface (stomatal) resistance rs [s/m]
+            Surface (stomatal) resistance [s/m]
         aerodynamic_resistance : pd.Series
-            Aerodynamic resistance ra [s/m]
+            Aerodynamic resistance [s/m]
 
         Returns
         -------
         pd.Series
-            Evapotranspiration ET [kg/m²/s ≈ mm/s]
+            Evapotranspiration [kg/m²/s ≈ mm/s]
 
         Notes
         -----
-        - Psychrometric constant γ is assumed 0.067 kPa/K.
+        - Psychrometric constant is assumed 0.067 kPa/K.
         - Follows FAO-56 Penman-Monteith formulation.
         - Numerator and denominator units are consistent with SI.
         """
