@@ -10,6 +10,7 @@ from . import soil  # noqa: F401
 from .soil import (  # noqa: F401
     SoilModel,
     SoilMoisture,
+    Evapotranspiration
 )
 
 from . import irrigation  # noqa: F401

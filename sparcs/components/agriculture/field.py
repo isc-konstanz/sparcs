@@ -17,10 +17,11 @@ from lories.data import ChannelState
 from lories.typing import Configurations
 from sparcs.components.agriculture.irrigation import Irrigation
 from sparcs.components.agriculture.soil import SoilMoisture
+from sparcs.components.agriculture.soil import Evapotranspiration
 
 
 class AgriculturalField(Component):
-    INCLUDES = [SoilMoisture.TYPE, Irrigation.TYPE]
+    INCLUDES = [SoilMoisture.TYPE, Irrigation.TYPE, Evapotranspiration.TYPE]
 
     WATER_SUPPLY_MEAN = Constant(float, "water_supply_mean", "Water Supply Coverage", "%")
 

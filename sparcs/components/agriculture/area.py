@@ -16,12 +16,13 @@ from lories.data import ChannelState
 from lories.typing import Configurations
 from sparcs.components.agriculture.field import AgriculturalField
 from sparcs.components.storage.water import WaterStorage
+from sparcs.components.agriculture.soil import Evapotranspiration
 
 
 # noinspection SpellCheckingInspection
 @register_component_type("agri", "agriculture")
 class AgriculturalArea(Component):
-    INCLUDES = [WaterStorage.TYPE, *AgriculturalField.INCLUDES]
+    INCLUDES = [WaterStorage.TYPE, Evapotranspiration.TYPE, *AgriculturalField.INCLUDES]
 
     water_storage: Optional[WaterStorage] = None
 
@@ -51,6 +52,16 @@ class AgriculturalArea(Component):
         self.water_storage = water_storage
 
         self.data.add(AgriculturalField.WATER_SUPPLY_MEAN, aggregate="mean", logger={"enabled": False})
+
+        self.components.load_from_type(
+            Evapotranspiration,
+            configs,
+            "evapotranspiration",
+            key="evapotranspiration",
+            name=f"{self.name} Evapotranspiration",
+            includes=Evapotranspiration.INCLUDES,
+            defaults=defaults,
+        )
 
     # noinspection SpellCheckingInspection
     def activate(self) -> None:
