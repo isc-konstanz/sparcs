@@ -21,7 +21,7 @@ class Evapotranspiration(Component):
 
     # Inputs # TODO: Move these constants to weather
     # TEMP_AIR = Constant(float, "temp_air", "Air Temperature", "°C")
-    # TEMP_GROUND = Constant(float, "temp_ground", "Ground Temperature", "°C")
+    TEMP_GROUND = Constant(float, "temp_ground", "Ground Temperature", "°C")
     # HUM_REL = Constant(float, "humidity_relative", "Relative Air Humidity", "%")
     # GHI = Constant(float, "ghi", "Global Horizontal Irradiance", "W/m^2")
     # WIND_SPEED = Constant(float, "wind_speed", "Wind Speed", "m/s")
@@ -33,7 +33,7 @@ class Evapotranspiration(Component):
 
     REQUIRED = [
         Weather.TEMP_AIR,
-        Weather.TEMP_GROUND,
+        TEMP_GROUND,
         Weather.HUMIDITY_REL,
         Weather.GHI,
         Weather.WIND_SPEED,
@@ -59,38 +59,7 @@ class Evapotranspiration(Component):
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
-        self.__test()
 
-    def __test(self):
-
-        path = "C:\\Users\\jb\\My_Nextcloud\\ISC_Share\\Software\\Repos_ISC\\earthworm\\data\\thies_2022.h5"
-        data = pd.read_hdf(path, key="data_thies_2022")
-        if type(data) is not pd.DataFrame:
-            raise ValueError("Data loaded from HDF5 is not a DataFrame.")
-        print(data[:10].to_string())
-
-        data["wind_speed"] = data["wind_speed"] / 3.6
-        data["lai"] = 3.0
-        data["roughness"] = 0.002
-        data["ndvi"] = 0.25
-        data["plant_height"] = 0.1
-
-        # rename cloud_cover_pct to csi
-        data[Evapotranspiration.CSI] = data[Weather.CLOUD_COVER].copy() / 100
-
-        data["evapotranspiration"] = self.evapotranspiration(data) * 3600
-
-        # Show yearly cumulative results
-        summary = data["evapotranspiration"].sum()  # [mm]
-        print("\n Yearly Evaporation and Evapotranspiration Sum (mm) for " + str(len(data.index)) + " timestamps \n",
-              summary)
-
-        # Show monthly cumulative results
-        monthly_evapotranspiration = data[["evapotranspiration"]].resample("ME").sum()
-        monthly_evapotranspiration["evapotranspiration cumulated"] = monthly_evapotranspiration.cumsum()
-        monthly_evapotranspiration.index = pd.DatetimeIndex(monthly_evapotranspiration.index).to_period('M')
-        print("\n Monthly Cumulative Evapotranspiration Sum (mm) \n", monthly_evapotranspiration)
-        pass
 
     def evapotranspiration(
         self,
@@ -144,7 +113,7 @@ class Evapotranspiration(Component):
             ghi=df[Weather.GHI],
             gvp=df[Evapotranspiration.GVP],
             temp_air=df[Weather.TEMP_AIR],
-            temp_gnd=df[Weather.TEMP_GROUND],
+            temp_gnd=df[Evapotranspiration.TEMP_GROUND],
             ndvi=df[Evapotranspiration.NDVI],
             csi=df[Evapotranspiration.CSI],
         )
