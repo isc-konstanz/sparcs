@@ -6,11 +6,10 @@ sparcs.components
 
 """
 
-
 from . import weather  # noqa: F401
 
-from . import meter
-from .meter import Meter
+from . import meter  # noqa: F401
+from .meter import Meter  # noqa: F401
 
 from . import storage  # noqa: F401
 from .storage import (  # noqa: F401

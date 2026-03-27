@@ -6,8 +6,7 @@ sparcs.components.vehicle.evse
 
 """
 
-from lories.components import Component, register_component_type
-from lories.connectors.opcua import OpcUaConnector
+from lories.components import Component
 from lories.core import Constant
 from lories.typing import Configurations
 

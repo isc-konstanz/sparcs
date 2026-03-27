@@ -6,8 +6,8 @@ sparcs.components.solar.inverter
 
 """
 
-from lories.components import Component
-from lories.core import Constant
+# from lories.components import Component
+# from lories.core import Constant
 from sparcs.components import Meter
 
 

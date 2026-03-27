@@ -6,4 +6,4 @@ sparcs.components.vehicle.mahle
 
 """
 
-from . import charge_big
+from . import charge_big  # noqa: F401

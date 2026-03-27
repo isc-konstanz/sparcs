@@ -33,21 +33,16 @@ class ChargeBig(Meter):
             "connector",
             defaults={
                 "settings": "ns=1",
-            }
+            },
         )
-        connector = OpcUaConnector(
-            key="opcua",
-            name=f"{self.name} OPC UA",
-            context=self,
-            configs=connector_configs
-        )
+        connector = OpcUaConnector(key="opcua", name=f"{self.name} OPC UA", context=self, configs=connector_configs)
         connector.configure(connector_configs)
         self.connectors.add(connector)
 
         def add_channel(constant: Constant, address: str, aggregate: str = "mean", **custom) -> None:
             channel = constant.to_dict()
-            #channel["name"] = f"{self.name}_{channel['name']}"
-            #channel["key"] = f"{self.key}_{channel['key']}"
+            # channel["name"] = f"{self.name}_{channel['name']}"
+            # channel["key"] = f"{self.key}_{channel['key']}"
             channel["connector"] = connector.id
             channel["address"] = address
             channel["aggregate"] = aggregate
@@ -105,8 +100,8 @@ class ChargeBigStation(EVSE):
         self,
         context: ContextArgument,
         configs: Configurations,
-        station_index: int,     # table column
-        station_id: int,        # physical id
+        station_index: int,  # table column
+        station_id: int,  # physical id
         **kwargs,
     ) -> None:
         super().__init__(context=context, configs=configs, **kwargs)
@@ -126,5 +121,3 @@ class ChargeBigStation(EVSE):
 
         add_channel(ChargeBigStation.STATE, f"Ladepunkt_{self.station_id}_Status")
         add_channel(ChargeBigStation.LIMIT, f"Ladepunkt_{self.station_id}_Grenzwert")
-
-
