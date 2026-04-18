@@ -8,43 +8,39 @@ sparcs.components.agriculture.soil.evapotranspiration
 
 from __future__ import annotations
 
-
 import numpy as np
 import pandas as pd
-
-from lories import Component, Constant, Configurations
+from lories import Component, Configurations, Constant
 from lories.components.weather import Weather
 
 
 class Evapotranspiration(Component):
     TYPE: str = "evapotranspiration"
 
-    # Inputs # TODO: Move these constants to weather
-    # TEMP_AIR = Constant(float, "temp_air", "Air Temperature", "°C")
+    # Required input channels
     TEMP_GROUND = Constant(float, "temp_ground", "Ground Temperature", "°C")
-    # HUM_REL = Constant(float, "humidity_relative", "Relative Air Humidity", "%")
-    # GHI = Constant(float, "ghi", "Global Horizontal Irradiance", "W/m^2")
-    # WIND_SPEED = Constant(float, "wind_speed", "Wind Speed", "m/s")
     LAI = Constant(float, "lai", "Leaf Area Index", "m^2/m^2")
     ROUGHNESS = Constant(float, "roughness", "Roughness", "-")
     PLANT_HEIGHT = Constant(float, "plant_height", "Plant Height", "m")
     NDVI = Constant(float, "ndvi", "Normalized Difference Vegetation Index", "-")
-    CSI = Constant(float, "csi", "Clear Sky Index", "-")
 
-    REQUIRED = [
-        Weather.TEMP_AIR,
+    REQUIRED_CHANNELS = [
         TEMP_GROUND,
-        Weather.HUMIDITY_REL,
-        Weather.GHI,
-        Weather.WIND_SPEED,
         LAI,
         ROUGHNESS,
         PLANT_HEIGHT,
         NDVI,
-        CSI,
     ]
 
-    # Calculated
+    REQUIRED_WEATHER_CHANNELS = [
+        Weather.TEMP_AIR,
+        Weather.HUMIDITY_REL,
+        Weather.GHI,
+        Weather.WIND_SPEED,
+        Weather.CLEAR_SKY_INDEX,
+    ]
+
+    # Output channels
     SVP = Constant(float, "sat_vapor_pressure", "Saturation Vapor Pressure", "kPa")
     GVP = Constant(float, "ground_vapor_pressure", "Vapor Pressure on the Ground Surface", "kPa")
     VAP_HEAT = Constant(float, "vaporization_heat", "Latent Heat of Vaporization", "J/kg")
@@ -57,11 +53,28 @@ class Evapotranspiration(Component):
     AER_TERM = Constant(float, "aerodynamic_term", "Aerodynamic Term", "(kPa*J)/(m^2*K*s)")
     EVAPOTRANSPIRATION = Constant(float, "evapotranspiration", "Evapotranspiration", "kg/(m^2*s)")
 
+    CHANNELS = [
+        SVP,
+        GVP,
+        VAP_HEAT,
+        SVP_SLOPE,
+        NET_IRR,
+        AIR_RES,
+        SOIL_HEAT_FLOW,
+        SURFACE_RES,
+        RAD_TERM,
+        AER_TERM,
+        EVAPOTRANSPIRATION,
+    ]
+
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
 
+        self.lai_type = configs.get("lai_type", "grass")
+        if self.lai_type not in ["fao", "grass", "apple"]:
+            raise NotImplementedError(f"Unsupported lai_type '{self.lai_type}'. Must be one of: fao, grass, apple")
 
-    def evapotranspiration(
+    def evaluate(
         self,
         df: pd.DataFrame,
     ) -> pd.Series | pd.DataFrame:
@@ -85,14 +98,24 @@ class Evapotranspiration(Component):
             If one or more required input columns are missing.
         """
 
-        missing_cols = [col.key for col in self.REQUIRED if col.key not in df.columns]
-        if missing_cols:
-            raise ValueError(f"Missing required columns for evapotranspiration calculation: {missing_cols}")
+        lai_values = {
+            "fao": [3.0] * 12,
+            "grass": [0.2, 0.2, 0.2, 0.3, 0.6, 0.8, 0.9, 1.2, 1.4, 1.2, 0.8, 0.6],
+            "apple": [0.2, 0.4, 1.2, 2.5, 3.0, 3.2, 3.0, 2.8, 2.0, 1.0, 0.5, 0.2],
+        }
 
-        df[Evapotranspiration.SVP] = self._sat_vapor_pressure(
-            temperature=df[Weather.TEMP_AIR],
-            only_pos=True
-        )
+        df[self.TEMP_GROUND] = 10
+        df[self.LAI] = pd.array(lai_values[self.lai_type])[df.index.month - 1].astype(float)
+        df[self.ROUGHNESS] = 0.002
+        df[self.PLANT_HEIGHT] = 0.1
+        df[self.NDVI] = 0.25
+
+        all_required = self.REQUIRED_CHANNELS + self.REQUIRED_WEATHER_CHANNELS
+        missing_cols = [col.key for col in all_required if col.key not in df.columns or df[col.key].isna().any()]
+        if missing_cols:
+            raise ValueError(f"Missing or NaN required columns for evapotranspiration: {missing_cols}")
+
+        df[Evapotranspiration.SVP] = self._sat_vapor_pressure(temperature=df[Weather.TEMP_AIR], only_pos=True)
 
         df[Evapotranspiration.GVP] = self._ground_vapor_pressure(
             hum_rel=df[Weather.HUMIDITY_REL],
@@ -115,7 +138,7 @@ class Evapotranspiration(Component):
             temp_air=df[Weather.TEMP_AIR],
             temp_gnd=df[Evapotranspiration.TEMP_GROUND],
             ndvi=df[Evapotranspiration.NDVI],
-            csi=df[Evapotranspiration.CSI],
+            csi=df[Weather.CLEAR_SKY_INDEX],
         )
 
         df[Evapotranspiration.AIR_RES] = self._aerodynamic_resistance(
@@ -126,8 +149,7 @@ class Evapotranspiration(Component):
         )
 
         df[Evapotranspiration.SOIL_HEAT_FLOW] = self._soil_heat_flow(
-            lai=df[Evapotranspiration.LAI],
-            net_irradiance=df[Evapotranspiration.NET_IRR]
+            lai=df[Evapotranspiration.LAI], net_irradiance=df[Evapotranspiration.NET_IRR]
         )
 
         df[Evapotranspiration.SURFACE_RES] = self._resistance_surface(
@@ -155,9 +177,7 @@ class Evapotranspiration(Component):
             aerodynamic_resistance=df[Evapotranspiration.AIR_RES],
         )
 
-        print(df[:50].to_string())
-
-        return df[Evapotranspiration.EVAPOTRANSPIRATION]
+        return df[Evapotranspiration.CHANNELS]
 
     # noinspection PyPep8Naming
     @staticmethod
@@ -188,7 +208,7 @@ class Evapotranspiration(Component):
         """
 
         # --- Empirical constant ---
-        SVP_AT_0C = 0.61078          # Saturation vapor pressure at 0 °C [kPa]
+        SVP_AT_0C = 0.61078  # Saturation vapor pressure at 0 °C [kPa]
         B_POS, C_POS = 17.270, 237.3  # Positive-temperature constants [-], [°C]
         B_NEG, C_NEG = 21.875, 265.5  # Negative-temperature constants [-], [°C]
         ATAN_WIDTH = 10.0
@@ -258,8 +278,8 @@ class Evapotranspiration(Component):
         """
 
         # --- Empirical constant ---
-        LATENT_HEAT_AT_0C = 2501.0        # [kJ/kg]
-        TEMPERATURE_COEFFICIENT = 2.36    # [kJ/(kg °C)]
+        LATENT_HEAT_AT_0C = 2501.0  # [kJ/kg]
+        TEMPERATURE_COEFFICIENT = 2.36  # [kJ/(kg °C)]
 
         # --- Linear temperature dependence ---
         lambda_kj = LATENT_HEAT_AT_0C - TEMPERATURE_COEFFICIENT * temperature
@@ -353,11 +373,11 @@ class Evapotranspiration(Component):
         """
 
         # --- Empirical constant ---
-        STEFAN_BOLTZMANN = 5.67e-8   # [W m^-2 K^-4]
+        STEFAN_BOLTZMANN = 5.67e-8  # [W m^-2 K^-4]
         SURFACE_EMISSIVITY_BASE = 0.9585
         NDVI_EMISSIVITY_FACTOR = 0.0357
-        CLOUD_TYPE_FACTOR = 0.22     # empirical (e.g. stratocumulus)
-        ALBEDO = 0.2                 # typical for grass
+        CLOUD_TYPE_FACTOR = 0.22  # empirical (e.g. stratocumulus)
+        ALBEDO = 0.2  # typical for grass
 
         # --- Unit conversions ---
         temp_air_k = _celsius_to_kelvin(temp_air)
@@ -420,9 +440,9 @@ class Evapotranspiration(Component):
         VON_KARMAN = 0.41  # [-]
 
         # --- Surface geometry ---
-        displacement_height = (2.0 / 3.0) * plant_height        # [m]
-        roughness_momentum = roughness * plant_height           # [m]
-        roughness_heat = 0.1 * roughness_momentum               # [m]
+        displacement_height = (2.0 / 3.0) * plant_height  # [m]
+        roughness_momentum = roughness * plant_height  # [m]
+        roughness_heat = 0.1 * roughness_momentum  # [m]
 
         # --- Effective measurement height ---
         z_eff = measure_height - displacement_height
@@ -571,7 +591,7 @@ class Evapotranspiration(Component):
 
         # --- Empirical constant ---
         HEAT_CAPACITY_AIR = 1010.0  # Heat capacity of air [J/(kg*K)]
-        AIR_DENSITY = 1.2           # Air density [kg/m^3]
+        AIR_DENSITY = 1.2  # Air density [kg/m^3]
 
         return AIR_DENSITY * HEAT_CAPACITY_AIR * (svp - gvp) / aerodynamic_resistance
 

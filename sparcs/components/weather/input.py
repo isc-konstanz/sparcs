@@ -54,16 +54,20 @@ def validate_meteo_inputs(weather: pd.DataFrame, location: Location) -> pd.DataF
         insert_column(Weather.PRESSURE_SEA, pressure)
 
     solar_position = location.get_solarposition(weather.index, pressure=weather[Weather.PRESSURE_SEA])
+    cs = location.get_clearsky(weather.index, model="ineichen", solar_position=solar_position)
 
     if not assert_columns(Weather.GHI, Weather.DHI, Weather.DNI):
+        if assert_columns(Weather.GHI):
+            insert_column(Weather.CLEAR_SKY_INDEX, clear_sky_index_from_ghi(weather[Weather.GHI], cs))
         if not assert_columns(Weather.GHI):
             if not assert_columns(Weather.CLOUD_COVER):
                 raise ResourceError(
                     f"Unable to estimate missing '{Weather.GHI}' data with "
                     f"missing or invalid column: {Weather.CLOUD_COVER}"
                 )
-            ghi = global_irradiance_from_cloud_cover(location, weather[Weather.CLOUD_COVER], solar_position)
+            ghi = global_irradiance_from_cloud_cover(weather[Weather.CLOUD_COVER], cs)
             insert_column(Weather.GHI, ghi)
+            insert_column(Weather.CLEAR_SKY_INDEX, clear_sky_index_from_ghi(ghi, cs))
 
         if not assert_columns(Weather.DHI, Weather.DNI):
             if not assert_columns(Weather.DHI):
@@ -250,37 +254,52 @@ def direct_diffuse_from_global_irradiance(solar_position, ghi, **kwargs):
     )
 
 
-# noinspection PyUnresolvedReferences, PyShadowingNames
-def global_irradiance_from_cloud_cover(location, cloud_cover, solar_position=None, method="linear", **kwargs):
+def clear_sky_index_from_ghi(ghi: pd.Series, cs: pd.DataFrame) -> pd.Series:
     """
-    Estimates irradiance from cloud cover in the following steps:
-    1. Determine clear sky GHI using Ineichen model and
-       climatological turbidity.
-    2. Estimate cloudy sky GHI using a function of cloud_cover
+    Calculate the Clear Sky Index (CSI) from GHI and clear-sky irradiance.
 
     Parameters
     ----------
-    location : Location
-        Location to estimate irradiance for.
+    ghi : pd.Series
+        Global horizontal irradiance.
+    cs : pd.DataFrame
+        Pre-calculated clear-sky irradiance (must contain a 'ghi' column).
+
+    Returns
+    -------
+    pd.Series
+        Clear Sky Index clipped to [0, 2].
+    """
+    cs_ghi = cs["ghi"].replace(0, np.nan)
+    csi = ghi / cs_ghi
+    csi = csi.replace([np.inf, -np.inf], np.nan)
+    return csi.clip(lower=0, upper=2)
+
+
+# noinspection PyUnresolvedReferences, PyShadowingNames
+def global_irradiance_from_cloud_cover(cloud_cover, cs, method="linear", **kwargs):
+    """
+    Estimates irradiance from cloud cover using pre-calculated clear-sky irradiance.
+
+    This simplified version assumes solar position and clear-sky irradiance are
+    pre-calculated by the caller, which is the case in our optimized workflow.
+
+    Parameters
+    ----------
     cloud_cover : Series
         Cloud cover in %.
-    solar_position : DataFrame
-        Solar positions in decimal degrees
+    cs : DataFrame
+        Pre-calculated clear-sky irradiance (must contain 'ghi' column).
     method : str, default 'linear'
-        Method for converting cloud cover to GHI.
-        'linear' is currently the only option.
+        Method for converting cloud cover to GHI. 'linear' is currently the only option.
     **kwargs
-        Passed to the method that does the conversion
+        Passed to the cloud cover to GHI conversion method.
 
     Returns
     -------
     ghi : Series
         The modeled global horizontal irradiance.
     """
-    if solar_position is None:
-        solar_position = location.get_solarposition(cloud_cover.index)
-    cs = location.get_clearsky(cloud_cover.index, model="ineichen", solar_position=solar_position)
-
     method = method.lower()
     if method == "linear":
         ghi = _cloud_cover_to_ghi_linear(cloud_cover, cs["ghi"], **kwargs)

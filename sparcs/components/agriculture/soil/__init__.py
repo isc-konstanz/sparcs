@@ -14,6 +14,3 @@ from .models import (  # noqa: F401
 
 from . import moisture  # noqa: F401
 from .moisture import SoilMoisture  # noqa: F401
-
-from . import evapotranspiration
-from .evapotranspiration import Evapotranspiration
