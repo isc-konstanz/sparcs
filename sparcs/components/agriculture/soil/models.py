@@ -19,16 +19,16 @@ class SoilModel(ABC):
     TYPE: str = "model"
 
     @abstractmethod
-    def water_tension(self, water_content: float | pd.Series) -> float | pd.Series:
+    def water_tension_from_content(self, water_content: float | pd.Series) -> float | pd.Series:
         """
         Calculate the soil water tension in hPa
         """
         ...
 
     @abstractmethod
-    def water_content(self, water_tension: float | pd.Series) -> float | pd.Series:
+    def water_content_from_tention(self, water_tension: float | pd.Series) -> float | pd.Series:
         """
-        Calculate the soil water content in cm^3^cm^−3^
+        Calculate the soil water content in cm^3^cm^-3^
         """
         ...
 
@@ -61,13 +61,13 @@ class Genuchten(SoilModel):
     van Genuchten, M. Th. (1970):
     A Closed-form Equation for Predicting the Hydraulic Conductivity of Unsaturated Soil
 
-    θ(ψ) = θ_r + ((θ_s − θ_r)/((1 + (α * abs(ψ)) ** n) ** (1−1/n))
+    θ(ψ) = θ_r + ((θ_s - θ_r)/((1 + (alpha * abs(ψ)) ** n) ** (1-1/n))
 
-    θ(ψ) is the water retention curve expressing the soil moisture ([cm^3^cm^−3^], or vol. %)
+    θ(ψ) is the water retention curve expressing the soil moisture ([cm^3^cm^-3^], or vol. %)
     ψ is the suction pressure (cm of water)
-    θ_s is the saturated water content [cm^3^cm^−3^]
-    θ_r is the residual water content [cm^3^cm^−3^]
-    α is related to the inverse of the air entry suction, α > 0 [cm^−1^]
+    θ_s is the saturated water content [cm^3^cm^-3^]
+    θ_r is the residual water content [cm^3^cm^-3^]
+    alpha is related to the inverse of the air entry suction, alpha > 0 [cm^-1^]
     n is a measure of the pore-size distribution, n > 1 (dimensionless)
 
     See also
@@ -99,11 +99,11 @@ class Genuchten(SoilModel):
         Parameters
         ----------
         theta_r: float
-            Residual water content in cm^3^cm^−3^ or vol. %
+            Residual water content in cm^3^cm^-3^ or vol. %
         theta_s: float
-            Saturated water content in cm^3^cm^−3^ or vol. %
+            Saturated water content in cm^3^cm^-3^ or vol. %
         alpha: float
-            Inverse of the air entry suction, with α > 0, in cm^−1^
+            Inverse of the air entry suction, with alpha > 0, in cm^-1^
         n: float
             Measure of the pore-size distribution, n > 1
         k_s: float
@@ -117,7 +117,7 @@ class Genuchten(SoilModel):
         self.k_s = k_s
         self.l = l
 
-    def water_tension(self, water_content: float | pd.Series) -> float | pd.Series:
+    def water_tension_from_content(self, water_content: float | pd.Series) -> float | pd.Series:
         water_column = self._c(water_content)
         return _water_column_to_hectopascals(water_column)
 
@@ -130,7 +130,7 @@ class Genuchten(SoilModel):
         c = np.sign(c) * np.abs(c) ** (1 / self.n) / self.alpha
         return c
 
-    def water_content(self, water_tension: float | pd.Series) -> float | pd.Series:
+    def water_content_from_tention(self, water_tension: float | pd.Series) -> float | pd.Series:
         water_column = _hectopascal_to_water_column(water_tension)
         return self._theta(water_column)
 

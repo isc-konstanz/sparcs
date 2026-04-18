@@ -67,8 +67,8 @@ class SoilMoisture(Component):
         wilting_point = configs.get("wilting_point", default=SoilMoisture.wilting_point)
         field_capacity = configs.get("field_capacity", default=SoilMoisture.field_capacity)
 
-        self.wilting_point = self.model.water_content(self.model.pf_to_pressure(wilting_point))
-        self.field_capacity = self.model.water_content(self.model.pf_to_pressure(field_capacity))
+        self.wilting_point = self.model.water_content_from_tention(self.model.pf_to_pressure(wilting_point))
+        self.field_capacity = self.model.water_content_from_tention(self.model.pf_to_pressure(field_capacity))
         self.water_capacity_available = self.field_capacity - self.wilting_point
 
     # noinspection SpellCheckingInspection
@@ -85,7 +85,7 @@ class SoilMoisture(Component):
             water_content = data.dropna(axis="columns").mean(axis="columns") / 100
             if len(water_content) == 1:
                 water_content = water_content.iloc[0]
-            water_tension = self.model.water_tension(water_content)
+            water_tension = self.model.water_tension_from_content(water_content)
             self.data[SoilMoisture.WATER_TENSION].set(timestamp, water_tension)
         else:
             self.data[SoilMoisture.WATER_TENSION].state = ChannelState.NOT_AVAILABLE
@@ -96,7 +96,7 @@ class SoilMoisture(Component):
             water_tension = data.dropna(axis="columns").mean(axis="columns")
             if len(water_tension) == 1:
                 water_tension = water_tension.iloc[0]
-            water_content = self.model.water_content(water_tension)
+            water_content = self.model.water_content_from_tention(water_tension)
             water_supply = (water_content - self.wilting_point) / self.water_capacity_available
             if water_supply < 0:
                 water_supply = 0
