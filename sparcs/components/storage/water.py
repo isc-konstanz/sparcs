@@ -16,8 +16,8 @@ from lories.typing import Configurations
 class WaterStorage(Component):
     TYPE = "water_storage"
 
-    LEVEL = Constant(float, "level", "Water Storage Level", "%")
-    LITERS = Constant(float, "liters", "Water Storage Liters", "l")
+    LEVEL = Constant(float, "level", "Water Storage Level", "%", context="water")
+    LITERS = Constant(float, "liters", "Water Storage Liters", "l", context="water")
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)

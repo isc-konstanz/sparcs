@@ -41,6 +41,8 @@ dynamic = ["version"]
 dependencies = [
     "lories >= 0.15",
     "pvlib >= 0.10.1",
+    "solarfactors",
+    "bifacial-radiance",
     "scipy",
 ]
 
