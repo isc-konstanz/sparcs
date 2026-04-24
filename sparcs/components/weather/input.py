@@ -97,23 +97,25 @@ def validate_meteo_inputs(weather: pd.DataFrame, location: Location) -> pd.DataF
                 insert_column(Weather.DNI, dni)
 
     if not assert_columns(Weather.HUMIDITY_REL):
-        if not assert_columns(Weather.TEMP_AIR, Weather.TEMP_DEW_POINT):
-            raise ResourceError(
-                f"Unable to estimate missing '{Weather.HUMIDITY_REL}' data with "
-                f"missing or invalid columns: {', '.join([Weather.TEMP_AIR, Weather.TEMP_DEW_POINT])}"
-            )
-        else:
+        # if not assert_columns(Weather.TEMP_AIR, Weather.TEMP_DEW_POINT):
+        #     raise ResourceError(
+        #         f"Unable to estimate missing '{Weather.HUMIDITY_REL}' data with "
+        #         f"missing or invalid columns: {', '.join([Weather.TEMP_AIR, Weather.TEMP_DEW_POINT])}"
+        #     )
+        # else:
+        if assert_columns(Weather.TEMP_AIR, Weather.TEMP_DEW_POINT):
             insert_column(
                 Weather.HUMIDITY_REL,
                 relative_humidity_from_dewpoint(weather[Weather.TEMP_AIR], weather[Weather.TEMP_DEW_POINT]),
             )
     if not assert_columns(Weather.PRECIPITABLE_WATER):
-        if not assert_columns(Weather.TEMP_AIR, Weather.HUMIDITY_REL):
-            raise ResourceError(
-                f"Unable to estimate missing '{Weather.PRECIPITABLE_WATER}' data with "
-                f"missing or invalid columns: {', '.join([Weather.TEMP_AIR, Weather.HUMIDITY_REL])}"
-            )
-        else:
+        # if not assert_columns(Weather.TEMP_AIR, Weather.HUMIDITY_REL):
+        #     raise ResourceError(
+        #         f"Unable to estimate missing '{Weather.PRECIPITABLE_WATER}' data with "
+        #         f"missing or invalid columns: {', '.join([Weather.TEMP_AIR, Weather.HUMIDITY_REL])}"
+        #     )
+        # else:
+        if assert_columns(Weather.TEMP_AIR, Weather.HUMIDITY_REL):
             insert_column(
                 Weather.PRECIPITABLE_WATER,
                 precipitable_water_from_relative_humidity(weather[Weather.TEMP_AIR], weather[Weather.HUMIDITY_REL]),

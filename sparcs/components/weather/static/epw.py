@@ -24,16 +24,16 @@ from sparcs.components.weather.static import WeatherFile
 
 @register_weather_type("epw")
 class EPWWeather(WeatherFile):
-    year: int
-    file: str
-    path: str
+    _year: int
+    _file: str
+    _path: str
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
         epw = configs.get_member("epw", defaults={})
-        self.year = epw.get_int("year", default=None)
-        self.file = epw.get("file", default="weather.epw")
-        self.path = self.file if os.path.isabs(self.file) else os.path.join(configs.dirs.data, self.file)
+        self._year = epw.get_int("year", default=None)
+        self._file = epw.get("file", default="weather.epw")
+        self._path = self._file if os.path.isabs(self._file) else os.path.join(configs.dirs.data, self._file)
 
     # noinspection PyPackageRequirements
     def _download(self, location: Location) -> None:
@@ -72,18 +72,18 @@ class EPWWeather(WeatherFile):
 
         response = requests.get(url, verify=False, headers=headers)
         if response.ok:
-            with open(self.path, "wb") as file:
+            with open(self._path, "wb") as file:
                 file.write(response.text.encode("ascii", "ignore"))
         else:
             self._logger.warning("Connection error status code: %s" % response.status_code)
             response.raise_for_status()
 
     def _read_from_file(self) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-        if not os.path.isfile(self.path):
-            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        if not os.path.isfile(self._path):
+            os.makedirs(os.path.dirname(self._path), exist_ok=True)
             self._download(self.location)
 
-        return read_epw(filename=self.path, coerce_year=self.year)
+        return read_epw(filename=self._path, coerce_year=self._year)
 
     # noinspection PyMethodMayBeStatic
     def _localize_from_meta(self, meta: Dict[str, Any]) -> Location:
