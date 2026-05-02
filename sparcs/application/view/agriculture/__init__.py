@@ -12,6 +12,9 @@ from .soil import SoilModelPage  # noqa: F401
 from . import irrigation  # noqa: F401
 from .irrigation import IrrigationPage  # noqa: F401
 
+from . import field_simulation  # noqa: F401
+from .field_simulation import FieldSimulationPage  # noqa: F401
+
 from . import field  # noqa: F401
 from .field import AgriculturalFieldPage  # noqa: F401
 
