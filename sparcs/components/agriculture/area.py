@@ -8,12 +8,12 @@ sparcs.components.agriculture.area
 
 from __future__ import annotations
 
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 import pandas as pd
 from lories.components import Component, register_component_type
 from lories.data import ChannelState
-from lories.typing import Configurations
+from lories.typing import Configurations, Timestamp
 from sparcs.components.agriculture.field import AgriculturalField
 from sparcs.components.storage.water import WaterStorage
 
@@ -72,3 +72,20 @@ class AgriculturalArea(Component):
 
     def has_water_storage(self) -> bool:
         return self.water_storage is not None and self.water_storage.is_enabled()
+
+    def simulate(
+        self,
+        weather: pd.DataFrame,
+        start: Timestamp,
+        end: Timestamp,
+        prior: Optional[pd.DataFrame] = None,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        frames = []
+        for field in self.fields:
+            field_data = field.simulate(weather, start, end, prior=prior, **kwargs)
+            if not field_data.empty:
+                frames.append(field_data)
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, axis="columns")

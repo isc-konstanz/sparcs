@@ -8,29 +8,48 @@ sparcs.components.agriculture.evapotranspiration
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Iterable
+
 import numpy as np
 import pandas as pd
 from lories import Component, Configurations, Constant
 from lories.components.weather import Weather
 
 
+@dataclass
+class SegmentProperties:
+    """Per-segment vegetation + radiation state for one ET evaluation.
+
+    Carries the vegetation properties Penman-Monteith needs locally
+    (``lai``, ``plant_height``, ``ndvi``, ``roughness``) and the radiation
+    scaling that turns bulk GHI into the segment's local incoming shortwave
+    (``shade_factor`` ∈ [0, 1]; 0 = full PV shade, 1 = open sky).
+
+    ``face_length`` is the segment's top-boundary face length [m] in the soil
+    mesh, kept here so the ET component can publish face-length-weighted
+    means on its bulk channels without reaching back into the mesh.
+    """
+
+    name: str
+    lai: float
+    plant_height: float = 0.1
+    ndvi: float = 0.25
+    roughness: float = 0.002
+    shade_factor: float = 1.0
+    face_length: float = 0.0
+    is_canopy: bool = False
+
+
 class Evapotranspiration(Component):
     TYPE: str = "evapotranspiration"
 
-    # Required input channels
-    TEMP_GROUND = Constant(float, "temp_ground", "Ground Temperature", "°C")
-    LAI = Constant(float, "lai", "Leaf Area Index", "m^2/m^2")
-    ROUGHNESS = Constant(float, "roughness", "Roughness", "-")
-    PLANT_HEIGHT = Constant(float, "plant_height", "Plant Height", "m")
-    NDVI = Constant(float, "ndvi", "Normalized Difference Vegetation Index", "-")
-
-    REQUIRED_CHANNELS = [
-        TEMP_GROUND,
-        LAI,
-        ROUGHNESS,
-        PLANT_HEIGHT,
-        NDVI,
-    ]
+    # Penman-Monteith no longer needs any pre-computed inputs from the
+    # DataFrame: ``temp_ground`` is now derived per-segment inside the
+    # evaluation loop from ``T_air`` and the segment's shade-scaled GHI
+    # (see ``TEMP_GROUND_LIFT``). Vegetation state flows in via
+    # ``SegmentProperties``.
+    REQUIRED_INPUT_KEYS: tuple[str, ...] = ()
 
     REQUIRED_WEATHER_CHANNELS = [
         Weather.TEMP_AIR,
@@ -51,7 +70,7 @@ class Evapotranspiration(Component):
     SURFACE_RES = Constant(float, "resistance_surface", "Surface Resistance", "s/m")
     RAD_TERM = Constant(float, "radiation_term", "Radiation Term", "(kPa*W)/(K*m^2)")
     AER_TERM = Constant(float, "aerodynamic_term", "Aerodynamic Term", "(kPa*J)/(m^2*K*s)")
-    EVAPOTRANSPIRATION = Constant(float, "evapotranspiration", "Evapotranspiration", "kg/(m^2*s)")
+    EVAPOTRANSPIRATION = Constant(float, "evapotranspiration", "Evapotranspiration", "g/(m^2*s)")
 
     CHANNELS = [
         SVP,
@@ -70,114 +89,222 @@ class Evapotranspiration(Component):
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
 
-        self.lai_type = configs.get("lai_type", "grass")
-        if self.lai_type not in ["fao", "grass", "apple"]:
-            raise NotImplementedError(f"Unsupported lai_type '{self.lai_type}'. Must be one of: fao, grass, apple")
+        for c in self.CHANNELS:
+            self.data.add(c, aggregate="mean", logger={"enabled": False})
+
+        # Per-segment ET channels live on FieldSimulation (the parent owns
+        # the soil mesh, so segment-named channels are wired in one place).
+        # ``evaluate`` writes into them via ``self.context.segment_et_keys``.
+
+    # Beer-Lambert canopy extinction. Shared with the soil PDE, but lives
+    # here because the evap/transp split is part of the ET model.
+    BEER_K: float = 0.6
+
+    # Internal computation runs in kg/(m²·s) (what the soil PDE consumes
+    # via ``seg_et``). Channels publish in g/(m²·s) so the displayed
+    # values aren't 0.0e+00 in the UI.
+    _KG_TO_G: float = 1000.0
+
+    # Algebraic surface heating: T_gnd = T_air + LIFT · GHI · shade_factor.
+    # 0.012 K/(W/m²) lands an open-sky segment ~12 K above air at noon
+    # clear-sky (GHI≈1000) and a fully-shaded segment at T_air. Refine
+    # once a real surface energy balance couples to the soil PDE.
+    TEMP_GROUND_LIFT: float = 0.012
 
     def evaluate(
         self,
         df: pd.DataFrame,
-    ) -> pd.Series | pd.DataFrame:
+        segments: Iterable[SegmentProperties],
+    ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
         """
-        Compute evapotranspiration (ET) with the Penman-Monteith formulation.
+        Compute Penman-Monteith evapotranspiration for each soil-mesh top
+        segment and return both the bulk-augmented frame and the per-segment
+        decomposition.
 
         Parameters
         ----------
         df : pd.DataFrame
-            Input dataframe containing all required meteorological and vegetation
-            variables.
+            Weather frame. Must include the ``REQUIRED_WEATHER_CHANNELS``
+            columns. Per-segment ground temperature is derived from
+            ``Weather.TEMP_AIR`` and the shade-scaled GHI inside the loop.
+        segments : Iterable[SegmentProperties]
+            One entry per segment that should evaporate. The list also
+            drives the face-length-weighted means published on the bulk
+            output channels — pass a single representative segment when
+            no soil mesh is wired.
 
         Returns
         -------
-        pd.Series | pd.DataFrame
-            Evapotranspiration [kg/(m^2*s) ≈ mm/s].
+        (df, seg_et) : (pd.DataFrame, dict[str, pd.DataFrame])
+            ``df`` is augmented in place with the eleven bulk output
+            columns (face-length-weighted across segments for the
+            segment-dependent terms; weather-only terms are direct).
+            ``seg_et`` maps each segment name to a DataFrame indexed by
+            ``df.index`` with columns ``("et", "evap", "transp")`` in
+            kg/(m²·s); ``evap = et · exp(-k·LAI)`` and
+            ``transp = et · (1 - exp(-k·LAI))``.
 
         Raises
         ------
         ValueError
-            If one or more required input columns are missing.
+            If required weather/ground columns are missing or no segments
+            are provided.
         """
+        seg_list = list(segments)
+        if not seg_list:
+            raise ValueError("Evapotranspiration.evaluate requires at least one segment")
 
-        lai_values = {
-            "fao": [3.0] * 12,
-            "grass": [0.2, 0.2, 0.2, 0.3, 0.6, 0.8, 0.9, 1.2, 1.4, 1.2, 0.8, 0.6],
-            "apple": [0.2, 0.4, 1.2, 2.5, 3.0, 3.2, 3.0, 2.8, 2.0, 1.0, 0.5, 0.2],
-        }
-
-        df[self.TEMP_GROUND] = 10
-        df[self.LAI] = pd.array(lai_values[self.lai_type])[df.index.month - 1].astype(float)
-        df[self.ROUGHNESS] = 0.002
-        df[self.PLANT_HEIGHT] = 0.1
-        df[self.NDVI] = 0.25
-
-        all_required = self.REQUIRED_CHANNELS + self.REQUIRED_WEATHER_CHANNELS
-        missing_cols = [col.key for col in all_required if col.key not in df.columns or df[col.key].isna().any()]
+        required_keys = list(self.REQUIRED_INPUT_KEYS) + [c.key for c in self.REQUIRED_WEATHER_CHANNELS]
+        missing_cols = [k for k in required_keys if k not in df.columns or df[k].isna().any()]
         if missing_cols:
             raise ValueError(f"Missing or NaN required columns for evapotranspiration: {missing_cols}")
 
-        df[Evapotranspiration.SVP] = self._sat_vapor_pressure(temperature=df[Weather.TEMP_AIR], only_pos=True)
-
-        df[Evapotranspiration.GVP] = self._ground_vapor_pressure(
-            hum_rel=df[Weather.HUMIDITY_REL],
-            svp=df[Evapotranspiration.SVP],
+        # Weather-only terms — segment-independent, computed once.
+        svp = self._sat_vapor_pressure(temperature=df[Weather.TEMP_AIR], only_pos=True)
+        gvp = self._ground_vapor_pressure(hum_rel=df[Weather.HUMIDITY_REL], svp=svp)
+        vh = self._vaporization_heat(temperature=df[Weather.TEMP_AIR])
+        svp_slope = self._slope_sat_vapor_pressure(
+            temperature=df[Weather.TEMP_AIR], svp=svp, vh=vh
         )
 
-        df[Evapotranspiration.VAP_HEAT] = self._vaporization_heat(
-            temperature=df[Weather.TEMP_AIR],
-        )
+        # Per-segment Penman-Monteith. Vegetation properties and the local
+        # radiation scaling come from the segment; everything weather-only
+        # is reused as-is.
+        seg_et: dict[str, pd.DataFrame] = {}
+        per_seg_terms: dict[str, dict[Constant, pd.Series]] = {}
+        per_seg_temp_gnd: dict[str, pd.Series] = {}
+        ones = pd.Series(1.0, index=df.index)
+        ghi_pos = df[Weather.GHI].clip(lower=0.0)
+        for seg in seg_list:
+            shade = float(seg.shade_factor)
+            ghi_local = df[Weather.GHI] * shade
+            temp_gnd_local = df[Weather.TEMP_AIR] + self.TEMP_GROUND_LIFT * ghi_pos * shade
+            per_seg_temp_gnd[seg.name] = temp_gnd_local
+            net_irr = self._net_irradiance(
+                ghi=ghi_local,
+                gvp=gvp,
+                temp_air=df[Weather.TEMP_AIR],
+                temp_gnd=temp_gnd_local,
+                ndvi=ones * float(seg.ndvi),
+                csi=df[Weather.CLEAR_SKY_INDEX],
+            )
+            air_res = self._aerodynamic_resistance(
+                wind_speed=df[Weather.WIND_SPEED],
+                roughness=ones * float(seg.roughness),
+                plant_height=ones * float(seg.plant_height),
+                measure_height=2.0,
+            )
+            soil_heat = self._soil_heat_flow(
+                lai=ones * float(seg.lai), net_irradiance=net_irr
+            )
+            surf_res = self._resistance_surface(lai=ones * float(seg.lai))
+            rad_term = self._radiation_term(
+                svp_slope=svp_slope, net_irradiance=net_irr, soil_heat_flow=soil_heat
+            )
+            aer_term = self._aerodynamic_term(
+                svp=svp, gvp=gvp, aerodynamic_resistance=air_res
+            )
+            et = self._evapotranspiration(
+                radiation_term=rad_term,
+                aerodynamic_term=aer_term,
+                vaporization_heat=vh,
+                svp_slope=svp_slope,
+                surface_resistance=surf_res,
+                aerodynamic_resistance=air_res,
+            )
+            # Beer-Lambert evap/transp split. Only canopy segments transpire;
+            # bare-soil segments dump all their ET to the surface boundary
+            # (``evap = et``). Without this gate, every bare strip would
+            # silently feed water through the plant-cell sink in the soil PDE.
+            if seg.is_canopy:
+                evap_frac = float(np.exp(-self.BEER_K * float(seg.lai)))
+            else:
+                evap_frac = 1.0
+            seg_et[seg.name] = pd.DataFrame(
+                {
+                    "et": et,
+                    "evap": et * evap_frac,
+                    "transp": et * (1.0 - evap_frac),
+                }
+            )
+            per_seg_terms[seg.name] = {
+                Evapotranspiration.NET_IRR: net_irr,
+                Evapotranspiration.AIR_RES: air_res,
+                Evapotranspiration.SOIL_HEAT_FLOW: soil_heat,
+                Evapotranspiration.SURFACE_RES: surf_res,
+                Evapotranspiration.RAD_TERM: rad_term,
+                Evapotranspiration.AER_TERM: aer_term,
+                Evapotranspiration.EVAPOTRANSPIRATION: et,
+            }
 
-        df[Evapotranspiration.SVP_SLOPE] = self._slope_sat_vapor_pressure(
-            temperature=df[Weather.TEMP_AIR],
-            svp=df[Evapotranspiration.SVP],
-            vh=df[Evapotranspiration.VAP_HEAT],
-        )
+        # Bulk channel publishing: weather-only terms direct, segment-dependent
+        # terms as face-length-weighted means (or simple mean when no face
+        # lengths are supplied — single-segment fallback case).
+        df[Evapotranspiration.SVP] = svp
+        df[Evapotranspiration.GVP] = gvp
+        df[Evapotranspiration.VAP_HEAT] = vh
+        df[Evapotranspiration.SVP_SLOPE] = svp_slope
 
-        df[Evapotranspiration.NET_IRR] = self._net_irradiance(
-            ghi=df[Weather.GHI],
-            gvp=df[Evapotranspiration.GVP],
-            temp_air=df[Weather.TEMP_AIR],
-            temp_gnd=df[Evapotranspiration.TEMP_GROUND],
-            ndvi=df[Evapotranspiration.NDVI],
-            csi=df[Weather.CLEAR_SKY_INDEX],
-        )
+        weights = np.array([max(s.face_length, 0.0) for s in seg_list], dtype=float)
+        if weights.sum() <= 0:
+            weights = np.ones(len(seg_list), dtype=float)
+        weights /= weights.sum()
 
-        df[Evapotranspiration.AIR_RES] = self._aerodynamic_resistance(
-            wind_speed=df[Weather.WIND_SPEED],
-            roughness=df[Evapotranspiration.ROUGHNESS],
-            plant_height=df[Evapotranspiration.PLANT_HEIGHT],
-            measure_height=2.0,
-        )
+        for c in (
+            Evapotranspiration.NET_IRR,
+            Evapotranspiration.AIR_RES,
+            Evapotranspiration.SOIL_HEAT_FLOW,
+            Evapotranspiration.SURFACE_RES,
+            Evapotranspiration.RAD_TERM,
+            Evapotranspiration.AER_TERM,
+            Evapotranspiration.EVAPOTRANSPIRATION,
+        ):
+            stacked = pd.concat(
+                [per_seg_terms[s.name][c] for s in seg_list], axis=1
+            )
+            df[c] = stacked.to_numpy().dot(weights)
 
-        df[Evapotranspiration.SOIL_HEAT_FLOW] = self._soil_heat_flow(
-            lai=df[Evapotranspiration.LAI], net_irradiance=df[Evapotranspiration.NET_IRR]
-        )
+        # Publish the latest row to each bulk output channel so subscribers
+        # (SoilSimulation, UI widgets, loggers) see live values. The
+        # bulk EVAPOTRANSPIRATION channel is published in g/(m²·s) — the
+        # internal DataFrame stays in kg/(m²·s) for SoilSimulation.
+        ts = df.index[-1]
+        for c in self.CHANNELS:
+            value = float(df[c].iloc[-1])
+            if c is Evapotranspiration.EVAPOTRANSPIRATION:
+                value *= self._KG_TO_G
+            self.data[c].set(ts, value)
 
-        df[Evapotranspiration.SURFACE_RES] = self._resistance_surface(
-            lai=df[Evapotranspiration.LAI],
+        # Bulk ground temperature: face-length-weighted mean of per-segment
+        # T_gnd derived above. The channel is owned by FieldSimulation
+        # (parent); write through ``self.context`` so dashboards see the
+        # physics-derived value instead of the placeholder.
+        temp_gnd_stack = pd.concat(
+            [per_seg_temp_gnd[s.name] for s in seg_list], axis=1
         )
+        temp_gnd_bulk_last = float(temp_gnd_stack.to_numpy().dot(weights)[-1])
+        ctx_data = getattr(self.context, "data", None)
+        if ctx_data is not None and "temp_ground" in ctx_data:
+            ctx_data["temp_ground"].set(ts, temp_gnd_bulk_last)
 
-        df[Evapotranspiration.RAD_TERM] = self._radiation_term(
-            svp_slope=df[Evapotranspiration.SVP_SLOPE],
-            net_irradiance=df[Evapotranspiration.NET_IRR],
-            soil_heat_flow=df[Evapotranspiration.SOIL_HEAT_FLOW],
-        )
+        # Per-segment ET and ground temperature — written into the parent
+        # FieldSimulation's channels (registered in its ``configure``).
+        # Segments not registered (e.g. single ``_bulk`` fallback when no
+        # soil mesh is wired) are skipped.
+        seg_et_keys = getattr(self.context, "segment_et_keys", None) or {}
+        seg_tg_keys = getattr(self.context, "segment_temp_ground_keys", None) or {}
+        for seg in seg_list:
+            et_key = seg_et_keys.get(seg.name)
+            if et_key is not None:
+                et_g = float(seg_et[seg.name]["et"].iloc[-1]) * self._KG_TO_G
+                self.context.data[et_key].set(ts, et_g)
+            tg_key = seg_tg_keys.get(seg.name)
+            if tg_key is not None:
+                self.context.data[tg_key].set(
+                    ts, float(per_seg_temp_gnd[seg.name].iloc[-1])
+                )
 
-        df[Evapotranspiration.AER_TERM] = self._aerodynamic_term(
-            svp=df[Evapotranspiration.SVP],
-            gvp=df[Evapotranspiration.GVP],
-            aerodynamic_resistance=df[Evapotranspiration.AIR_RES],
-        )
-
-        df[Evapotranspiration.EVAPOTRANSPIRATION] = self._evapotranspiration(
-            radiation_term=df[Evapotranspiration.RAD_TERM],
-            aerodynamic_term=df[Evapotranspiration.AER_TERM],
-            vaporization_heat=df[Evapotranspiration.VAP_HEAT],
-            svp_slope=df[Evapotranspiration.SVP_SLOPE],
-            surface_resistance=df[Evapotranspiration.SURFACE_RES],
-            aerodynamic_resistance=df[Evapotranspiration.AIR_RES],
-        )
-
-        return df[Evapotranspiration.CHANNELS]
+        return df, seg_et
 
     # noinspection PyPep8Naming
     @staticmethod

@@ -9,30 +9,28 @@ sparcs.components.agriculture.field
 from __future__ import annotations
 
 from statistics import geometric_mean
-from typing import Dict, Optional, Sequence
+from typing import Any, Optional, Sequence
 
 import pandas as pd
-from lories import Component, Constant, Location
-from lories.components.weather import Weather
-from lories.data import Channels, ChannelState
-from lories.typing import Configurations
-from sparcs.components.agriculture import Evapotranspiration
+from lories import Component, Constant
+from lories.data import ChannelState
+from lories.typing import Configurations, Timestamp
 from sparcs.components.agriculture.irrigation import Irrigation
+from sparcs.components.agriculture.simulation import FieldSimulation
 from sparcs.components.agriculture.soil import SoilMoisture
-from sparcs.components.weather import validate_meteo_inputs
 
 
 class AgriculturalField(Component):
-    INCLUDES = [SoilMoisture.TYPE, Irrigation.TYPE, Evapotranspiration.TYPE]
+    INCLUDES = [
+        SoilMoisture.TYPE,
+        Irrigation.TYPE,
+        FieldSimulation.TYPE,
+    ]
 
     WATER_SUPPLY_MEAN = Constant(float, "water_supply_mean", "Water Supply Coverage", "%")
 
-    location: Location
-    weather: Weather
-
     irrigation: Optional[Irrigation] = None
-    evapotranspiration: Optional[Evapotranspiration] = None
-    evapo_rename: Dict[str, str]
+    simulation: Optional[FieldSimulation] = None
 
     # noinspection PyTypeChecker
     @property
@@ -41,35 +39,37 @@ class AgriculturalField(Component):
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
+        defaults = Component._build_defaults(configs, strict=True)
 
-        self.components.load_from_type(
-            SoilMoisture,
-            configs,
-            SoilMoisture.TYPE,
-            key=SoilMoisture.TYPE,
-            name=f"{self.name} Soil",
-            includes=SoilMoisture.INCLUDES,
-        )
         if configs.has_member(Irrigation.TYPE, includes=True):
-            defaults = Component._build_defaults(configs, strict=True)
             irrigation = Irrigation(self, configs.get_member(Irrigation.TYPE, defaults=defaults), self.soil)
             self.components.add(irrigation)
         else:
             irrigation = None
         self.irrigation = irrigation
 
-        if configs.has_member(Evapotranspiration.TYPE, includes=True):
-            defaults = Component._build_defaults(configs, strict=True)
-            evapotranspiration = Evapotranspiration(
-                self, configs.get_member(Evapotranspiration.TYPE, defaults=defaults)
+        # Soil-simulation chain (ground_shading + evapotranspiration +
+        # soil_simulation) lives under the FieldSimulation child so the field
+        # itself stays a thin coordinator.
+        if configs.has_member(FieldSimulation.TYPE, includes=True):
+            simulation = FieldSimulation(
+                self,
+                configs.get_member(FieldSimulation.TYPE, defaults=defaults),
             )
-            self.components.add(evapotranspiration)
+            self.components.add(simulation)
         else:
-            evapotranspiration = None
-        self.evapotranspiration = evapotranspiration
+            simulation = None
+        self.simulation = simulation
 
-        for c in Evapotranspiration.REQUIRED_CHANNELS:
-            self.data.add(c, aggregate="mean", logger={"enabled": False})
+        if configs.has_member(SoilMoisture.TYPE, includes=True):
+            self.components.load_from_type(
+                SoilMoisture,
+                configs,
+                SoilMoisture.TYPE,
+                key=SoilMoisture.TYPE,
+                name=f"{self.name} Soil",
+                includes=SoilMoisture.INCLUDES,
+            )
 
         self.data.add(AgriculturalField.WATER_SUPPLY_MEAN, aggregate="mean", logger={"enabled": False})
 
@@ -77,25 +77,8 @@ class AgriculturalField(Component):
     def activate(self) -> None:
         super().activate()
 
-        self.location = self.context.context.location
-        self.weather = self.context.context.weather
-
         water_supplies = [s.data[SoilMoisture.WATER_SUPPLY] for s in self.soil]
         self.data.register(self._water_supply_callback, water_supplies, how="all", unique=True)
-
-        evapo_input_channels = Channels(
-            [
-                *self.data[Evapotranspiration.REQUIRED_CHANNELS],
-                *self.weather.data.values(),
-            ]
-        )
-        self.evapo_rename = {c.id: c.key for c in evapo_input_channels}
-        self.data.register(
-            self._evapotranspiration_callback,
-            evapo_input_channels,
-            how="any",
-            unique=True,
-        )
 
     def _water_supply_callback(self, data: pd.DataFrame) -> None:
         water_supply = data[[c for c in data.columns if SoilMoisture.WATER_SUPPLY in c]]
@@ -108,15 +91,6 @@ class AgriculturalField(Component):
         else:
             self.data[AgriculturalField.WATER_SUPPLY_MEAN].state = ChannelState.NOT_AVAILABLE
 
-    def _evapotranspiration_callback(self, data: pd.DataFrame) -> None:
-        data = data.rename(columns=self.evapo_rename)
-        data = validate_meteo_inputs(data, self.location)
-        data = data[[*Evapotranspiration.REQUIRED_WEATHER_CHANNELS, *Evapotranspiration.REQUIRED_CHANNELS]]
-
-        results = self.evapotranspiration.evaluate(data)
-        print(results[:50].to_string())
-        pass
-
     @staticmethod
     def _water_supply_mean_geometric(data: pd.Series) -> float:
         if any(v == 0 for v in data):
@@ -125,3 +99,18 @@ class AgriculturalField(Component):
 
     def has_irrigation(self) -> bool:
         return self.irrigation is not None and self.irrigation.is_enabled()
+
+    def has_simulation(self) -> bool:
+        return self.simulation is not None and self.simulation.is_enabled()
+
+    def simulate(
+        self,
+        weather: pd.DataFrame,
+        start: Timestamp,
+        end: Timestamp,
+        prior: Optional[pd.DataFrame] = None,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        if not self.has_simulation():
+            return pd.DataFrame()
+        return self.simulation.simulate(weather, prior=prior, **kwargs)
