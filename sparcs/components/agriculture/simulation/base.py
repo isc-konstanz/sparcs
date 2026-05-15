@@ -15,7 +15,6 @@ The chain children stay decoupled: they read what they need through
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any, Optional, Type, TypeVar
 
 import pandas as pd
@@ -29,31 +28,8 @@ from sparcs.components.weather import validate_meteo_inputs
 from .evapotranspiration import Evapotranspiration, SegmentProperties
 from .ground_shading import GroundShading
 from .soil import MeshConfig, SoilSimulation, top_segment_names_from_mesh
+from .soil_predictor import SoilPredictor
 
-
-# Per-segment channel key conventions. Kept here because the channels are
-# registered on ``FieldSimulation`` (it knows the mesh and so the segment
-# list); GroundShading and Evapotranspiration just write into them.
-def _segment_key_suffix(seg_name: str) -> str:
-    """Camel-case soil-mesh segment names → snake_case channel-id suffix."""
-    return re.sub(r"(?<!^)(?=[A-Z])", "_", seg_name).lower()
-
-
-# All per-segment channels share a common ``seg_<segment>_<quantity>``
-# layout so the natural-sort UI groups them by segment (each segment's
-# ET / GHI / T_gnd shown in one block) and the whole per-segment
-# block sits between the bulk vegetation channels (``lai``, ``ndvi``,
-# ``plant_height``, ``roughness``) and the bulk ``temp_ground``.
-def segment_ghi_key(seg_name: str) -> str:
-    return f"seg_{_segment_key_suffix(seg_name)}_ghi"
-
-
-def segment_et_key(seg_name: str) -> str:
-    return f"seg_{_segment_key_suffix(seg_name)}_evapotranspiration"
-
-
-def segment_temp_ground_key(seg_name: str) -> str:
-    return f"seg_{_segment_key_suffix(seg_name)}_temp_ground"
 
 _C = TypeVar("_C", bound=Component)
 
@@ -70,7 +46,7 @@ _LAI_BY_TYPE: dict[str, list[float]] = {
 
 class FieldSimulation(Component):
     TYPE: str = "field_simulation"
-    INCLUDES = [GroundShading.TYPE, Evapotranspiration.TYPE, SoilSimulation.TYPE]
+    INCLUDES = [GroundShading.TYPE, Evapotranspiration.TYPE, SoilSimulation.TYPE, SoilPredictor.TYPE]
 
     # Vegetation/ground-surface state channels. They describe the field, not
     # the ET calculation, so they live here. Evapotranspiration consumes them
@@ -83,9 +59,19 @@ class FieldSimulation(Component):
 
     VEGETATION_CHANNELS = [TEMP_GROUND, LAI, ROUGHNESS, PLANT_HEIGHT, NDVI]
 
+    # Bundled per-segment channels — each holds a ``list[float]`` ordered by
+    # ``top_segment_names``. Producers write through ``set_segment_values``;
+    # consumers read through ``get_segment_values``. Replaces N-per-mesh
+    # scalar channels (overwhelming during testing) with one per quantity.
+    SEG_GHI = Constant(list, "seg_ghi", "GHI (per segment)", "W/m^2")
+    SEG_EVAPOTRANSPIRATION = Constant(list, "seg_evapotranspiration", "Evapotranspiration (per segment)", "kg/(m^2*h)")
+    SEG_TEMP_GROUND = Constant(list, "seg_temp_ground", "Ground Temperature (per segment)", "°C")
+    SEGMENT_CHANNELS = [SEG_GHI, SEG_EVAPOTRANSPIRATION, SEG_TEMP_GROUND]
+
     ground_shading: Optional[GroundShading] = None
     evapotranspiration: Optional[Evapotranspiration] = None
     soil_simulation: Optional[SoilSimulation] = None
+    soil_predictor: Optional[SoilPredictor] = None
 
     location: Any = None
     weather: Optional[Weather] = None
@@ -94,6 +80,24 @@ class FieldSimulation(Component):
     _lai_type: str = "grass"
     _evapo_rename: dict[str, str]
     _irrigation_flow_lpm: float = 0.0
+
+    _weather_channels: Optional[Channels] = None
+    _forecast_channels: Optional[Channels] = None
+    _last_forecast_epoch: Optional[pd.Timestamp] = None
+    _required_weather_keys: tuple[str, ...] = ()
+    _weather_default_warned: set[str]
+
+    # Weather channels we can synthesize a default for when the connector
+    # (or the forecast feed) can't supply them. Filled in ``_populate_vegetation``
+    # before the chain consumes the frame, with a one-shot warning per key.
+    # ``clear_sky_index`` is a derived quantity that DWD/Brightsky doesn't
+    # publish at all; ``humidity_relative`` is missing from some Brightsky
+    # forecast responses (the live observation usually carries it).
+    _WEATHER_DEFAULTS: dict[str, float] = {
+        "clear_sky_index": 0.5,
+        "humidity_relative": 60.0,    # %
+    }
+    _OPTIONAL_WEATHER_KEYS: frozenset[str] = frozenset(_WEATHER_DEFAULTS.keys())
 
     # Single source of truth for the bay geometry — both the soil mesh
     # ``width`` and the ground-shading row ``distance`` derive from this
@@ -153,10 +157,7 @@ class FieldSimulation(Component):
         # the mesh layout, so segment naming and channel wiring (dummy
         # connectors, loggers, …) are all configured in one place. The
         # children (GroundShading, Evapotranspiration) compute the values
-        # and write into these channels via ``self.context.data[...]``.
-        self._segment_ghi_keys: dict[str, str] = {}
-        self._segment_et_keys: dict[str, str] = {}
-        self._segment_temp_ground_keys: dict[str, str] = {}
+        # and write into these channels via ``set_segment_values``.
         self._register_segment_channels()
 
         # Each chain child is a singleton — build directly via the same
@@ -165,45 +166,22 @@ class FieldSimulation(Component):
         self.ground_shading = self._build_child(GroundShading, configs, defaults)
         self.evapotranspiration = self._build_child(Evapotranspiration, configs, defaults)
         self.soil_simulation = self._build_child(SoilSimulation, configs, defaults)
+        # Predictor is built last because it borrows mesh + probes from
+        # ``soil_simulation`` and would crash without it.
+        self.soil_predictor = self._build_child(SoilPredictor, configs, defaults)
 
         self._evapo_rename = {}
         self._segment_shade = {}
+        self._vegetation_placeholder_warned = False
+        self._weather_default_warned = set()
 
     def _register_segment_channels(self) -> None:
-        """Add one ``ghi_<seg>``, ``evapotranspiration_<seg>``, and
-        ``temp_ground_<seg>`` channel per soil-mesh top segment. No-op
-        when no SoilSimulation is wired."""
-        for seg_name in self.top_segment_names:
-            ghi_key = segment_ghi_key(seg_name)
-            et_key = segment_et_key(seg_name)
-            tg_key = segment_temp_ground_key(seg_name)
-            self._segment_ghi_keys[seg_name] = ghi_key
-            self._segment_et_keys[seg_name] = et_key
-            self._segment_temp_ground_keys[seg_name] = tg_key
-            self.data.add(
-                ghi_key,
-                type=float,
-                name=f"GHI ({seg_name})",
-                unit="W/m^2",
-                aggregate="mean",
-                logger={"enabled": False},
-            )
-            self.data.add(
-                et_key,
-                type=float,
-                name=f"Evapotranspiration ({seg_name})",
-                unit="g/(m^2*s)",
-                aggregate="mean",
-                logger={"enabled": False},
-            )
-            self.data.add(
-                tg_key,
-                type=float,
-                name=f"Ground Temperature ({seg_name})",
-                unit="°C",
-                aggregate="mean",
-                logger={"enabled": False},
-            )
+        """Register the three bundled ``list[float]`` segment channels.
+        No-op when no SoilSimulation is wired."""
+        if not self.top_segment_names:
+            return
+        for c in self.SEGMENT_CHANNELS:
+            self.data.add(c, logger={"enabled": False})
 
     def _build_child(
         self,
@@ -227,9 +205,16 @@ class FieldSimulation(Component):
     def mesh_config(self) -> Optional[MeshConfig]:
         # MeshConfig is parsed eagerly in ``configure()`` so siblings can read
         # it before SoilSimulation itself is built. Once SoilSimulation has
-        # constructed, prefer its instance (single source of truth at runtime).
+        # been *configured* (not just instantiated) prefer its instance —
+        # single source of truth at runtime. Use ``getattr`` rather than
+        # plain attribute access because ``soil_predictor`` configures
+        # alphabetically before ``soil_simulation`` (lories sorts children
+        # by id), so at predictor-configure time the SoilSimulation instance
+        # exists but ``_mesh_config`` hasn't been assigned yet.
         if self.soil_simulation is not None:
-            return self.soil_simulation._mesh_config
+            soil_mesh = getattr(self.soil_simulation, "_mesh_config", None)
+            if soil_mesh is not None:
+                return soil_mesh
         return self._mesh_config
 
     @property
@@ -241,25 +226,31 @@ class FieldSimulation(Component):
             return []
         return top_segment_names_from_mesh(mesh)
 
-    @property
-    def segment_ghi_keys(self) -> dict[str, str]:
-        """Read-only view: segment name → ``ghi_<seg>`` channel id on this
-        component. GroundShading uses this to publish per-segment GHI."""
-        return dict(self._segment_ghi_keys)
+    def set_segment_values(
+        self,
+        channel: Constant,
+        timestamp: pd.Timestamp,
+        mapping: dict[str, float],
+    ) -> None:
+        """Publish per-segment values as a single ``list[float]`` ordered
+        by ``top_segment_names``. ``mapping`` must cover exactly the
+        registered segments — a missing/extra key raises rather than
+        silently misaligning the vector."""
+        names = self.top_segment_names
+        if mapping.keys() != set(names):
+            raise ValueError(
+                f"set_segment_values({channel!s}) keys {sorted(mapping)} "
+                f"!= registered segments {sorted(names)}"
+            )
+        self.data[channel].set(timestamp, [float(mapping[n]) for n in names])
 
-    @property
-    def segment_et_keys(self) -> dict[str, str]:
-        """Read-only view: segment name → ``evapotranspiration_<seg>``
-        channel id on this component. Evapotranspiration uses this to
-        publish per-segment ET."""
-        return dict(self._segment_et_keys)
-
-    @property
-    def segment_temp_ground_keys(self) -> dict[str, str]:
-        """Read-only view: segment name → ``temp_ground_<seg>`` channel
-        id on this component. Evapotranspiration uses this to publish
-        per-segment ground temperature."""
-        return dict(self._segment_temp_ground_keys)
+    def get_segment_values(self, channel: Constant) -> dict[str, float]:
+        """Latest per-segment values keyed by segment name. Empty dict
+        before the first write."""
+        value = self.data[channel].value
+        if value is None:
+            return {}
+        return dict(zip(self.top_segment_names, map(float, value)))
 
     def has_soil_simulation(self) -> bool:
         return self.soil_simulation is not None and self.soil_simulation.is_enabled()
@@ -277,23 +268,22 @@ class FieldSimulation(Component):
         if self.evapotranspiration is None or self.soil_simulation is None:
             return
 
-        evapo_input_channels = Channels(
-            [
-                *self.data[self.VEGETATION_CHANNELS],
-                *self.weather.data.values(),
-            ]
-        )
-        if self.ground_shading is not None:
-            evapo_input_channels.extend(
-                self.ground_shading.data[GroundShading.CHANNELS]
+        if self.weather is None:
+            logging.warning(
+                "%s: no Weather component resolved — chain will never tick.", self.name
             )
-        self._evapo_rename = {c.id: c.key for c in evapo_input_channels}
-        self.data.register(
-            self._simulation_callback,
-            evapo_input_channels,
-            how="any",
-            unique=True,
+            return
+
+        # Trigger is timer-driven, not event-driven on these channels: the
+        # vegetation channels are *written* inside the chain, so listening to
+        # them caused self-retriggering; and weather cadence (often hours)
+        # should not gate PDE cadence. We snapshot the latest validated weather
+        # row on each tick instead.
+        self._weather_channels = Channels(list(self.weather.data.values()))
+        self._required_weather_keys = tuple(
+            c.key for c in Evapotranspiration.REQUIRED_WEATHER_CHANNELS
         )
+        self._evapo_rename = {c.id: c.key for c in self._weather_channels}
 
         soil_data = self.soil_simulation.data
         if not soil_data.simulation_state.has_logger():
@@ -324,12 +314,126 @@ class FieldSimulation(Component):
                     unique=True,
                 )
 
-    def _simulation_callback(self, data: pd.DataFrame) -> None:
-        et_data, seg_et = self._run_chain(data.rename(columns=self._evapo_rename))
-        self.soil_simulation.advance(et_data, et_data.index[-1], seg_et)
+        # Live trigger: advance the soil one step per new observation frame.
+        # Listening only on the weather observation channels (not vegetation
+        # or ground_shading, which the chain *writes*) avoids self-retrigger.
+        self.data.register(
+            self._weather_callback,
+            self._weather_channels,
+            how="any",
+            unique=True,
+        )
+
+        # Independent trigger for the predictor: each forecast refresh runs
+        # a fresh what-if pass. Listening on every forecast channel was a
+        # foot-gun — forecast rows are *future-dated* (up to 8 days out), so
+        # ``Listener.has_update()`` compared the listener's wall-clock
+        # completion to a future data timestamp and refired in a tight loop.
+        # ``timestamp_creation`` is wall-clock-stamped at fetch time and
+        # advances exactly once per DWD refresh, so listening on it alone
+        # gives one trigger per refresh. Callback-level dedup against the
+        # creation epoch (the channel *value*) protects against connector
+        # re-reads of the same forecast.
+        forecast_sub = getattr(self.weather, "forecast", None)
+        if (
+            self.soil_predictor is not None
+            and forecast_sub is not None
+            and forecast_sub.is_enabled()
+        ):
+            trigger = forecast_sub.data.get("timestamp_creation", None)
+            if trigger is None:
+                # Fallback: pick a single channel rather than registering on
+                # every forecast channel (avoids the future-timestamp loop).
+                values = list(forecast_sub.data.values())
+                trigger = values[0] if values else None
+            if trigger is not None:
+                self._forecast_channels = Channels([trigger])
+                self.data.register(
+                    self._forecast_callback,
+                    self._forecast_channels,
+                    how="any",
+                    unique=True,
+                )
+
+    def _weather_callback(self, data: pd.DataFrame) -> None:
+        if not self._weather_inputs_valid():
+            return
+        frame = self._weather_channels.to_frame(unique=True)
+        if frame.empty:
+            return
+
+        # Brightsky's "current" source can return a row at the *upcoming*
+        # hour boundary, so the weather channels' ``channel.timestamp`` may
+        # land slightly in the future and ``Listener.has_update()`` keeps
+        # the callback firing for the full notify-timeout window. Dedupe
+        # against the live solver's last-simulated time so back-to-back
+        # fires for the same observation row become no-ops before the heavy
+        # chain replay runs.
+        now = frame.index[-1]
+        last = getattr(self.soil_simulation, "_last_simulated_at", None)
+        if last is not None and now <= last:
+            return
+
+        et_data, seg_et = self._run_chain(frame.rename(columns=self._evapo_rename))
+        now = et_data.index[-1]
+        self.soil_simulation.advance(et_data, now, seg_et)
+
+    def _forecast_callback(self, data: pd.DataFrame) -> None:
+        # Predictor reads ``weather.forecast`` itself via ``_fetch_forecast``;
+        # the listener's ``data`` frame is only the trigger. Use the most
+        # recent live-soil simulation time as ``now`` so predict() dedupes
+        # correctly and starts from the freshest available state.
+        if self.soil_predictor is None or self.soil_simulation is None:
+            return
+
+        # Skip when the forecast creation epoch hasn't actually advanced —
+        # the connector may re-read ``timestamp_creation`` faster than DWD
+        # actually issues a new forecast.
+        epoch = self._read_forecast_epoch()
+        if epoch is not None:
+            if self._last_forecast_epoch is not None and epoch <= self._last_forecast_epoch:
+                return
+            self._last_forecast_epoch = epoch
+
+        now = getattr(self.soil_simulation, "_last_simulated_at", None)
+        if now is None:
+            now = pd.Timestamp.now(tz="UTC")
+        self.soil_predictor.predict(now)
+
+    def _read_forecast_epoch(self) -> Optional[pd.Timestamp]:
+        forecast_sub = getattr(self.weather, "forecast", None)
+        if forecast_sub is None:
+            return None
+        channel = forecast_sub.data.get("timestamp_creation", None)
+        if channel is None or not channel.is_valid():
+            return None
+        try:
+            return pd.Timestamp(channel.value)
+        except (TypeError, ValueError):
+            return None
+
+    def _weather_inputs_valid(self) -> bool:
+        if self._weather_channels is None:
+            return False
+        by_key = {c.key: c for c in self._weather_channels}
+        missing = [
+            k for k in self._required_weather_keys
+            if k not in self._OPTIONAL_WEATHER_KEYS
+            and (k not in by_key or not by_key[k].is_valid())
+        ]
+        if missing:
+            logging.debug(
+                "%s: skipping advance — weather channels not valid: %s",
+                self.name, missing,
+            )
+            return False
+        return True
 
     def _run_chain(
-        self, weather: pd.DataFrame
+        self,
+        weather: pd.DataFrame,
+        *,
+        publish: bool = True,
     ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
         """
         Walk the simulation chain up to (and including) Evapotranspiration:
@@ -342,15 +446,21 @@ class FieldSimulation(Component):
         ``("et", "evap", "transp")`` time series in kg/(m²·s). The trailing
         soil step (``advance`` for the live callback, ``simulate_loop`` for
         offline) is the only thing that differs between drivers.
+
+        ``publish=False`` (used by ``SoilPredictor`` on forecast input)
+        suppresses every channel write and the cached ``_segment_shade``
+        update so the predictor can replay the chain on future weather
+        without contaminating live dashboards or the live solver's
+        per-segment shading dict.
         """
         df = self._prepare_weather(weather)
-        df = self._populate_vegetation(df)
+        df = self._populate_vegetation(df, publish=publish)
         if self.ground_shading is not None:
-            seg_factors = self.ground_shading.evaluate(df)
-            if seg_factors:
+            seg_factors = self.ground_shading.evaluate(df, publish=publish)
+            if publish and seg_factors:
                 self._segment_shade = dict(seg_factors)
         segments = self._build_segments(df)
-        return self.evapotranspiration.evaluate(df, segments)
+        return self.evapotranspiration.evaluate(df, segments, publish=publish)
 
     def _build_segments(self, df: pd.DataFrame) -> list[SegmentProperties]:
         """
@@ -404,24 +514,52 @@ class FieldSimulation(Component):
             )
         return seg_props
 
-    def _populate_vegetation(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _populate_vegetation(self, df: pd.DataFrame, *, publish: bool = True) -> pd.DataFrame:
         # Placeholder vegetation state — replace once a Crop subcomponent (or
         # field-level sensors) publishes these channels for real. TEMP_GROUND
         # is intentionally absent: Evapotranspiration derives it per-segment
         # from T_air and shade-scaled GHI and publishes the bulk mean back
         # onto self.data[TEMP_GROUND].
+        if not self._vegetation_placeholder_warned:
+            logging.warning(
+                "%s: using placeholder vegetation state (LAI from monthly table '%s', "
+                "ROUGHNESS=0.002, PLANT_HEIGHT=0.1, NDVI=0.25) — "
+                "no Crop subcomponent or field-level sensors are publishing these "
+                "channels yet. Values are still written for debugging visibility.",
+                self.name,
+                self._lai_type,
+            )
+            self._vegetation_placeholder_warned = True
         df[self.LAI] = pd.array(_LAI_BY_TYPE[self._lai_type])[df.index.month - 1].astype(float)
         df[self.ROUGHNESS] = 0.002
         df[self.PLANT_HEIGHT] = 0.1
         df[self.NDVI] = 0.25
-        df[Weather.CLEAR_SKY_INDEX] = 0.5
+
+        # Required-input channels that the weather connector / forecast feed
+        # may not supply (e.g. Brightsky doesn't publish ``clear_sky_index``;
+        # the forecast endpoint sometimes lacks ``humidity_relative``). Fill
+        # the default only where missing so real values pass through. Warn
+        # once per key so partial-coverage providers don't spam the log.
+        for key, default in self._WEATHER_DEFAULTS.items():
+            if key not in df.columns or df[key].isna().all():
+                if key not in self._weather_default_warned:
+                    logging.warning(
+                        "%s: weather feed does not supply '%s' — defaulting to %s.",
+                        self.name, key, default,
+                    )
+                    self._weather_default_warned.add(key)
+                df[key] = default
+            elif df[key].isna().any():
+                df[key] = df[key].fillna(default)
 
         # Mirror the latest values onto the actual vegetation channels so
         # dashboards/loggers see them in VALID state (DataFrame writes only
         # populate the ET-evaluation frame, not the channel registry).
         # Skip when the frame is empty — happens at the head of an offline
-        # simulate before weather rows are accumulated.
-        if not df.empty:
+        # simulate before weather rows are accumulated. Forecast / dry-run
+        # callers pass ``publish=False`` so future timestamps don't land on
+        # the live channels.
+        if publish and not df.empty:
             ts = df.index[-1]
             for c in self.VEGETATION_CHANNELS:
                 if c is self.TEMP_GROUND:

@@ -20,7 +20,7 @@ from lories.components.weather import Weather, WeatherProvider
 from lories.simulation import Result, Results
 from lories.typing import Timestamp
 from sparcs import Location
-from sparcs.components import ElectricalEnergyStorage, SolarSystem, ThermalEnergyStorage
+from sparcs.components import AgriculturalArea, ElectricalEnergyStorage, SolarSystem, ThermalEnergyStorage
 from sparcs.components.weather import validate_meteo_inputs, validated_meteo_inputs
 
 
@@ -230,10 +230,31 @@ class System(lories.System):
             else:
                 self._logger.debug(f"Reference {System.POWER_AC.name} cannot be found.")
 
+        data = self._simulate_agriculture(data, start, end, prior, **kwargs)
         data = self._simulate_solar(data, start, end, prior)
         data = self._simulate_storage(data, start, end, prior)
 
         return data.dropna(axis="columns", how="all")
+
+    # noinspection PyUnusedLocal
+    def _simulate_agriculture(
+        self,
+        data: pd.DataFrame,
+        start: Timestamp,
+        end: Timestamp,
+        prior: Optional[pd.DataFrame] = None,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        if not self.components.has_type(AgriculturalArea):
+            return data
+
+        weather = self.weather.get(start, end, **kwargs)
+        frames = [data]
+        for area in self.components.get_all(AgriculturalArea):
+            area_data = area.simulate(weather, start, end, prior=prior, **kwargs)
+            if not area_data.empty:
+                frames.append(area_data)
+        return pd.concat(frames, axis="columns") if len(frames) > 1 else data
 
     # noinspection PyUnusedLocal
     def _simulate_solar(
@@ -243,6 +264,9 @@ class System(lories.System):
         end: Timestamp,
         prior: Optional[pd.DataFrame] = None,
     ) -> pd.DataFrame:
+        if not self.components.has_type(SolarSystem):
+            return data
+
         system_ac = self.data[System.POWER_AC]
         system_ac_gen = self.data[System.POWER_AC_GEN]
 

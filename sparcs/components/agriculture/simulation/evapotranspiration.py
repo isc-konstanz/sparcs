@@ -70,7 +70,7 @@ class Evapotranspiration(Component):
     SURFACE_RES = Constant(float, "resistance_surface", "Surface Resistance", "s/m")
     RAD_TERM = Constant(float, "radiation_term", "Radiation Term", "(kPa*W)/(K*m^2)")
     AER_TERM = Constant(float, "aerodynamic_term", "Aerodynamic Term", "(kPa*J)/(m^2*K*s)")
-    EVAPOTRANSPIRATION = Constant(float, "evapotranspiration", "Evapotranspiration", "g/(m^2*s)")
+    EVAPOTRANSPIRATION = Constant(float, "evapotranspiration", "Evapotranspiration", "kg/(m^2*h)")
 
     CHANNELS = [
         SVP,
@@ -94,16 +94,16 @@ class Evapotranspiration(Component):
 
         # Per-segment ET channels live on FieldSimulation (the parent owns
         # the soil mesh, so segment-named channels are wired in one place).
-        # ``evaluate`` writes into them via ``self.context.segment_et_keys``.
+        # ``evaluate`` writes into them via ``self.context.set_segment_values``.
 
     # Beer-Lambert canopy extinction. Shared with the soil PDE, but lives
     # here because the evap/transp split is part of the ET model.
     BEER_K: float = 0.6
 
     # Internal computation runs in kg/(m²·s) (what the soil PDE consumes
-    # via ``seg_et``). Channels publish in g/(m²·s) so the displayed
-    # values aren't 0.0e+00 in the UI.
-    _KG_TO_G: float = 1000.0
+    # via ``seg_et``). Channels publish in kg/(m²·h) so the displayed
+    # values aren't 0.0e+00 in the UI and read in a familiar hourly rate.
+    _KG_PER_S_TO_KG_PER_H: float = 3600.0
 
     # Algebraic surface heating: T_gnd = T_air + LIFT · GHI · shade_factor.
     # 0.012 K/(W/m²) lands an open-sky segment ~12 K above air at noon
@@ -115,6 +115,8 @@ class Evapotranspiration(Component):
         self,
         df: pd.DataFrame,
         segments: Iterable[SegmentProperties],
+        *,
+        publish: bool = True,
     ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
         """
         Compute Penman-Monteith evapotranspiration for each soil-mesh top
@@ -171,15 +173,15 @@ class Evapotranspiration(Component):
         # radiation scaling come from the segment; everything weather-only
         # is reused as-is.
         seg_et: dict[str, pd.DataFrame] = {}
-        per_seg_terms: dict[str, dict[Constant, pd.Series]] = {}
-        per_seg_temp_gnd: dict[str, pd.Series] = {}
+        seg_terms: dict[str, dict[Constant, pd.Series]] = {}
+        seg_temp_gnd: dict[str, pd.Series] = {}
         ones = pd.Series(1.0, index=df.index)
         ghi_pos = df[Weather.GHI].clip(lower=0.0)
         for seg in seg_list:
             shade = float(seg.shade_factor)
             ghi_local = df[Weather.GHI] * shade
             temp_gnd_local = df[Weather.TEMP_AIR] + self.TEMP_GROUND_LIFT * ghi_pos * shade
-            per_seg_temp_gnd[seg.name] = temp_gnd_local
+            seg_temp_gnd[seg.name] = temp_gnd_local
             net_irr = self._net_irradiance(
                 ghi=ghi_local,
                 gvp=gvp,
@@ -227,7 +229,7 @@ class Evapotranspiration(Component):
                     "transp": et * (1.0 - evap_frac),
                 }
             )
-            per_seg_terms[seg.name] = {
+            seg_terms[seg.name] = {
                 Evapotranspiration.NET_IRR: net_irr,
                 Evapotranspiration.AIR_RES: air_res,
                 Evapotranspiration.SOIL_HEAT_FLOW: soil_heat,
@@ -260,49 +262,52 @@ class Evapotranspiration(Component):
             Evapotranspiration.EVAPOTRANSPIRATION,
         ):
             stacked = pd.concat(
-                [per_seg_terms[s.name][c] for s in seg_list], axis=1
+                [seg_terms[s.name][c] for s in seg_list], axis=1
             )
             df[c] = stacked.to_numpy().dot(weights)
 
         # Publish the latest row to each bulk output channel so subscribers
         # (SoilSimulation, UI widgets, loggers) see live values. The
-        # bulk EVAPOTRANSPIRATION channel is published in g/(m²·s) — the
+        # bulk EVAPOTRANSPIRATION channel is published in kg/(m²·h) — the
         # internal DataFrame stays in kg/(m²·s) for SoilSimulation.
-        ts = df.index[-1]
-        for c in self.CHANNELS:
-            value = float(df[c].iloc[-1])
-            if c is Evapotranspiration.EVAPOTRANSPIRATION:
-                value *= self._KG_TO_G
-            self.data[c].set(ts, value)
+        # ``publish=False`` (forecast / dry-run) skips every channel
+        # write so the live dashboard isn't polluted with future values.
+        if publish:
+            ts = df.index[-1]
+            for c in self.CHANNELS:
+                value = float(df[c].iloc[-1])
+                if c is Evapotranspiration.EVAPOTRANSPIRATION:
+                    value *= self._KG_PER_S_TO_KG_PER_H
+                self.data[c].set(ts, value)
 
-        # Bulk ground temperature: face-length-weighted mean of per-segment
-        # T_gnd derived above. The channel is owned by FieldSimulation
-        # (parent); write through ``self.context`` so dashboards see the
-        # physics-derived value instead of the placeholder.
-        temp_gnd_stack = pd.concat(
-            [per_seg_temp_gnd[s.name] for s in seg_list], axis=1
-        )
-        temp_gnd_bulk_last = float(temp_gnd_stack.to_numpy().dot(weights)[-1])
-        ctx_data = getattr(self.context, "data", None)
-        if ctx_data is not None and "temp_ground" in ctx_data:
-            ctx_data["temp_ground"].set(ts, temp_gnd_bulk_last)
+            # Bulk ground temperature: face-length-weighted mean of per-segment
+            # T_gnd derived above. The channel is owned by FieldSimulation
+            # (parent); write through ``self.context`` so dashboards see the
+            # physics-derived value instead of the placeholder.
+            temp_gnd_stack = pd.concat(
+                [seg_temp_gnd[s.name] for s in seg_list], axis=1
+            )
+            temp_gnd_bulk_last = float(temp_gnd_stack.to_numpy().dot(weights)[-1])
+            ctx_data = getattr(self.context, "data", None)
+            if ctx_data is not None and "temp_ground" in ctx_data:
+                ctx_data["temp_ground"].set(ts, temp_gnd_bulk_last)
 
-        # Per-segment ET and ground temperature — written into the parent
-        # FieldSimulation's channels (registered in its ``configure``).
-        # Segments not registered (e.g. single ``_bulk`` fallback when no
-        # soil mesh is wired) are skipped.
-        seg_et_keys = getattr(self.context, "segment_et_keys", None) or {}
-        seg_tg_keys = getattr(self.context, "segment_temp_ground_keys", None) or {}
-        for seg in seg_list:
-            et_key = seg_et_keys.get(seg.name)
-            if et_key is not None:
-                et_g = float(seg_et[seg.name]["et"].iloc[-1]) * self._KG_TO_G
-                self.context.data[et_key].set(ts, et_g)
-            tg_key = seg_tg_keys.get(seg.name)
-            if tg_key is not None:
-                self.context.data[tg_key].set(
-                    ts, float(per_seg_temp_gnd[seg.name].iloc[-1])
-                )
+            # Per-segment ET and ground temperature — written into the parent
+            # FieldSimulation's bundled channels. Skipped on the single
+            # ``_bulk`` fallback (no soil mesh wired) since the parent
+            # registers no segment channels in that case.
+            field = self.context
+            if field.top_segment_names:
+                et_mapping = {
+                    s.name: float(seg_et[s.name]["et"].iloc[-1]) * self._KG_PER_S_TO_KG_PER_H
+                    for s in seg_list
+                }
+                tg_mapping = {
+                    s.name: float(seg_temp_gnd[s.name].iloc[-1])
+                    for s in seg_list
+                }
+                field.set_segment_values(field.SEG_EVAPOTRANSPIRATION, ts, et_mapping)
+                field.set_segment_values(field.SEG_TEMP_GROUND, ts, tg_mapping)
 
         return df, seg_et
 
@@ -785,4 +790,4 @@ def _celsius_to_kelvin(temp_celsius: pd.Series | float) -> pd.Series | float:
 
 def _kmh_to_ms(speed_kmh: pd.Series | float) -> pd.Series | float:
     """Converts speed from km/h to m/s."""
-    return speed_kmh * 3.6
+    return speed_kmh / 3.6

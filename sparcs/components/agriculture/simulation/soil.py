@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+import sys
 import threading
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -27,155 +28,91 @@ from scipy.interpolate import griddata
 
 import numpy as np
 import pandas as pd
+
+from . import plot_style
 from lories import Component, Constant
 from lories.components.weather import Weather
 from lories.typing import Configurations
-from sparcs.components.agriculture.soil import Genuchten, SoilModel
+from lories.util import to_timedelta
+from sparcs.components.agriculture.soil import (
+    DEFAULT_SOIL_MODEL,
+    SoilModel,
+    create_soil_model,
+)
+from ._soil import ensure_mesh
 
 logging.getLogger("fipy").setLevel(logging.WARNING)
 np.seterr(all="ignore")
 
-RHO_W: float = 1000.0       # kg/m³
-SE_MIN: float = 1e-6        # effective-saturation floor for source clipping
-SE_MAX: float = 0.999       # effective-saturation ceiling for source clipping
-PLOT_HISTORY_WINDOW: pd.Timedelta = pd.Timedelta(days=1)
+# Shared dataclasses, helpers, and the PDE core live in `_soil`. Re-imported
+# here so external code (``from .soil import MeshConfig`` etc.) keeps working.
+from ._soil import (  # noqa: F401
+    RHO_W,
+    SE_MIN,
+    SE_MAX,
+    SolveResult,
+    ClipDiagnostics,
+    FluxRates,
+    MeshConfig,
+    FeddesConfig,
+    PondingConfig,
+    PDEConfig,
+    ProbeSpec,
+    PlotConfig,
+    SoilBase,
+    SoilPDECore,
+    resolve_probes,
+    top_segment_names_from_mesh,
+    create_mesh,
+    ensure_mesh,
+)
 
 
-@dataclass
-class FluxRates:
-    """Per-callback fluxes consumed by ``_apply_source`` and diagnostics.
-
-    All flux densities are kg/(m²·s); ``flow_m3s`` is volumetric m³/s.
-    ``seg_evap`` and ``seg_transp`` are keyed by mesh segment name and only
-    contain entries that participate in their respective sink (canopy
-    segments for transpiration, all top segments for evaporation).
-    """
-
-    seg_evap: dict[str, float]
-    seg_transp: dict[str, float]
-    flow_m3s: float
-    rain_flux: float
-
-# TODO: Remove — exploratory Parameters() draft from before MeshConfig/PDEConfig
-#   landed. Re-introduce as a real Parameters schema if/when lories.Parameter
-#   adds the missing converter / Select / List / Component support.
-# MESH_PARAMS = Parameters(
-#     "mesh",
-#     [
-#         Parameter(name="filename", default="soil.msh", required=True, desc="Mesh filename"),
-#         Parameter(name="dl", default=0.1, required=True, desc="Mesh element size"),
-#         Parameter(name="width", default=10.0, required=True, desc="Width of the agricultural field (m)"),
-#         Parameter(name="height", default=5.0, required=True, desc="Height of the agricultural field (m)"),
-#         Parameter(name="plant_width", default=2.0, required=True, desc="Width of the plant (m)"),
-#         Parameter(name="plant_height", default=2.0, required=True, desc="Height of the plant (m)"),
-#         Parameter(name="watering_width", default=1.0, required=True, desc="Width of the watering area (m)"),
-#         Parameter(name="d_x", default=0.5, required=True, desc="Width of ground segments (m)"),
-#     ],
-# )
-
-# PDE_PARAMS = Parameters(
-#     "pde",
-#     [
-#         Parameter(name="theta_r", default=0.05, required=True, desc="Residual water content"),
-#         Parameter(name="theta_s", default=0.43, required=True, desc="Saturated water content"),
-#         Parameter(name="alpha", default=0.08, required=True, desc="Van Genuchten parameter alpha"),
-#         Parameter(name="n", default=1.6, required=True, desc="Van Genuchten parameter n"),
-#         Parameter(name="k_s", default=1.0e-4, required=True, desc="Saturated hydraulic conductivity (m/s)"),
-#         Parameter(name="dt", default=50.0, required=True, desc="Time step for the simulation (s)"),
-#     ],
-# )
-
-
-_DEFAULT_BAY_WIDTH: float = 10.0
-
-
-@dataclass
-class MeshConfig:
-    def __init__(self, configs: Configurations, bay_width: Optional[float] = None):
-        # ``bay_width`` is the single source of truth for the soil-mesh /
-        # PV-row-spacing width (set on ``FieldSimulation``). When passed in
-        # we use it as the default for ``width`` so the mesh and ground-
-        # shading bay always agree by construction. A ``width`` explicitly
-        # set in the [mesh] block still wins (back-compat).
-        default_width = _DEFAULT_BAY_WIDTH if bay_width is None else bay_width
-        self.filename: str = configs.get("filename", default="soil.msh")
-        self.dl: float = configs.get("dl", default=0.1)
-        self.width: float = configs.get("width", default=default_width)
-        self.height: float = configs.get("height", default=5.0)
-        self.plant_width: float = configs.get("plant_width", default=2.0)
-        self.plant_height: float = configs.get("plant_height", default=2.0)
-        self.watering_width: float = configs.get("watering_width", default=1.0)
-        self.dx: float = configs.get("d_x", default=0.5)
-
-
-def top_segment_names_from_mesh(mesh: "MeshConfig") -> list[str]:
-    """Soil-mesh top-segment names derived purely from MeshConfig.
-
-    Mirrors the naming used in ``SoilSimulation._build_segment_index``; kept
-    standalone so GroundShading and Evapotranspiration can register one
-    channel per segment at configure time, before SoilSimulation itself is
-    built. Order matches the mesh: left bare strips, plant tops, right bare
-    strips.
-    """
-    n_pv_segments = int((mesh.width - mesh.plant_width) / (2 * mesh.dx))
-    open_sky = [
-        f"{side}TopSegment_{i}"
-        for i in range(n_pv_segments)
-        for side in ("Left", "Right")
-    ]
-    return [*open_sky, "PlantTopLeftSegment", "PlantTopRightSegment"]
-
-
-@dataclass
-class PDEConfig:
-    def __init__(self, configs: Configurations):
-        self.theta_r: float = configs.get("theta_r", default=0.05)
-        self.theta_s: float = configs.get("theta_s", default=0.43)
-        self.alpha: float = configs.get("alpha", default=0.08)
-        self.n: float = configs.get("n", default=1.6)
-        self.k_s: float = configs.get("k_s", default=1.0e-4)
-        self.dt: float = configs.get("dt", default=50.0)
-
-
-@dataclass
-class PlotConfig:
-    def __init__(self, configs: Configurations, default_dir: str):
-        interval = configs.get("interval", default="5min")
-        if isinstance(interval, (int, float)):
-            self.interval: pd.Timedelta = pd.Timedelta(seconds=float(interval))
-        else:
-            self.interval: pd.Timedelta = pd.Timedelta(interval)
-        # `live`: overwrite a single file `progress.png` each interval — pair it
-        # with the auto-generated `progress.html` for a live browser view.
-        # `save`: also archive a timestamped PNG per frame.
-        # `show`: pop a matplotlib window (only works when the solver runs on
-        # the main thread; auto-disabled otherwise).
-        self.live: bool = configs.get_bool("live", default=True)
-        self.save: bool = configs.get_bool("save", default=False)
-        self.show: bool = configs.get_bool("show", default=False)
-        self.dir: str = configs.get("dir", default=default_dir)
-
-
-class SoilSimulation(Component):
+class SoilSimulation(SoilBase):
     TYPE: str = "soil_simulation"
-    INCLUDES = ["mesh", "pde", "plot"]
+    INCLUDES = ["mesh", "pde", "plot", "probes"]
 
     SIMULATION_STATE = Constant(bytes, "simulation_state", "Soil Simulation State", "-")
     SOIL_PROGRESS_IMAGE = Constant(bytes, "soil_progress_image", "Soil Simulation Progress Image", "png")
 
     # Diagnostic flux densities reported per callback. Internal flux
-    # math runs in kg/(m^2*s); these channels publish in g/(m^2*s) so
-    # typical 1e-4 mass-flux values display readably (~0.1) in the UI.
-    WATER_TOP_IN = Constant(float, "water_top_in", "Top Water Input (Irrigation)", "g/(m^2*s)")
-    WATER_TOP_OUT = Constant(float, "water_top_out", "Top Water Output (Evaporation)", "g/(m^2*s)")
-    WATER_BOTTOM = Constant(float, "water_bottom", "Bottom Water Output (Drainage)", "g/(m^2*s)")
-    WATER_TRANSP = Constant(float, "water_transpiration", "Plant Transpiration", "g/(m^2*s)")
+    # math runs in kg/(m^2*s); these channels publish in kg/(m^2*h) so
+    # typical 1e-4 mass-flux values display readably (~0.36) in the UI
+    # and stay consistent with the EVAPOTRANSPIRATION channel.
+    WATER_TOP_IN = Constant(float, "water_top_in", "Top Water Input (Irrigation)", "kg/(m^2*h)")
+    WATER_TOP_OUT = Constant(float, "water_top_out", "Top Water Output (Evaporation)", "kg/(m^2*h)")
+    WATER_BOTTOM = Constant(float, "water_bottom", "Bottom Water Output (Drainage)", "kg/(m^2*h)")
+    WATER_TRANSP = Constant(float, "water_transpiration", "Plant Transpiration", "kg/(m^2*h)")
+    # Mass that the per-step ``[SE_MIN, SE_MAX]`` clipper had to throw
+    # away. WATER_RUNOFF is rain / irrigation that couldn't infiltrate
+    # (top cells already at/near SE_MAX); WATER_DEMAND_UNMET is
+    # evaporation / transpiration that couldn't be satisfied (plant
+    # cells or surface segments already at/near SE_MIN). Both reported
+    # as area-normalised rates so they're directly comparable to the
+    # WATER_TOP_* channels.
+    WATER_RUNOFF = Constant(float, "water_runoff", "Rejected Top Influx (Runoff)", "kg/(m^2*h)")
+    WATER_DEMAND_UNMET = Constant(float, "water_demand_unmet", "Unmet Evap+Transp Demand", "kg/(m^2*h)")
+    # Global mass-balance check. The existing WATER_BOTTOM channel uses
+    # the integral closure formula (inflow − outflow − Δstorage), which
+    # is zero by construction; ``WATER_BALANCE_RESIDUAL`` reports the
+    # gap against an INDEPENDENT bottom-face drainage estimate from
+    # K(Se_bot)·ρ_w. Close to zero (compared to WATER_BOTTOM) → the
+    # solver is conserving mass and the integral diagnostic agrees with
+    # the boundary physics. A large value means lateral / source clipping
+    # / non-convergence is moving mass the integral routine couldn't
+    # account for — flag for investigation.
+    WATER_BALANCE_RESIDUAL = Constant(
+        float, "water_balance_residual", "Mass-Balance Residual (integral − direct)", "kg/(m^2*h)",
+    )
 
     _mesh_filename: str
-    _mesh_fipy: Gmsh2D
-    _variables: dict[str, Any]
-    _equations: dict[str, Any]
-    _soil_model: SoilModel
+
+    # FiPy mesh, Richards-equation assembly, segment index, and the pure
+    # integration primitives all live on ``_pde`` (shared with
+    # :class:`SoilPredictor`). The legacy ``_mesh_fipy`` / ``_soil_model`` /
+    # ``_segment_*`` attributes are exposed below as thin properties so
+    # plotting and diagnostic call-sites stay compact.
+    _pde: SoilPDECore
 
     _mesh_config: MeshConfig
     _ode_config: PDEConfig
@@ -187,23 +124,62 @@ class SoilSimulation(Component):
     # Progress-plot state
     _plot_progress: bool = False
     _plot_fig: Any = None
-    _plot_axes: Any = None
-    _plot_history: list = None
+    _plot_ax: Any = None
     _last_plot_simtime: Optional[pd.Timestamp] = None
 
-    # Boundary / bulk index caches built once after mesh load
-    _segment_cells: dict[str, np.ndarray]
-    _segment_face_len: dict[str, float]
-    _segment_cell_volume: dict[str, float]
-    _top_segment_names: list[str]           # segments where soil evaporation acts
-    _open_sky_segment_names: list[str]      # bare-soil strips not under the PV roof — rain falls here
-    _plant_cells: np.ndarray
-    _plant_volume: float
+    # User-defined relative-saturation probes (points + areas). Each entry
+    # has its own ``probe_<name>`` channel sampled once per advance().
+    _probes: list[ProbeSpec]
 
-    # Pre-computed θ-rate conversion factors (multiplied by mass fluxes per callback)
-    _irrigation_factor: float               # 1 / vol                         [1/m^3]
-    _theta_diff: float                      # θ_s - θ_r
-    _rain_face_len: float                   # Σ face_len over open-sky segments
+    # -- thin accessors onto SoilPDECore --------------------------------------
+
+    @property
+    def _mesh_fipy(self) -> Gmsh2D:
+        return self._pde.mesh
+
+    @property
+    def _soil_model(self) -> SoilModel:
+        return self._pde.soil_model
+
+    @property
+    def _segment_cells(self) -> dict[str, np.ndarray]:
+        return self._pde.segment_cells
+
+    @property
+    def _segment_face_len(self) -> dict[str, float]:
+        return self._pde.segment_face_len
+
+    @property
+    def _segment_cell_volume(self) -> dict[str, float]:
+        return self._pde.segment_cell_volume
+
+    @property
+    def _top_segment_names(self) -> list[str]:
+        return self._pde.top_segment_names
+
+    @property
+    def _open_sky_segment_names(self) -> list[str]:
+        return self._pde.open_sky_segment_names
+
+    @property
+    def _plant_cells(self) -> np.ndarray:
+        return self._pde.plant_cells
+
+    @property
+    def _plant_volume(self) -> float:
+        return self._pde.plant_volume
+
+    @property
+    def _theta_diff(self) -> float:
+        return self._pde.theta_diff
+
+    @property
+    def _irrigation_factor(self) -> float:
+        return self._pde.irrigation_factor
+
+    @property
+    def _rain_face_len(self) -> float:
+        return self._pde.rain_face_len
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
@@ -224,19 +200,13 @@ class SoilSimulation(Component):
             SoilSimulation.WATER_TOP_OUT,
             SoilSimulation.WATER_BOTTOM,
             SoilSimulation.WATER_TRANSP,
+            SoilSimulation.WATER_RUNOFF,
+            SoilSimulation.WATER_DEMAND_UNMET,
+            SoilSimulation.WATER_BALANCE_RESIDUAL,
         ):
             self.data.add(c, aggregate="mean", logger={"enabled": False})
 
-        self._soil_model = Genuchten(
-            theta_r=self._ode_config.theta_r,
-            theta_s=self._ode_config.theta_s,
-            alpha=self._ode_config.alpha,
-            n=self._ode_config.n,
-            k_s=self._ode_config.k_s,
-        )
-
-        if not os.path.exists(self._mesh_config.filename):
-            self._create_mesh()
+        # (mesh ensure + PDECore built together by SoilBase._build_pde below)
 
         # `plot_structure`: dump a static mesh.png next to the progress plots
         # (or into <data_dir>/soil_simulation if no [plot] block is configured).
@@ -262,19 +232,21 @@ class SoilSimulation(Component):
                 configs.get_member("plot", defaults={}, ensure_exists=True),
                 default_dir=default_plot_dir,
             )
-            self._plot_history = []
             self._last_plot_simtime = None
             self._plot_fig = None
-            self._plot_axes = None
+            self._plot_ax = None
             if self._plot_config.save or self._plot_config.live:
                 os.makedirs(self._plot_config.dir, exist_ok=True)
             self.data.add(SoilSimulation.SOIL_PROGRESS_IMAGE, aggregate="last", logger={"enabled": True})
 
-        self._mesh_fipy = Gmsh2D(self._mesh_config.filename, communicator=serialComm)
+        self._pde = self._build_pde()
+        logging.info(
+            "%s: soil model = %s (k_s=%.3e m/s, theta_r=%.3f, theta_s=%.3f)",
+            self.name, self._soil_model.__class__.__name__,
+            self._ode_config.k_s, self._ode_config.theta_r, self._ode_config.theta_s,
+        )
 
-        self._build_eq()
-        self._constrain_eq()
-        self._build_segment_index()
+        self._configure_probes(configs)
 
     def advance(
         self,
@@ -288,37 +260,48 @@ class SoilSimulation(Component):
 
         self._simulating = True
         try:
-            # Cold start (no logger restore): spin up one hour with current
-            # weather to reach an approximate steady state instead of using the
-            # static IC from `_constrain_eq`.
+            # Cold start (no logger restore): spin up with current weather
+            # to reach an approximate steady state instead of using the
+            # static IC from `_constrain_eq`. Duration comes from
+            # ``[pde].cold_start`` (default 3h).
             if self._last_simulated_at is None:
-                elapsed = pd.Timedelta(hours=1)
-                logging.info("%s: cold start spin-up — 1h with weather at %s", self.name, now)
+                elapsed = self._ode_config.cold_start
+                logging.info(
+                    "%s: cold start spin-up — %s with weather at %s",
+                    self.name, elapsed, now,
+                )
             else:
                 elapsed = now - self._last_simulated_at
 
-            dt = self._ode_config.dt
-            n_steps = max(1, int(elapsed.total_seconds() / dt))
-            elapsed_s = n_steps * dt
+            if not elapsed:
+                return
+
+            logging.debug("%s: advance dt=%s now=%s", self.name, elapsed, now)
+            elapsed_s = float(elapsed.total_seconds())
 
             rates = self._compute_flux_rates(et_data, seg_et, elapsed_s)
             sim_t0 = now - pd.Timedelta(seconds=elapsed_s)
             storage_before = self._total_water()
-            step_storage_prev = storage_before
-            for i in range(n_steps):
-                self._apply_source(rates, dt)
-                self._solve(dt)
-                if self._plot_progress:
-                    step_storage_now = self._total_water()
-                    step_drainage = self._balance_drainage_flux(
-                        rates, step_storage_now - step_storage_prev, dt
-                    )
-                    step_storage_prev = step_storage_now
-                    sim_t = sim_t0 + pd.Timedelta(seconds=(i + 1) * dt)
-                    self._capture_progress(sim_t, rates, step_drainage)
+            interval = self._plot_config.interval if self._plot_progress else None
+            clip_total = ClipDiagnostics()
+            elapsed_s = self._walk(
+                rates=rates,
+                window_s=elapsed_s,
+                clip_total=clip_total,
+                sim_t0=sim_t0,
+                plot_interval=interval,
+            )
+
+            # Final unconditional render — without this the throttle can
+            # swallow the last dt-step (e.g. 1h spin-up with interval="1h"
+            # leaves the saved file frozen at sim_t0+dt).
+            if self._plot_progress:
+                self._render_progress_safe(now)
 
             delta_storage = self._total_water() - storage_before
-            diagnostics = self._record_diagnostics(rates, now, delta_storage, elapsed_s)
+            diagnostics = self._record_diagnostics(
+                rates, now, delta_storage, elapsed_s, clip_total,
+            )
             self._save_state(now)
             return diagnostics
         finally:
@@ -369,21 +352,36 @@ class SoilSimulation(Component):
         """Top-boundary face length [m] for a segment."""
         return float(self._segment_face_len.get(name, 0.0))
 
+    def get_probes(self) -> list[ProbeSpec]:
+        """Resolved probe sampling recipes (point + area). Public so the
+        ``SoilPredictor`` sibling can borrow them without re-parsing the
+        config — both share the same physical mesh, so cell indices and
+        weights are valid for either solver.
+
+        Implemented as a method (not a ``@property``) so lories' configurator
+        ``__str__`` reflection skips it: ``ProbeSpec`` carries ``np.ndarray``
+        fields and lories' ``get_members`` dedupes by ``not in
+        members.values()`` which trips numpy's ambiguous-truth check.
+        """
+        return list(self._probes)
+
+    def get_rel_sat_snapshot(self) -> np.ndarray:
+        """Copy of the live saturation field. Used by ``SoilPredictor`` as
+        the initial condition for forecast roll-outs; copying avoids the
+        predictor accidentally mutating the live solver state. Method form
+        rather than ``@property`` for the same reason as :meth:`get_probes`.
+        """
+        return self._pde.snapshot()
+
     def apply_state_blob(self, raw: bytes, timestamp: pd.Timestamp) -> None:
         if raw is None or len(raw) == 0:
             return
-        buf = io.BytesIO(raw)
-        arrays = np.load(buf)
-        self._variables["rel_sat"].setValue(arrays["rel_sat"])
-        self._variables["rel_sat"]._old.setValue(arrays["rel_sat_old"])
+        self._pde.load_state_blob(raw)
         self._last_simulated_at = timestamp
         logging.info("%s: restored soil state from %s", self.name, timestamp)
 
     def _save_state(self, timestamp: pd.Timestamp) -> None:
-        rel_sat = self._variables["rel_sat"]
-        buf = io.BytesIO()
-        np.savez(buf, rel_sat=rel_sat.value.copy(), rel_sat_old=rel_sat._old.value.copy())
-        self.data[SoilSimulation.SIMULATION_STATE].set(timestamp, buf.getvalue())
+        self.data[SoilSimulation.SIMULATION_STATE].set(timestamp, self._pde.save_state_blob())
         self._last_simulated_at = timestamp
 
     def _compute_flux_rates(
@@ -400,8 +398,14 @@ class SoilSimulation(Component):
         local LAI. Negative ET (radiative cooling case) is clipped to zero
         so we never inject water through the boundaries by accident.
 
-        ``rain_flux`` comes from ``Weather.PRECIPITATION`` (mm accumulated over
-        the data interval) divided by ``elapsed_s`` (1 mm == 1 kg/m²).
+        ``rain_flux`` is ``precip_mm / elapsed_s``: dividing by the catch-up
+        window means the per-step ``rain_flux · dt`` integrated over the
+        ``n_steps`` substeps lands at exactly ``precip_mm`` of total mass
+        regardless of how long the window is (mass-conservative).
+        Caveat: during the 3 h cold-start spin-up we spread the *latest*
+        precip bucket over those 3 simulated hours — the total mass is
+        right but the temporal placement is fictional. Mass-correct,
+        timing-approximate.
         """
         seg_evap: dict[str, float] = {}
         seg_transp: dict[str, float] = {}
@@ -428,90 +432,94 @@ class SoilSimulation(Component):
             rain_flux=rain_flux,
         )
 
-    def _apply_source(self, rates: FluxRates, dt: float) -> None:
+    def _apply_source(self, rates: FluxRates, dt: float) -> ClipDiagnostics:
+        """Thin wrapper that unpacks :class:`FluxRates` and delegates to
+        :meth:`SoilPDECore.apply_source`. Returns the per-step clipping
+        diagnostics so the wall-clock walk in :meth:`_walk` can
+        accumulate runoff / unmet demand across substeps."""
+        return self._pde.apply_source(
+            seg_evap=rates.seg_evap,
+            seg_transp=rates.seg_transp,
+            rain_flux=rates.rain_flux,
+            flow_m3s=rates.flow_m3s,
+            dt=dt,
+        )
+
+    def _walk(
+        self,
+        *,
+        rates: FluxRates,
+        window_s: float,
+        clip_total: ClipDiagnostics,
+        sim_t0: pd.Timestamp,
+        plot_interval: Optional[pd.Timedelta],
+    ) -> float:
+        """HYDRUS-style adaptive-dt wall-clock walk.
+
+        Integrates ``rates`` over a window of ``window_s`` seconds. Each
+        substep is attempted at ``sub_dt``; on non-convergence (the
+        Picard sweep loop hits ``max_sweeps`` without meeting
+        ``tol_th``), the state is rolled back to the pre-substep
+        snapshot and the substep is retried at ``sub_dt / 3`` — until
+        the substep converges or ``sub_dt`` drops to ``ode_config.dt_min``,
+        at which point the under-converged state is accepted and a
+        warning is logged. After a fast convergence (≤ 3 sweeps) the
+        attempted ``sub_dt`` is allowed to grow back up to
+        ``ode_config.dt`` (×1.5 per step).
+
+        Plot-frame throttling is keyed off the in-walk simulation
+        timestamp so live `progress.png` keeps refreshing across the
+        retry loop. Returns the actual elapsed seconds covered, which
+        is always ``window_s`` (we either converge or accept the
+        non-converged state at ``dt_min``).
         """
-        Rebuild the ``source`` CellVariable for the next ``dt``-second step.
+        dt_max = self._ode_config.dt
+        dt_min = max(self._ode_config.dt_min, 1.0e-6)
+        sub_dt = dt_max
+        t_offset = 0.0
+        retries = 0
 
-        Source value is θ-rate (1/s). All contributions are summed per cell,
-        then clipped together so Sₑ stays within ``[SE_MIN, SE_MAX]`` after
-        one step.
-        """
-        se = self._variables["rel_sat"].value
-        coeff = self._theta_diff
-        theta_rate = np.zeros_like(se)
+        while t_offset < window_s - 1.0e-9:
+            remaining = window_s - t_offset
+            attempted = min(sub_dt, remaining)
+            snapshot = self._pde.snapshot()
+            clip = self._apply_source(rates, attempted)
+            result = self._pde.solve(attempted, log_name=self.name)
 
-        # === Rain on the bare-soil strips left and right of the plant
-        # block — these are open to the sky. The plant zone (plant tops +
-        # watering strip) sits under the PV roof and gets no rain;
-        # irrigation reaches the roots through the volumetric drip source
-        # on WateringTopSegment below.
-        if rates.rain_flux != 0.0:
-            for name in self._open_sky_segment_names:
-                cells = self._segment_cells.get(name)
-                if cells is None or cells.size == 0:
-                    continue
-                vol = self._segment_cell_volume.get(name, 0.0)
-                if vol <= 0:
-                    continue
-                factor = self._segment_face_len[name] / (RHO_W * vol)
-                theta_rate[cells] += rates.rain_flux * factor
-
-        # === Soil evaporation per segment. The shading factor is already
-        # baked into each ``rates.seg_evap[name]`` value (applied at ET
-        # evaluation time), so this loop just maps the segment flux density
-        # onto its boundary cells. Watering segment is excluded — its
-        # surface state is governed by the irrigation source.
-        for name, evap in rates.seg_evap.items():
-            cells = self._segment_cells.get(name)
-            if cells is None or cells.size == 0:
+            if not result.converged and attempted > dt_min:
+                # Roll back the PDE state and retry at a smaller substep.
+                self._pde.set_state(snapshot)
+                sub_dt = max(dt_min, attempted / 3.0)
+                retries += 1
                 continue
-            vol = self._segment_cell_volume.get(name, 0.0)
-            if vol <= 0:
-                continue
-            factor = self._segment_face_len[name] / (RHO_W * vol)
-            theta_rate[cells] -= evap * factor
 
-        # === Drip irrigation on WateringTopSegment (volumetric, additive) ===
-        if rates.flow_m3s > 0.0 and self._irrigation_factor > 0:
-            cells = self._segment_cells["WateringTopSegment"]
-            if cells.size:
-                theta_rate[cells] += rates.flow_m3s * self._irrigation_factor
+            # Accept the step (converged, or we're already at dt_min).
+            t_offset += attempted
+            clip_total.add(clip)
 
-        # === Canopy transpiration over PlantSurface bulk cells. Per-segment
-        # transp values share the same canopy bulk as a sink: total mass per
-        # unit out-of-plane = Σ transp_seg · face_len_seg [kg/(m·s)], then
-        # divided by RHO_W · plant_volume to land at θ-rate (1/s).
-        if rates.seg_transp and self._plant_volume > 0:
-            transp_mass = sum(
-                value * self._segment_face_len.get(name, 0.0)
-                for name, value in rates.seg_transp.items()
+            # Grow back toward dt_max after a fast convergence so we don't
+            # spend the rest of the window inching forward at the shrunken
+            # substep once a hard patch is behind us.
+            if result.converged and result.sweeps <= 3 and sub_dt < dt_max:
+                sub_dt = min(dt_max, sub_dt * 1.5)
+
+            if plot_interval is not None:
+                sim_t = sim_t0 + pd.Timedelta(seconds=t_offset)
+                if (
+                    self._last_plot_simtime is None
+                    or (sim_t - self._last_plot_simtime) >= plot_interval
+                ):
+                    self._render_progress_safe(sim_t)
+
+        if retries:
+            logging.debug(
+                "%s: adaptive walk completed window=%.1fs with %d retry(s)",
+                self.name, window_s, retries,
             )
-            if transp_mass > 0:
-                theta_rate[self._plant_cells] -= transp_mass / (RHO_W * self._plant_volume)
-
-        # Per-cell clip so Sₑ stays within bounds after one dt step.
-        src = self._clip_theta_rate(se, theta_rate, dt, coeff)
-        self._variables["source"].setValue(src)
-
-    @staticmethod
-    def _clip_theta_rate(se_now: np.ndarray, theta_rate: float, dt: float, coeff: float) -> np.ndarray:
-        """
-        Clip a uniform θ-rate so ``Sₑ_now + (theta_rate/coeff)·dt`` stays in
-        ``[SE_MIN, SE_MAX]`` per cell. Mirrors check_top/check_bottom from the
-        validation notebook.
-        """
-        max_pos = np.maximum((SE_MAX - se_now) / dt, 0.0) * coeff
-        max_neg = np.minimum((SE_MIN - se_now) / dt, 0.0) * coeff
-        return np.clip(theta_rate, max_neg, max_pos)
+        return window_s
 
     def _total_water(self) -> float:
-        # Σ θ · cellVolume · ρ_w. In 2D this is mass per unit out-of-plane
-        # depth, in the same units as the time-integrated face-flux balance
-        # used by ``_balance_drainage_flux`` (so storage Δ and inflow Δ
-        # cancel exactly when no water leaves through the bottom).
-        se = self._variables["rel_sat"].value
-        theta = self._ode_config.theta_r + self._theta_diff * se
-        return float(np.sum(theta * np.asarray(self._mesh_fipy.cellVolumes))) * RHO_W
+        return self._pde.total_water()
 
     def _balance_drainage_flux(
         self,
@@ -547,14 +555,19 @@ class SoilSimulation(Component):
         now: pd.Timestamp,
         delta_storage: float,
         elapsed_s: float,
+        clip: ClipDiagnostics,
     ) -> dict[str, float]:
-        """Write the four per-callback flux-density channels in g/(m²·s).
+        """Write the six per-callback flux-density channels in kg/(m²·h).
 
         WATER_TOP_OUT and WATER_TRANSP are reported as face-length-weighted
         spatial means so a single number stays meaningful while the underlying
-        physics is per-segment. Internal flux math runs in kg/(m²·s); we
-        convert at this boundary so channels and the returned diagnostics
-        DataFrame agree with the unit declared on each Constant.
+        physics is per-segment. WATER_RUNOFF and WATER_DEMAND_UNMET come
+        from the per-substep ClipDiagnostics accumulated in :meth:`advance`
+        and are normalised against the top face length (runoff: rain face
+        length; demand-unmet: all evaporating top segments). Internal flux
+        math runs in kg/(m²·s); we convert at this boundary so channels
+        and the returned diagnostics DataFrame agree with the unit
+        declared on each Constant.
         """
         watering_len = self._segment_face_len.get("WateringTopSegment", 0.0)
         irr_flux = rates.flow_m3s * RHO_W / watering_len if watering_len > 0 else 0.0
@@ -564,17 +577,93 @@ class SoilSimulation(Component):
         e_flux_mean = self._face_weighted_mean(rates.seg_evap, self._top_segment_names)
         t_flux_mean = self._face_weighted_mean(rates.seg_transp, self._top_segment_names)
         bottom = self._balance_drainage_flux(rates, delta_storage, elapsed_s)
+        # Independent boundary-flux estimate for the mass-balance check.
+        direct_bottom = self._pde.bottom_drainage_estimate()  # kg/(m²·s)
+        balance_residual = bottom - direct_bottom              # kg/(m²·s)
 
-        kg_to_g = 1000.0
+        # Rejected mass → area-normalised rates. Runoff is normalised
+        # against the open-sky strip length (where rain falls + plant
+        # tops where irrigation could spill if it ponded). Unmet demand
+        # is normalised against the union of all evaporating segments.
+        top_face_len = float(self._rain_face_len) + sum(
+            self._segment_face_len.get(n, 0.0)
+            for n in ("PlantTopLeftSegment", "PlantTopRightSegment", "WateringTopSegment")
+        )
+        evap_face_len = sum(
+            self._segment_face_len.get(n, 0.0) for n in self._top_segment_names
+        )
+        # WATER_RUNOFF combines clipper-rejected influx (ponding-off mode)
+        # and deliberate ponding overflow (ponding-on mode). With ponding
+        # enabled, top_rejected should be ~0 (the bucket absorbs the
+        # excess before it reaches the cell clip) and ponding_overflow
+        # carries the runoff; with ponding disabled, ponding_overflow is
+        # 0 by construction. Either way, the channel publishes total
+        # rejected top mass normalised against the top face length.
+        runoff_mass = clip.top_rejected + clip.ponding_overflow
+        runoff_rate = (
+            runoff_mass / (top_face_len * elapsed_s)
+            if top_face_len > 0 and elapsed_s > 0 else 0.0
+        )
+        unmet_rate = (
+            clip.bottom_rejected / (evap_face_len * elapsed_s)
+            if evap_face_len > 0 and elapsed_s > 0 else 0.0
+        )
+
+        kg_per_s_to_kg_per_h = 3600.0
         diagnostics = {
-            self.data[SoilSimulation.WATER_TOP_OUT]: e_flux_mean * kg_to_g,
-            self.data[SoilSimulation.WATER_TRANSP]: t_flux_mean * kg_to_g,
-            self.data[SoilSimulation.WATER_TOP_IN]: top_in * kg_to_g,
-            self.data[SoilSimulation.WATER_BOTTOM]: bottom * kg_to_g,
+            self.data[SoilSimulation.WATER_TOP_OUT]: e_flux_mean * kg_per_s_to_kg_per_h,
+            self.data[SoilSimulation.WATER_TRANSP]: t_flux_mean * kg_per_s_to_kg_per_h,
+            self.data[SoilSimulation.WATER_TOP_IN]: top_in * kg_per_s_to_kg_per_h,
+            self.data[SoilSimulation.WATER_BOTTOM]: bottom * kg_per_s_to_kg_per_h,
+            self.data[SoilSimulation.WATER_RUNOFF]: runoff_rate * kg_per_s_to_kg_per_h,
+            self.data[SoilSimulation.WATER_DEMAND_UNMET]: unmet_rate * kg_per_s_to_kg_per_h,
+            self.data[SoilSimulation.WATER_BALANCE_RESIDUAL]: balance_residual * kg_per_s_to_kg_per_h,
         }
         for channel, value in diagnostics.items():
             channel.set(now, value)
+        self._sample_probes(now)
         return {channel.id: value for channel, value in diagnostics.items()}
+
+    def _configure_probes(self, configs: Configurations) -> None:
+        """Resolve probe specs from the ``[probes]`` block via the shared
+        :func:`resolve_probes` helper, then register one ``<key>`` float
+        channel per probe so values can be logged like any other diagnostic.
+        ``SoilPredictor`` calls the same helper to keep its own per-strategy
+        channels lined up against the same physical points / areas."""
+        self._probes = []
+        if not configs.has_member("probes"):
+            return
+        probes_cfg = configs.get_member("probes", defaults={})
+        for probe in resolve_probes(probes_cfg, self._mesh_fipy, self._mesh_config, log_name=self.name):
+            self._register_probe(probe)
+            self._probes.append(probe)
+
+        if self._probes:
+            logging.info(
+                "%s: registered %d saturation probe(s)",
+                self.name, len(self._probes),
+            )
+
+    def _register_probe(self, probe: ProbeSpec) -> None:
+        # ``probe.name`` is the fallback display label. A user-provided
+        # ``[data.channels.<key>] name = "..."`` block overrides it via the
+        # standard channel-config merge in ``DataAccess.add``. The section
+        # key IS the channel id (no prefix) so the override block can use
+        # the same name the user typed in ``[probes.*.<key>]``.
+        self.data.add(
+            probe.channel_id,
+            type=float,
+            name=probe.name,
+            unit="-",
+            aggregate="mean",
+            logger={"enabled": True},
+        )
+
+    def _sample_probes(self, now: pd.Timestamp) -> None:
+        if not self._probes:
+            return
+        for probe in self._probes:
+            self.data[probe.channel_id].set(now, self._pde.sample(probe))
 
     def _face_weighted_mean(
         self,
@@ -593,134 +682,6 @@ class SoilSimulation(Component):
         if total_len <= 0:
             return 0.0
         return weighted / total_len
-
-    def _create_mesh(self) -> None:
-        dl = self._mesh_config.dl
-        width = self._mesh_config.width
-        height = self._mesh_config.height
-        plant_width = self._mesh_config.plant_width
-        plant_height = self._mesh_config.plant_height
-        watering_width = self._mesh_config.watering_width
-        d_x = self._mesh_config.dx
-
-        gmsh.initialize()
-        gmsh.model.add("soil")
-
-        # =============================
-        # check parameters validity
-        # width >= plant_width + 2 * d_x
-        if width < plant_width + 2 * d_x:
-            raise ValueError("Invalid parameters: width must be at least plant_width + 2 * d_x")
-
-        # height > 0
-        if height <= 0:
-            raise ValueError("Invalid parameters: height must be positive")
-
-        # height > plant_height
-        if height <= plant_height:
-            raise ValueError("Invalid parameters: height must be greater than plant_height")
-
-        # the width - plant_width is a multiple of d_x
-        if ((width - plant_width) / 2) % d_x != 0 and (width - plant_width) / (2 * d_x) > 0:
-            raise ValueError("Invalid parameters: (width - plant_width) must be a multiple of 2 * d_x")
-        # =============================
-
-        surface_count = int((width - plant_width) / (2 * d_x))
-
-        lines_tl = []
-        lines_tr = []
-
-        # =============================
-        # Top left
-        # =============================
-        point_sim_tl = gmsh.model.geo.addPoint(0.0, 0.0, 0.0, dl)
-        point_prev = point_sim_tl
-        offset = d_x
-        for i in range(surface_count):
-            point = gmsh.model.geo.addPoint(offset + d_x * i, 0.0, 0.0, dl)
-            line = gmsh.model.geo.addLine(point_prev, point)
-            lines_tl.append(line)
-            gmsh.model.geo.synchronize()
-            gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line]), f"LeftTopSegment_{i}")
-            point_prev = point
-
-        # =============================
-        # Plant
-        # =============================
-        point_plant_tl = point_prev
-        point_watering_tl = gmsh.model.geo.addPoint(
-            d_x * surface_count + plant_width / 2 - watering_width / 2, 0.0, 0.0, dl
-        )
-        point_watering_tr = gmsh.model.geo.addPoint(
-            d_x * surface_count + plant_width / 2 + watering_width / 2, 0.0, 0.0, dl
-        )
-        point_plant_tr = gmsh.model.geo.addPoint(d_x * surface_count + plant_width, 0.0, 0.0, dl)
-        point_plant_bl = gmsh.model.geo.addPoint(d_x * surface_count, -plant_height, 0.0, dl)
-        point_plant_br = gmsh.model.geo.addPoint(d_x * surface_count + plant_width, -plant_height, 0.0, dl)
-
-        line_plant_top_1 = gmsh.model.geo.addLine(point_plant_tl, point_watering_tl)
-        line_plant_top_2 = gmsh.model.geo.addLine(point_watering_tl, point_watering_tr)
-        line_plant_top_3 = gmsh.model.geo.addLine(point_watering_tr, point_plant_tr)
-        line_plant_right = gmsh.model.geo.addLine(point_plant_tr, point_plant_br)
-        line_plant_bottom = gmsh.model.geo.addLine(point_plant_br, point_plant_bl)
-        line_plant_left = gmsh.model.geo.addLine(point_plant_bl, point_plant_tl)
-
-        loop_plant = gmsh.model.geo.addCurveLoop(
-            [line_plant_top_1, line_plant_top_2, line_plant_top_3, line_plant_right, line_plant_bottom, line_plant_left]
-        )
-        surface_plant = gmsh.model.geo.addPlaneSurface([loop_plant])
-        gmsh.model.geo.synchronize()
-        gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line_plant_top_1]), "PlantTopLeftSegment")
-        gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line_plant_top_2]), "WateringTopSegment")
-        gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line_plant_top_3]), "PlantTopRightSegment")
-        gmsh.model.setPhysicalName(2, gmsh.model.addPhysicalGroup(2, [surface_plant]), "PlantSurface")
-
-        # =============================
-        # Top right
-        # =============================
-        point_prev = point_plant_tr
-        offset = d_x * surface_count + plant_width + d_x
-        for i in range(surface_count):
-            point = gmsh.model.geo.addPoint(offset + d_x * i, 0.0, 0.0, dl)
-            line = gmsh.model.geo.addLine(point_prev, point)
-            lines_tr.append(line)
-            gmsh.model.geo.synchronize()
-            gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line]), f"RightTopSegment_{i}")
-            point_prev = point
-        upper_right_point = point_prev
-
-        # =============================
-        # Ground layer
-        # =============================
-        point_sim_bl = gmsh.model.geo.addPoint(0.0, -height, 0.0, dl)
-        point_sim_br = gmsh.model.geo.addPoint(width, -height, 0.0, dl)
-
-        line_sim_right = gmsh.model.geo.addLine(upper_right_point, point_sim_br)
-        line_sim_bottom = gmsh.model.geo.addLine(point_sim_br, point_sim_bl)
-        line_sim_left = gmsh.model.geo.addLine(point_sim_bl, point_sim_tl)
-
-        loop_sim = gmsh.model.geo.addCurveLoop(
-            [
-                *lines_tl,
-                -line_plant_left,
-                -line_plant_bottom,
-                -line_plant_right,
-                *lines_tr,
-                line_sim_right,
-                line_sim_bottom,
-                line_sim_left,
-            ]
-        )
-        surface_sim = gmsh.model.geo.addPlaneSurface([loop_sim])
-        gmsh.model.geo.synchronize()
-        gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line_sim_bottom]), "GroundBottomSegment")
-        gmsh.model.setPhysicalName(2, gmsh.model.addPhysicalGroup(2, [surface_sim]), "GroundSurface")
-
-        gmsh.model.geo.synchronize()
-        gmsh.model.mesh.generate(2)
-        gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
-
-        gmsh.write(self._mesh_config.filename)
 
     def _plot_mesh(self, save_path: Optional[str] = None):
         mesh = meshio.read(self._mesh_config.filename)
@@ -796,17 +757,16 @@ class SoilSimulation(Component):
             logging.info("%s: wrote mesh structure to %s", self.name, save_path)
         plt.close(fig)
 
-    # TODO: Remove — only called by _solve_period (also dead). Superseded by
-    #   _render_progress, which writes progress.png with the saturation field.
     def _plot_mesh_2(self):
-        xi = np.linspace(min(self._mesh_fipy.cellCenters[0]), max(self._mesh_fipy.cellCenters[0]), 100)
-        yi = np.linspace(min(self._mesh_fipy.cellCenters[1]), max(self._mesh_fipy.cellCenters[1]), 100)
+        mesh = self._pde.mesh
+        xi = np.linspace(min(mesh.cellCenters[0]), max(mesh.cellCenters[0]), 100)
+        yi = np.linspace(min(mesh.cellCenters[1]), max(mesh.cellCenters[1]), 100)
 
         #
         # mapping the unstructured grid to a structured
         #
-        x, y = self._mesh_fipy.cellCenters
-        zi = griddata((x, y), self._variables["rel_sat"].value, (xi[None, :], yi[:, None]), method="cubic")
+        x, y = mesh.cellCenters
+        zi = griddata((x, y), self._pde.rel_sat.value, (xi[None, :], yi[:, None]), method="cubic")
 
         jet = plt.get_cmap("jet")
         # using matplotlib for plotting
@@ -826,62 +786,60 @@ class SoilSimulation(Component):
         plt.ylabel("y")
         plt.pause(0.01)
 
-    def _capture_progress(
-        self,
-        sim_t: pd.Timestamp,
-        rates: FluxRates,
-        drainage: float,
-    ) -> None:
-        if (
-            self._last_plot_simtime is not None
-            and (sim_t - self._last_plot_simtime) < self._plot_config.interval
-        ):
-            return
+    def _render_progress_safe(self, sim_t: pd.Timestamp) -> None:
+        """Render at sim_t with error containment — a single render failure
+        disables progress plotting for the rest of the run rather than
+        crashing the solver."""
         self._last_plot_simtime = sim_t
-
-        watering_len = self._segment_face_len.get("WateringTopSegment", 0.0)
-        irr_flux = rates.flow_m3s * RHO_W / watering_len if watering_len > 0 else 0.0
-        e_flux = self._face_weighted_mean(rates.seg_evap, self._top_segment_names)
-        t_flux = self._face_weighted_mean(rates.seg_transp, self._top_segment_names)
-
-        self._plot_history.append({
-            "timestamp": sim_t,
-            "rain": rates.rain_flux,
-            "irrigation": irr_flux,
-            "evaporation": e_flux,
-            "transpiration": t_flux,
-            "drainage": drainage,
-        })
-        cutoff = sim_t - PLOT_HISTORY_WINDOW
-        self._plot_history = [h for h in self._plot_history if h["timestamp"] >= cutoff]
-        self._render_progress(sim_t)
+        try:
+            self._render_progress(sim_t)
+        except Exception:  # noqa: BLE001
+            logging.exception("%s: progress-plot render failed; disabling.", self.name)
+            self._plot_progress = False
 
     def _init_progress_figure(self) -> None:
+        # show=True needs a GUI loop, which needs the main thread + a real
+        # display. On headless edge devices ($DISPLAY/$WAYLAND_DISPLAY unset
+        # on Linux) matplotlib defaults to a GUI backend that crashes on
+        # first draw — pre-empt that by switching to Agg whenever we won't
+        # be popping a window. savefig() / live HTML still work.
         on_main_thread = threading.current_thread() is threading.main_thread()
-        if self._plot_config.show and not on_main_thread:
+        has_display = sys.platform != "linux" or bool(
+            os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+        )
+        can_show = self._plot_config.show and on_main_thread and has_display
+
+        if self._plot_config.show and not can_show:
+            reason = "solver runs on a worker thread" if not on_main_thread else "no GUI display available"
             logging.warning(
-                "%s: progress plot 'show' disabled — solver runs on a worker thread "
-                "(matplotlib GUI requires the main thread). Use 'live = true' and "
+                "%s: progress plot 'show' disabled — %s. Use 'live = true' and "
                 "open progress.html in a browser for a live view.",
-                self.name,
+                self.name, reason,
             )
             self._plot_config.show = False
-            if matplotlib.get_backend().lower() not in ("agg", "module://matplotlib_inline.backend_inline"):
-                matplotlib.use("Agg", force=True)
+
+        if not can_show and matplotlib.get_backend().lower() not in (
+            "agg", "module://matplotlib_inline.backend_inline",
+        ):
+            matplotlib.use("Agg", force=True)
 
         if self._plot_config.show:
             plt.ion()
-        fig, axes = plt.subplots(
-            2, 1,
-            figsize=(8, 6),
-            dpi=120,
-            gridspec_kw={"height_ratios": [3, 2]},
-        )
-        sm = plt.cm.ScalarMappable(cmap="jet", norm=plt.Normalize(vmin=0.0, vmax=1.0))
+        x_extent = self._mesh_config.width
+        y_extent = self._mesh_config.height
+        fig, ax = plt.subplots(figsize=plot_style.compute_fig_size(x_extent, y_extent), dpi=plot_style.DPI)
+        # Smoothstep norm stretches the mid-saturation range visually so
+        # typical operating values (Se ≈ 0.3–0.7) get most of the
+        # colorbar's contrast, while near-dry / near-saturated bands are
+        # compressed. Colorbar tick labels stay in physical Se units
+        # because ``SmoothstepNorm.inverse`` is the analytic inverse.
+        self._plot_norm = plot_style.saturation_norm(vmin=0.0, vmax=1.0)
+        sm = plt.cm.ScalarMappable(cmap=plot_style.COLORMAP, norm=self._plot_norm)
         sm.set_array([])
-        fig.colorbar(sm, ax=axes[0], shrink=0.8, label=r"$S_e$")
+        fig.colorbar(sm, ax=ax, shrink=plot_style.CBAR_SHRINK, label="relative saturation [-]")
+        plot_style.apply_subplots_adjust(fig)
         self._plot_fig = fig
-        self._plot_axes = axes
+        self._plot_ax = ax
 
         if self._plot_config.live:
             self._write_progress_html()
@@ -914,42 +872,31 @@ class SoilSimulation(Component):
     def _render_progress(self, sim_t: pd.Timestamp) -> None:
         if self._plot_fig is None:
             self._init_progress_figure()
-        ax_sat, ax_ts = self._plot_axes
+        ax = self._plot_ax
 
-        x, y = self._mesh_fipy.cellCenters
+        x, y = self._pde.mesh.cellCenters
         xi = np.linspace(np.min(x), np.max(x), 100)
         yi = np.linspace(np.min(y), np.max(y), 100)
         zi = griddata(
             (np.asarray(x), np.asarray(y)),
-            self._variables["rel_sat"].value,
+            self._pde.rel_sat.value,
             (xi[None, :], yi[:, None]),
             method="cubic",
         )
 
-        ax_sat.clear()
-        ax_sat.contourf(xi, yi, zi, levels=15, cmap="jet", vmin=0.0, vmax=1.0)
-        ax_sat.contour(xi, yi, zi, levels=15, linewidths=0.5, colors="k")
-        ax_sat.set_aspect("equal", adjustable="box")
-        ax_sat.set_title(f"Relative Saturation @ {sim_t.isoformat()}")
-        ax_sat.set_xlabel("x (m)")
-        ax_sat.set_ylabel("y (m)")
-
-        ax_ts.clear()
-        if self._plot_history:
-            df = pd.DataFrame(self._plot_history).set_index("timestamp")
-            ax_ts.plot(df.index, df["rain"], label="rain in", color="tab:cyan")
-            ax_ts.plot(df.index, df["irrigation"], label="irrigation in", color="tab:blue")
-            ax_ts.plot(df.index, df["evaporation"], label="evaporation out", color="tab:orange")
-            ax_ts.plot(df.index, df["transpiration"], label="transpiration", color="tab:green")
-            ax_ts.plot(df.index, df["drainage"], label="drainage out", color="tab:red")
-            ax_ts.set_ylabel(r"kg/(m$^2\cdot$s)")
-            ax_ts.legend(loc="upper right", fontsize=7)
-            ax_ts.grid(True, alpha=0.3)
-            for label in ax_ts.get_xticklabels():
-                label.set_rotation(20)
-                label.set_ha("right")
-
-        self._plot_fig.tight_layout()
+        ax.clear()
+        # Contour levels stay linear in Se (the iso-saturation lines are
+        # physically meaningful at evenly spaced Se values); the colour
+        # mapping is reshaped by ``self._plot_norm`` so the same 15
+        # bands give finer mid-range gradient and coarser endpoint
+        # gradient.
+        ax.contourf(xi, yi, zi, levels=15, cmap=plot_style.COLORMAP, norm=self._plot_norm)
+        ax.contour(xi, yi, zi, levels=15, linewidths=0.5, colors="k")
+        plot_style.apply_axes_style(ax)
+        # Mesh y is positive depth; flip so the surface (y=0) sits at the top
+        # of the figure and depth grows downward.
+        ax.invert_yaxis()
+        ax.set_title(plot_style.format_progress_title("Relative saturation", sim_t))
 
         if self._plot_config.show:
             try:
@@ -980,115 +927,8 @@ class SoilSimulation(Component):
             with open(os.path.join(self._plot_config.dir, fname), "wb") as f:
                 f.write(png_bytes)
 
-    def _build_eq(self):
-        mesh = self._mesh_fipy
-
-        rel_sat = CellVariable(mesh=mesh, name="relative saturation", hasOld=True)
-        g_faces = FaceVariable(mesh=mesh, name="gravity faces", value=(0, 1.0))
-        source = CellVariable(mesh=mesh, name="source", value=0.0)
-        self._variables = {
-            "rel_sat": rel_sat,
-            "g_faces": g_faces,
-            "source": source,
-        }
-
-        kf = self._soil_model.k_from_se(rel_sat)
-        psi = self._soil_model.psi_from_se(rel_sat)
-        d_psi = self._soil_model.dpsi_dse(rel_sat)
-
-        # Richards' equation in Se form, expressed against Se directly:
-        #   (θs-θr) ∂Se/∂t = ∇·[K · D(Se) ∇Se] + ∂K/∂y + source
-        # where D(Se) = d|ψ|/dSe. Previously the diffusion coefficient was
-        # K·ψ (missing the chain rule) and gravity was a VanLeer convection
-        # on Se that leaked mass out the top boundary; both replaced.
-        gravity_flux = g_faces * kf.faceValue          # K·ẑ at faces (ẑ up)
-        gravity_div = gravity_flux.divergence          # cell-centered ∂K/∂y
-        richards = TransientTerm(coeff=self._ode_config.theta_s - self._ode_config.theta_r) == (
-            DiffusionTerm(coeff=(kf * d_psi))
-            + gravity_div
-            + source
-        )
-        self._equations = {
-            "kf": kf,
-            "psi": psi,
-            "d_psi": d_psi,
-            "gravity_div": gravity_div,
-            "richards": richards,
-        }
-
-    def _constrain_eq(self):
-        # Top-boundary water exchange (evap/irrigation) is applied as a source
-        # term in _update_source. Only the bottom drainage is held by a
-        # Dirichlet constraint here.
-        mesh = self._mesh_fipy
-        rel_sat = self._variables["rel_sat"]
-
-        rel_sat.setValue(0.35, where=mesh.physicalCells["GroundSurface"])
-        rel_sat.setValue(0.35, where=mesh.physicalCells["PlantSurface"])
-        rel_sat.constrain(0.35, where=mesh.physicalFaces["GroundBottomSegment"])
-        rel_sat.updateOld()
-
-    def _build_segment_index(self) -> None:
-        mesh = self._mesh_fipy
-        width = self._mesh_config.width
-        plant_width = self._mesh_config.plant_width
-        dx = self._mesh_config.dx
-        n_pv_segments = int((width - plant_width) / (2 * dx))
-
-        # Bare-soil top strips on the left and right of the plant block.
-        # The PV roof covers the plant zone (plant tops + watering strip);
-        # these flanking strips are open to the sky and rain falls here.
-        self._open_sky_segment_names = [
-            f"{side}TopSegment_{i}"
-            for i in range(n_pv_segments)
-            for side in ("Left", "Right")
-        ]
-        # Top segments where soil evaporation is applied (open-sky strips +
-        # plant top edges). The watering strip is excluded — drip irrigation
-        # there governs the surface state. PV-driven shading is now baked
-        # into the per-segment ET upstream (see ``Evapotranspiration`` and
-        # ``FieldSimulation._build_segments``), not handled here.
-        self._top_segment_names = [
-            *self._open_sky_segment_names,
-            "PlantTopLeftSegment",
-            "PlantTopRightSegment",
-        ]
-
-        face_areas = np.asarray(mesh._faceAreas)
-        cell_volumes = np.asarray(mesh.cellVolumes)
-
-        self._segment_cells = {}
-        self._segment_face_len = {}
-        self._segment_cell_volume = {}
-        for name in [*self._top_segment_names, "WateringTopSegment", "GroundBottomSegment"]:
-            face_mask = mesh.physicalFaces[name]
-            cell_ids = mesh.faceCellIDs[:, face_mask]
-            cell_ids = np.unique(np.asarray(cell_ids[cell_ids >= 0]).ravel())
-            self._segment_cells[name] = cell_ids
-            self._segment_face_len[name] = float(face_areas[face_mask].sum())
-            self._segment_cell_volume[name] = float(cell_volumes[cell_ids].sum())
-
-        plant_mask = np.asarray(mesh.physicalCells["PlantSurface"], dtype=bool)
-        self._plant_cells = np.where(plant_mask)[0]
-        self._plant_volume = float(cell_volumes[self._plant_cells].sum())
-
-        # Pre-compute θ-rate conversion factors. theta_rate = flux * factor.
-        self._theta_diff = self._ode_config.theta_s - self._ode_config.theta_r
-        watering_vol = self._segment_cell_volume.get("WateringTopSegment", 0.0)
-        self._irrigation_factor = 1.0 / watering_vol if watering_vol > 0 else 0.0
-
-        # Open-sky face length for the integral mass balance in
-        # ``_balance_drainage_flux`` (rain only falls on these strips).
-        self._rain_face_len = sum(
-            self._segment_face_len[n] for n in self._open_sky_segment_names
-        )
-
-    def _solve(self, dt: float):
-        eq = self._equations["richards"]
-        rel_sat = self._variables["rel_sat"]
-        res = 1e6
-        for _ in range(10):
-            res = eq.sweep(dt=dt, var=rel_sat)
-            if res <= 0.5:
-                break
-        rel_sat.updateOld()
+    # PDE assembly, segment indexing, and the Picard solve are owned by
+    # :class:`SoilPDECore` (``self._pde``). ``_apply_source`` above is the
+    # thin wrapper for the live-callback flux build; the adaptive-dt
+    # wall-clock walk lives in :meth:`_walk` and consumes the SolveResult
+    # returned by ``self._pde.solve`` directly.

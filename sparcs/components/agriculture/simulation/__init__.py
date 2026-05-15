@@ -15,5 +15,8 @@ from .evapotranspiration import Evapotranspiration  # noqa: F401
 from . import soil  # noqa: F401
 from .soil import SoilSimulation  # noqa: F401
 
+from . import soil_predictor  # noqa: F401
+from .soil_predictor import SoilPredictor  # noqa: F401
+
 from . import base  # noqa: F401
 from .base import FieldSimulation  # noqa: F401

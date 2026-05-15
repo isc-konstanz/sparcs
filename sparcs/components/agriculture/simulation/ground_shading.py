@@ -43,15 +43,77 @@ from typing import Any, Optional
 import matplotlib
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
 import numpy as np
 import pandas as pd
 from pvfactors.engine import PVEngine
 from pvfactors.geometry import OrderedPVArray
 from pvlib.tracking import singleaxis
 
+# pvfactors 1.6.1 (and the ``solarfactors`` fork) was written against
+# numpy < 2. ``HybridPerezOrdered.get_full_ts_modeling_vectors`` builds
+# ``rho_mat`` / ``inv_rho_mat`` by appending each timeseries surface's
+# ``get_param('rho')``, which is a scalar for surfaces with a constant
+# reflectivity and an array of length ``n_states`` for the rest. numpy<2
+# silently boxed the mixed list as ``dtype=object``; numpy>=2 raises
+# ``ValueError: setting an array element with a sequence ... inhomogeneous
+# shape``. Broadcast each scalar back to length ``n_states`` so the list
+# is homogeneous and the downstream radiosity math (which expects a 2-D
+# numeric matrix) keeps working. Patch in-place once at import time.
+def _patch_pvfactors_numpy2_compat() -> None:
+    from pvfactors.irradiance.models import HybridPerezOrdered, SKY_REFLECTIVITY_DUMMY
+
+    if getattr(HybridPerezOrdered, "_lories_numpy2_patched", False):
+        return
+
+    def get_full_ts_modeling_vectors(self, pvarray):
+        irradiance_mat, rho_mat, inv_rho_mat, total_perez_mat = (
+            self.get_ts_modeling_vectors(pvarray)
+        )
+        irradiance_mat.append(self.isotropic_luminance)
+        total_perez_mat.append(self.isotropic_luminance)
+        rho_mat.append(SKY_REFLECTIVITY_DUMMY * np.ones(pvarray.n_states))
+        inv_rho_mat.append(SKY_REFLECTIVITY_DUMMY * np.ones(pvarray.n_states))
+
+        n = pvarray.n_states
+
+        def _normalize(lst):
+            normalized = []
+            for x in lst:
+                arr = np.asarray(x, dtype=float)
+                if arr.ndim == 0 or arr.size == 1:
+                    arr = np.full(n, float(arr), dtype=float)
+                elif arr.shape[0] != n:
+                    # Surface produced a different-length array than n_states;
+                    # pad or truncate to keep the matrix rectangular. This
+                    # branch is defensive — the scalar case is what we have
+                    # seen in the wild.
+                    if arr.shape[0] < n:
+                        pad = np.zeros(n - arr.shape[0], dtype=float)
+                        arr = np.concatenate([arr, pad])
+                    else:
+                        arr = arr[:n]
+                normalized.append(arr)
+            return np.array(normalized)
+
+        return (
+            _normalize(irradiance_mat),
+            _normalize(rho_mat),
+            _normalize(inv_rho_mat),
+            _normalize(total_perez_mat),
+        )
+
+    HybridPerezOrdered.get_full_ts_modeling_vectors = get_full_ts_modeling_vectors
+    HybridPerezOrdered._lories_numpy2_patched = True
+
+
+_patch_pvfactors_numpy2_compat()
+
 from lories import Component, Constant
 from lories.components.weather import Weather
 from lories.typing import Configurations
+
+from . import plot_style
 
 
 # ---------------------------------------------------------------------------
@@ -111,10 +173,15 @@ def _qinc_in_range(ground: list[tuple], x_start: float, x_end: float) -> float:
 def _combine_grounds(grounds_per_setup: list[list[tuple]]) -> list[tuple]:
     """Merge per-setup ground segments at one timestep into a unified ground.
 
-    Direct fractions multiply across setups (each setup independently
-    shades the same patch of ground), reflection and isotropic terms
-    average. See notebook cell ``combine_grounds`` for the original
-    derivation.
+    pvfactors's ``qinc`` is the total (direct + isotropic + reflection)
+    incident on the patch. Combine across setups (e.g. mirrored A-frame):
+
+    - **Direct** multiplies — each setup independently shades the same
+      patch: ``combined_direct_frac = ∏ (direct_s / direct_max)``.
+    - **Isotropic / reflection** average — same sky and neighbour geometry,
+      not independent shading events.
+
+    Combined qinc is then ``combined_direct + ⟨isotropic⟩ + ⟨reflection⟩``.
     """
     if not grounds_per_setup:
         return []
@@ -128,8 +195,14 @@ def _combine_grounds(grounds_per_setup: list[list[tuple]]) -> list[tuple]:
         return np.unique(edge)
 
     edges = np.unique(np.concatenate([edges_of(g) for g in grounds_per_setup]))
-    qinc_max = max(
-        (seg[2]["qinc"] for g in grounds_per_setup for seg in g if seg[2]["qinc"] > 0),
+    # Max **direct** component (qinc minus its diffuse parts) — this is
+    # what direct fractions normalise against. Open-sky segments where the
+    # panels cast no shadow set the ceiling.
+    direct_max = max(
+        (
+            max(0.0, seg[2]["qinc"] - seg[2]["reflection"] - seg[2]["isotropic"])
+            for g in grounds_per_setup for seg in g
+        ),
         default=0.0,
     )
     n = len(grounds_per_setup)
@@ -149,12 +222,13 @@ def _combine_grounds(grounds_per_setup: list[list[tuple]]) -> list[tuple]:
                     seg_refl = seg[2]["reflection"]
                     seg_iso = seg[2]["isotropic"]
                     break
-            direct_frac *= (seg_qinc / qinc_max) if qinc_max > 0 else 0.0
+            seg_direct = max(0.0, seg_qinc - seg_refl - seg_iso)
+            direct_frac *= (seg_direct / direct_max) if direct_max > 0 else 0.0
             reflection += seg_refl
             isotropic += seg_iso
 
         params = {
-            "qinc": direct_frac * qinc_max + reflection / n + isotropic / n,
+            "qinc": direct_frac * direct_max + reflection / n + isotropic / n,
             "reflection": reflection / n,
             "isotropic": isotropic / n,
         }
@@ -279,7 +353,12 @@ class _PVSetup:
             df["surface_azimuth"],
             df["albedo"],
         )
-        return self._engine.run_full_mode(fn_build_report=self._build_report)
+        # pvfactors keeps a fixed surface-per-zone layout per timestep; zones
+        # that collapse give zero-length surfaces and trip 0/0 inside
+        # TsGroundElement.get_param_weighted. _report_ground drops those, so
+        # the divide is noise — suppress locally.
+        with np.errstate(invalid="ignore", divide="ignore"):
+            return self._engine.run_full_mode(fn_build_report=self._build_report)
 
     def _build_report(self, pvarray: Any) -> pd.DataFrame:
         return pd.concat(
@@ -401,6 +480,16 @@ class GroundShading(Component):
     _plot_fig: Any = None
     _plot_axes: Any = None
     _last_plot_ts: Optional[pd.Timestamp] = None
+    # Last sun-up snapshot of per-timestep PV-row geometry. Reused at
+    # night so ``_publish_open_sky`` renders a structure-only frame.
+    _last_pv_rows: list
+
+    # Static plot envelope (x: 3 bays around the middle row; y: worst-case
+    # panel reach above to soil bottom below). Computed once at activate so
+    # the PNG dimensions don't wobble between renders.
+    _plot_x_half: float = 0.0
+    _plot_y_min: float = -1.0
+    _plot_y_max: float = 1.0
 
     # =========================================================================
     # 4a. Channel registration
@@ -408,6 +497,7 @@ class GroundShading(Component):
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
+        self._last_pv_rows = []
         self._register_channels()
         self._configure_geometry(configs)
         self._configure_plot(configs)
@@ -415,6 +505,40 @@ class GroundShading(Component):
     def activate(self) -> None:
         super().activate()
         self._segment_ranges = self._resolve_segment_ranges()
+        self._compute_plot_envelope()
+
+    def _compute_plot_envelope(self) -> None:
+        """Static plot extent: 3 bays around the middle row (x), worst-case
+        panel reach above and soil bottom below (y).
+
+        Computed once so the rendered PNG keeps the same dimensions across
+        every tick (the dashboard ``<img>`` would otherwise reflow on each
+        update). Worst-case y for trackable mode uses ``max_angle``; for
+        fixed-tilt modes the configured ``surface_tilt``; for free_field
+        there are no panels at all.
+        """
+        if self._pv_setups:
+            distance = self._pv_setups[0].distance
+            self._plot_x_half = distance * 1.5
+            if self._mode == MODE_TRACKABLE and self._tracker is not None:
+                tilt_max = abs(self._tracker.max_angle)
+            else:
+                tilt_max = abs(self._surface_tilt)
+            tilt_rad = np.radians(tilt_max)
+            y_panel = max(
+                setup.height + (setup.width / 2.0) * np.sin(tilt_rad)
+                for setup in self._pv_setups
+            )
+            self._plot_y_max = y_panel + 1.0
+        else:
+            # Free-field: no panels. Pick a reasonable open-sky envelope
+            # that matches the bay scale of the soil mesh.
+            bay_width = float(getattr(self.context, "bay_width", 3.5))
+            self._plot_x_half = bay_width * 1.5
+            self._plot_y_max = 1.0
+
+        mesh = getattr(self.context, "mesh_config", None)
+        self._plot_y_min = (-mesh.height - 0.5) if mesh is not None else -1.0
 
     def _register_channels(self) -> None:
         """Register only the bulk SHADING_FACTOR. Per-segment GHI channels
@@ -637,12 +761,21 @@ class GroundShading(Component):
     # 4d. Evaluation pipeline
     # =========================================================================
 
-    def evaluate(self, data: Optional[pd.DataFrame] = None) -> Optional[dict[str, float]]:
+    def evaluate(
+        self,
+        data: Optional[pd.DataFrame] = None,
+        *,
+        publish: bool = True,
+    ) -> Optional[dict[str, float]]:
         """Compute per-segment shading factor for the rows in ``data``.
 
         Returns the per-segment factors when a soil mesh is wired (so the
         caller can apply them), or ``None`` when there is no mesh — in
         that case only the spatial-mean SHADING_FACTOR is published.
+
+        ``publish=False`` skips every channel write and the live-plot
+        capture so callers (e.g. ``SoilPredictor``) can run the chain on
+        forecast data without polluting the live dashboards.
 
         In :data:`MODE_FREE_FIELD` pvfactors is skipped entirely; every
         segment sees factor 1.0 and per-segment GHI = open-sky GHI.
@@ -652,13 +785,13 @@ class GroundShading(Component):
 
         pv_df = self._build_pvfactors_input(data)
         if pv_df.empty:
-            return self._publish_open_sky(data.index[-1])
+            return self._publish_open_sky(data, publish=publish)
 
         ts = data.index[-1]
         ghi_open = _open_sky_ghi(pv_df)
 
         if self._mode == MODE_FREE_FIELD:
-            return self._evaluate_free_field(ts, ghi_open)
+            return self._evaluate_free_field(ts, ghi_open, publish=publish)
 
         # Run each setup, then collapse the per-setup results into one
         # ground per timestep. Each setup gets its own ``surface_tilt`` /
@@ -669,16 +802,34 @@ class GroundShading(Component):
         # to two identical-tilt panels.
         per_setup_ground: list[list[list[tuple]]] = []
         per_setup_pv_rows: list[list[list[tuple]]] = []
-        for setup in self._pv_setups:
-            if self._mode == MODE_TRACKABLE:
-                setup_df = pv_df
-            else:
-                setup_df = pv_df.copy()
-                setup_df["surface_tilt"] = setup.surface_tilt
-                setup_df["surface_azimuth"] = setup.surface_azimuth
-            report = setup.run(setup_df)
-            per_setup_ground.append(list(report["ground"].values))
-            per_setup_pv_rows.append(list(report["pv_rows"].values))
+        try:
+            for setup in self._pv_setups:
+                if self._mode == MODE_TRACKABLE:
+                    setup_df = pv_df
+                else:
+                    setup_df = pv_df.copy()
+                    setup_df["surface_tilt"] = setup.surface_tilt
+                    setup_df["surface_azimuth"] = setup.surface_azimuth
+                report = setup.run(setup_df)
+                per_setup_ground.append(list(report["ground"].values))
+                per_setup_pv_rows.append(list(report["pv_rows"].values))
+        except Exception:  # noqa: BLE001
+            # pvfactors 1.6.1 vs numpy ≥ 2 mismatch: surfaces can collapse to
+            # zero-area for some sun geometries, producing inhomogeneous-shape
+            # arrays that numpy 2's strict ``np.array`` rejects (raises
+            # ``ValueError: setting an array element with a sequence``).
+            # Length-mismatch / IndexError variants of the same root cause
+            # also surface on multi-row inputs. Fall back to open-sky for
+            # this evaluation rather than break the chain — the next tick
+            # gets a fresh attempt.
+            logging.warning(
+                "%s: pvfactors raised — falling back to open-sky for this "
+                "tick. Underlying cause is usually a pvfactors/numpy>=2 "
+                "compat bug; pin numpy<2 to restore real shading.",
+                self.name,
+                exc_info=True,
+            )
+            return self._publish_open_sky(data, publish=publish)
         n_t = len(pv_df.index)
         combined_per_t = [
             _combine_grounds([per_setup_ground[s][t] for s in range(len(per_setup_ground))])
@@ -693,7 +844,8 @@ class GroundShading(Component):
 
         if self._segment_ranges:
             seg_factors, seg_ghi = self._aggregate_per_segment(combined_per_t, ghi_open)
-            self._publish_per_segment_ghi(ts, seg_ghi)
+            if publish:
+                self._publish_per_segment_ghi(ts, seg_ghi)
         else:
             seg_factors = None
             seg_ghi = {}
@@ -705,19 +857,23 @@ class GroundShading(Component):
         # (which is clamped to ±_GROUND_X_CLAMP and would otherwise be
         # dominated by far-field open sky).
         mean_factor = self._bay_mean_factor(combined_per_t, ghi_open)
-        self.data[GroundShading.SHADING_FACTOR].set(ts, mean_factor)
-        last_idx = pv_df.index[-1]
-        sun_state = (
-            float(pv_df.at[last_idx, "solar_zenith"]),
-            float(pv_df.at[last_idx, "solar_azimuth"]),
-            self._pv_setups[0].axis_azimuth if self._pv_setups else None,
-        )
-        self._capture_progress(
-            ts=last_idx,
-            ground=combined_per_t[-1] if combined_per_t else [],
-            pv_rows=pv_rows_per_t[-1] if pv_rows_per_t else [],
-            sun_state=sun_state,
-        )
+        if publish:
+            self.data[GroundShading.SHADING_FACTOR].set(ts, mean_factor)
+            last_idx = pv_df.index[-1]
+            sun_state = (
+                float(pv_df.at[last_idx, "solar_zenith"]),
+                float(pv_df.at[last_idx, "solar_azimuth"]),
+                self._pv_setups[0].axis_azimuth if self._pv_setups else None,
+            )
+            last_pv_rows = pv_rows_per_t[-1] if pv_rows_per_t else []
+            if last_pv_rows:
+                self._last_pv_rows = last_pv_rows
+            self._capture_progress(
+                ts=last_idx,
+                ground=combined_per_t[-1] if combined_per_t else [],
+                pv_rows=last_pv_rows,
+                sun_state=sun_state,
+            )
         return seg_factors
 
     def _aggregate_per_segment(
@@ -748,15 +904,21 @@ class GroundShading(Component):
         return seg_factors, seg_ghi
 
     def _evaluate_free_field(
-        self, ts: pd.Timestamp, ghi_open: np.ndarray,
+        self,
+        ts: pd.Timestamp,
+        ghi_open: np.ndarray,
+        *,
+        publish: bool = True,
     ) -> Optional[dict[str, float]]:
         """Open-sky shortcut: factor 1.0 everywhere, per-segment GHI = open-sky."""
         ghi_mean = float(np.mean(ghi_open)) if ghi_open.size else 0.0
-        self.data[GroundShading.SHADING_FACTOR].set(ts, 1.0)
+        if publish:
+            self.data[GroundShading.SHADING_FACTOR].set(ts, 1.0)
         if not self._segment_ranges:
             return None
         seg_ghi = {name: ghi_mean for name in self._segment_ranges}
-        self._publish_per_segment_ghi(ts, seg_ghi)
+        if publish:
+            self._publish_per_segment_ghi(ts, seg_ghi)
         return {name: 1.0 for name in self._segment_ranges}
 
     def _build_pvfactors_input(self, data: pd.DataFrame) -> pd.DataFrame:
@@ -810,30 +972,103 @@ class GroundShading(Component):
             df["surface_azimuth"] = self._surface_azimuth
         return df
 
-    def _publish_open_sky(self, ts: pd.Timestamp) -> Optional[dict[str, float]]:
-        """No usable rows (e.g. all night): publish a factor of 1 and return
-        the open-sky per-segment factors so the caller can reset the soil
-        sibling to bulk evaporation."""
-        self.data[GroundShading.SHADING_FACTOR].set(ts, 1.0)
+    def _publish_open_sky(
+        self,
+        data: pd.DataFrame,
+        *,
+        publish: bool = True,
+    ) -> Optional[dict[str, float]]:
+        """No usable rows (e.g. all night): publish a factor of 1, render a
+        structure-only progress frame so the live plot keeps refreshing,
+        and return the open-sky per-segment factors so the caller can
+        reset the soil sibling to bulk evaporation."""
+        ts = data.index[-1]
+        if publish:
+            self.data[GroundShading.SHADING_FACTOR].set(ts, 1.0)
+
+        # Structure-only frame: panels in their last sun-up orientation,
+        # no ground qinc. The shadow-line block in ``_render_progress``
+        # self-skips at sun_zen >= _ZENITH_DAYTIME_LIMIT, so 90° is an
+        # inert sentinel. On cold-start nights with no cached panels the
+        # geometry is synthesized analytically from the setup config so
+        # the dashboard still shows the structure.
+        if publish:
+            pv_rows = self._last_pv_rows or self._synthesize_pv_rows()
+            if pv_rows:
+                def _last(col: str, default: float) -> float:
+                    series = data.get(col)
+                    if series is None or not pd.notna(series.iloc[-1]):
+                        return default
+                    return float(series.iloc[-1])
+
+                axis_az = self._pv_setups[0].axis_azimuth if self._pv_setups else None
+                self._capture_progress(
+                    ts=ts,
+                    ground=[],
+                    pv_rows=pv_rows,
+                    sun_state=(_last("solar_zenith", 90.0), _last("solar_azimuth", 0.0), axis_az),
+                )
+
         if not self._segment_ranges:
             return None
         # Sun below horizon → no incoming irradiance per segment; the
         # shade factor is a ratio against zero so it stays at the
         # neutral 1.0 sentinel.
-        self._publish_per_segment_ghi(ts, {name: 0.0 for name in self._segment_ranges})
+        if publish:
+            self._publish_per_segment_ghi(ts, {name: 0.0 for name in self._segment_ranges})
         return {name: 1.0 for name in self._segment_ranges}
+
+    def _synthesize_pv_rows(self) -> list[tuple]:
+        """Analytical PV-row endpoints from the setup config — no pvfactors run.
+
+        Used to render a structure-only frame at night when the cache of
+        the last daytime geometry is empty (e.g. cold start after dark).
+        For ``MODE_TRACKABLE`` the actual tilt is sun-dependent; we draw
+        the rest position (tilt = 0). The returned tuples mirror the
+        shape of ``_PVSetup._report_pv_rows`` so ``_render_progress``
+        can consume them transparently.
+        """
+        if not self._pv_setups:
+            return []
+        rows: list[tuple] = []
+        for setup in self._pv_setups:
+            tilt_rad = np.radians(setup.surface_tilt)
+            half_x = setup.width / 2.0 * np.cos(tilt_rad)
+            half_y = setup.width / 2.0 * np.sin(tilt_rad)
+            for i in range(setup.n_rows):
+                cx = i * setup.distance + setup.offset_x
+                # +tilt → high edge on the left (matches the pvfactors
+                # convention used in `_build_as_is_setups`).
+                rows.append(
+                    (
+                        (cx - half_x, setup.height + half_y),
+                        (cx + half_x, setup.height - half_y),
+                        {"qinc_front": 0.0, "qinc_back": 0.0},
+                    )
+                )
+        return rows
 
     def _publish_per_segment_ghi(self, ts: pd.Timestamp, seg_ghi: dict[str, float]) -> None:
         """Publish per-segment time-mean GHI [W/m²] to the parent
-        FieldSimulation's channels (which were registered in its
-        ``configure``). Segments without a registered key are silently
-        skipped."""
-        seg_ghi_keys = getattr(self.context, "segment_ghi_keys", None) or {}
-        for name, ghi_value in seg_ghi.items():
-            key = seg_ghi_keys.get(name)
-            if key is None:
-                continue
-            self.context.data[key].set(ts, ghi_value)
+        FieldSimulation's bundled ``SEG_GHI`` channel. Non-finite values
+        become NaN within the list — and emit a warning so missing entries
+        are visible during debugging instead of silently propagating."""
+        cleaned = {}
+        missing = []
+        for name, v in seg_ghi.items():
+            if v is not None and np.isfinite(v):
+                cleaned[name] = float(v)
+            else:
+                cleaned[name] = float("nan")
+                missing.append(name)
+        if missing:
+            logging.warning(
+                "%s: SEG_GHI has no value for segment(s) %s at %s — writing NaN placeholder.",
+                self.name,
+                sorted(missing),
+                ts,
+            )
+        self.context.set_segment_values(self.context.SEG_GHI, ts, cleaned)
 
     def _bay_mean_factor(
         self,
@@ -933,12 +1168,22 @@ class GroundShading(Component):
 
         if self._plot_config.show:
             plt.ion()
-        fig, ax = plt.subplots(figsize=(10, 4), dpi=120)
-        cmap = mcolors.LinearSegmentedColormap.from_list("blue_yellow", ["blue", "yellow"])
-        norm = mcolors.Normalize(vmin=0.0, vmax=self._PLOT_QINC_MAX)
+        x_extent = 2.0 * self._plot_x_half
+        y_extent = self._plot_y_max - self._plot_y_min
+        fig, ax = plt.subplots(
+            figsize=plot_style.compute_fig_size(x_extent, y_extent),
+            dpi=plot_style.DPI,
+        )
+        # ``plasma`` is perceptually uniform and high-contrast across the
+        # full range, so partial-shade qinc values around 200–600 W/m²
+        # (typical mid-day under-canopy) read clearly instead of fading
+        # into a dark band the way the old blue→yellow ramp did.
+        cmap = plt.get_cmap(plot_style.COLORMAP)
+        norm = mcolors.PowerNorm(gamma=0.5, vmin=0.0, vmax=self._PLOT_QINC_MAX)
         sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
-        fig.colorbar(sm, ax=ax, shrink=0.85, label="qinc [W/m²]")
+        fig.colorbar(sm, ax=ax, shrink=plot_style.CBAR_SHRINK, label="incident irradiance [W/m²]")
+        plot_style.apply_subplots_adjust(fig)
         self._plot_fig = fig
         self._plot_axes = (ax, cmap, norm)
 
@@ -975,14 +1220,20 @@ class GroundShading(Component):
                 for setup in self._pv_setups
             ]
             center_x = float(np.mean(middles))
-            distance = self._pv_setups[0].distance
         else:
             center_x = 0.0
-            distance = _GROUND_X_CLAMP / 5.0
 
         def rx(x: float) -> float:
             """Re-center x on the middle row."""
             return x - center_x
+
+        # --- Ground reference line at y=0 ----------------------------------
+        # Thin gray baseline so the structure-only night frames still have a
+        # readable ground reference. Drawn behind the shadow projection lines
+        # and the qinc-colored segments via zorder.
+        ax.axhline(
+            y=0.0, color="black", linewidth=0.8, zorder=0.5,
+        )
 
         # --- Ground at y=0, colored by qinc ---------------------------------
         for seg in ground:
@@ -991,8 +1242,9 @@ class GroundShading(Component):
                 [rx(seg[0][0]), rx(seg[1][0])],
                 [0.0, 0.0],
                 color=cmap(norm(qinc)),
-                linewidth=3,
+                linewidth=6,
                 solid_capstyle="butt",
+                zorder=2,
             )
 
         # --- Shadow projection lines from PV endpoints toward the ground ----
@@ -1021,6 +1273,7 @@ class GroundShading(Component):
                     ax.plot(
                         [rx(px), rx(shadow_x)], [py, 0.0],
                         color="gray", linewidth=0.6, linestyle="--", alpha=0.45,
+                        zorder=1.5,
                     )
 
         # --- PV rows in their actual coordinates (black) --------------------
@@ -1031,27 +1284,45 @@ class GroundShading(Component):
                 color="black", linewidth=2,
             )
 
-        # --- Soil-mesh top-segment ranges as light gray markers below y=0 ---
-        if self._segment_ranges:
-            for x0, x1 in self._segment_ranges.values():
-                ax.plot([rx(x0), rx(x1)], [-0.15, -0.15], color="gray", linewidth=2, alpha=0.7)
+        # --- Soil mesh cross-section: full ground rectangle + plant block ---
+        # Mesh extent comes from _segment_ranges (already in pvfactors x-coords,
+        # so rx() handles the re-centering). Soil is a single brown rectangle
+        # spanning all top segments down to y=-height; the plant block sits on
+        # top of it as a green rectangle [-plant_width/2, +plant_width/2] ×
+        # [-plant_height, 0]. The qinc-coloured strip at y=0 already drawn above
+        # stays visible because both rectangles use alpha < 1.
+        mesh = getattr(self.context, "mesh_config", None)
+        if mesh is not None and self._segment_ranges:
+            seg_xs = [x for pair in self._segment_ranges.values() for x in pair]
+            ground_left = min(seg_xs)
+            ground_right = max(seg_xs)
+            plant_left = self._segment_ranges["PlantTopLeftSegment"][0]
+            plant_right = self._segment_ranges["PlantTopRightSegment"][1]
 
-        # --- Window: one inter-row distance, centered on x=0 ----------------
-        ax.set_xlim(-distance / 2.0, +distance / 2.0)
+            soil_left_plot = rx(ground_left)
+            soil_width_plot = rx(ground_right) - soil_left_plot
+            ax.add_patch(Rectangle(
+                (soil_left_plot, -mesh.height),
+                soil_width_plot, mesh.height,
+                facecolor="saddlebrown", edgecolor="saddlebrown",
+                alpha=0.18, linewidth=1.0, zorder=0,
+            ))
 
-        if pv_rows:
-            ys = [c for seg in pv_rows for c in (seg[0][1], seg[1][1])]
-            ax.set_ylim(min(-1.0, min(ys) - 1.0), max(ys) + 1.0)
-        else:
-            ax.set_ylim(-1.0, 5.0)
+            plant_left_plot = rx(plant_left)
+            plant_width_plot = rx(plant_right) - plant_left_plot
+            ax.add_patch(Rectangle(
+                (plant_left_plot, -mesh.plant_height),
+                plant_width_plot, mesh.plant_height,
+                facecolor="forestgreen", edgecolor="darkgreen",
+                alpha=0.35, linewidth=1.2, zorder=1,
+            ))
 
-        ax.set_aspect("equal", adjustable="box")
-        ax.grid(True, alpha=0.3)
-        ax.set_xlabel("x [m]")
-        ax.set_ylabel("y [m]")
-        ax.set_title(f"Ground shading @ {ts.isoformat()}  (mode: {self._mode})")
+        # --- Static window: locked at activate so PNG dimensions stay stable
+        ax.set_xlim(-self._plot_x_half, +self._plot_x_half)
+        ax.set_ylim(self._plot_y_min, self._plot_y_max)
 
-        self._plot_fig.tight_layout()
+        plot_style.apply_axes_style(ax)
+        ax.set_title(plot_style.format_progress_title("Ground shading", ts, suffix=f"mode: {self._mode}"))
 
         if self._plot_config.show:
             try:

@@ -10,6 +10,9 @@ from . import models  # noqa: F401
 from .models import (  # noqa: F401
     SoilModel,
     Genuchten,
+    BrooksCorey,
+    create_soil_model,
+    DEFAULT_SOIL_MODEL,
 )
 
 from . import moisture  # noqa: F401

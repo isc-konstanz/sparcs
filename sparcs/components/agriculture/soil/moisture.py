@@ -15,7 +15,7 @@ from lories.components import Component
 from lories.core import Constant
 from lories.data import ChannelState
 from lories.typing import Configurations
-from sparcs.components.agriculture.soil import Genuchten, SoilModel
+from sparcs.components.agriculture.soil import SoilModel, create_soil_model
 
 DEFAULT_WILTING_POINT: float = 4.2
 DEFAULT_FIELD_CAPACITY: float = 1.8
@@ -45,7 +45,13 @@ class SoilMoisture(Component):
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
-        self.model = Genuchten(**configs["model"])
+        # Build the retention/conductivity model via the shared factory so
+        # ``[model] type = "bc"`` (Brooks–Corey) and other alternatives
+        # plug in with the same parameter block. ``type`` defaults to
+        # van Genuchten for backwards compatibility.
+        model_params = dict(configs["model"])
+        model_kind = model_params.pop("type", None)
+        self.model = create_soil_model(model_kind, **model_params)
 
         self.depth = configs.get_float("depth")
 
