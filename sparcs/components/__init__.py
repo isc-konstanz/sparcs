@@ -27,3 +27,19 @@ from .agriculture import (  # noqa: F401
     AgriculturalField,
     Irrigation,
 )
+
+import importlib
+
+CONNECTORS = [
+    "openems",
+]
+
+for import_connector in CONNECTORS:
+    try:
+        importlib.import_module(f".{import_connector}", "sparcs.components")
+
+    except ModuleNotFoundError:
+        # TODO: Implement meaningful logging here
+        pass
+
+del importlib
