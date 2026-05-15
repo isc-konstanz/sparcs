@@ -17,8 +17,12 @@ from lories.typing import Configurations
 
 @register_component_type("ees")
 class ElectricalEnergyStorage(Component):
-    STATE_OF_CHARGE = Constant(float, "ees_soc", "EES State of Charge", "%")
-    POWER_CHARGE = Constant(float, "ees_charge_power", "EES Charging Power", "W")
+    POWER_AC = Constant(float, "ac_power", "EES Charging Power", "W", context="ees")
+
+    STATE_OF_CHARGE = Constant(float, "soc", "EES State of Charge", "%", context="ees")
+
+    CYCLES = Constant(float, "ees_cycles", "EES Cycles", context="ees")
+    SOC_MIN = Constant(float, "ees_soc_min", "EES SoC Minimum", "%", context="ees")
 
     MODES = ["self_consumption", "self_peak_shaving", "peak_shaving"]
 
@@ -75,13 +79,12 @@ class ElectricalEnergyStorage(Component):
         def add_channel(constant: Constant, aggregate: str = "mean", **custom) -> None:
             channel = constant.to_dict()
             channel["name"] = constant.name.replace("EES", self.name, 1)
-            channel["column"] = constant.key.replace("ees", self.key, 1)
+            channel["column"] = constant.id.replace("ees", self.key, 1)
             channel["aggregate"] = aggregate
-            channel["connector"] = None
             channel.update(custom)
             self.data.add(**channel)
 
-        add_channel(ElectricalEnergyStorage.POWER_CHARGE)
+        add_channel(ElectricalEnergyStorage.POWER_AC)
         add_channel(ElectricalEnergyStorage.STATE_OF_CHARGE, aggregate="last")
 
     def percent_to_energy(self, percent) -> float:
@@ -94,7 +97,7 @@ class ElectricalEnergyStorage(Component):
     def predict(self, data: pd.DataFrame, soc: float = 50.0) -> pd.DataFrame:
         from sparcs.system import System
 
-        if System.POWER_EL not in data.columns:
+        if System.POWER_AC not in data.columns:
             raise ValueError("Unable to predict battery storage state of charge without import/export power")
 
         columns = [self.STATE_OF_CHARGE, self.POWER_CHARGE]
@@ -105,7 +108,7 @@ class ElectricalEnergyStorage(Component):
         for index, row in data.iterrows():
             charge_power = 0
             if prior is not None:
-                grid_power = row[System.POWER_EL]
+                grid_power = row[System.POWER_AC]
                 hours = (index - prior).total_seconds() / 3600.0
 
                 charge_power = self._predict_charge_power(hours, soc, grid_power)

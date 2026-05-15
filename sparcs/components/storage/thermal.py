@@ -13,9 +13,9 @@ from lories.typing import Configurations
 
 @register_component_type("tes")
 class ThermalEnergyStorage(Component):
-    TEMPERATURE = Constant(float, "tes_temp", "TES Temperature", "°C")
-    TEMPERATURE_DOMESTIC = Constant(float, "tes_dom_temp", "TES Domestic Temperature ", "°C")
-    TEMPERATURE_HEATING = Constant(float, "tes_ht_temp", "TES Heating Temperature ", "°C")
+    TEMPERATURE = Constant(float, "temp", "TES Temperature", "°C", context="tes")
+    TEMPERATURE_DOMESTIC = Constant(float, "temp_dom", "TES Domestic Temperature ", "°C", context="tes")
+    TEMPERATURE_HEATING = Constant(float, "temp_ht", "TES Heating Temperature ", "°C", context="tes")
 
     volume: float
     capacity: float
@@ -32,9 +32,10 @@ class ThermalEnergyStorage(Component):
         def add_channel(constant: Constant, **custom) -> None:
             channel = constant.to_dict()
             channel["name"] = constant.name.replace("TES", self.name, 1)
-            channel["column"] = constant.key.replace("tes", self.key, 1)
+            channel["column"] = constant.id.replace("tes", self.key, 1)
             channel["aggregate"] = "mean"
-            channel["connector"] = None
             channel.update(custom)
 
         add_channel(ThermalEnergyStorage.TEMPERATURE)
+        # add_channel(ThermalEnergyStorage.TEMPERATURE_DOMESTIC)
+        # add_channel(ThermalEnergyStorage.TEMPERATURE_HEATING)
