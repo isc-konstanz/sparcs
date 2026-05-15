@@ -6,6 +6,8 @@ sparcs.devices.charge_big
 
 """
 
+import numpy as np
+import pandas as pd
 from lories.components import register_component_type
 from lories.connectors.opcua import OpcUaConnector
 from lories.core import Constant
@@ -17,8 +19,11 @@ from sparcs.components.vehicle import EVSE
 
 @register_component_type("charge_big")
 class ChargeBig(Meter):
-    SETPOINT_ENABLED = Constant(bool, "setpoint_enabled", "Setpoint Enabled", "")
-    SETPOINT = Constant(float, "setpoint", "Setpoint", "kW")
+    SETPOINT = Constant(float, "setpoint", "Setpoint Current", "A")
+    SETPOINT_MAX = Constant(float, "setpoint_max", "Setpoint Current Maximum", "A")
+    SETPOINT_POWER = Constant(float, "setpoint_power", "Setpoint Power", "W")
+
+    CURRENT = Constant(float, "current", "Charging Current", "A")
 
     L1_COS_PHI = Constant(float, "l1_cos_phi", "L1 Cos Phi", "")
     L2_COS_PHI = Constant(float, "l2_cos_phi", "L2 Cos Phi", "")
@@ -41,15 +46,15 @@ class ChargeBig(Meter):
 
         def add_channel(constant: Constant, address: str, aggregate: str = "mean", **custom) -> None:
             channel = constant.to_dict()
-            # channel["name"] = f"{self.name}_{channel['name']}"
-            # channel["key"] = f"{self.key}_{channel['key']}"
             channel["connector"] = connector.id
             channel["address"] = address
             channel["aggregate"] = aggregate
             channel.update(custom)
             self.data.add(**channel)
 
-        add_channel(ChargeBig.SETPOINT_ENABLED, "Summen_Grenzwert_aktiv", aggregate="last")
+        def add_virtual_channel(constant: Constant, aggregate: str = "mean", **custom) -> None:
+            self.data.add(key=constant, aggregate=aggregate, connector=None, **custom)
+
         add_channel(ChargeBig.SETPOINT, "Sollwert_aktiv")
 
         add_channel(Meter.POWER_L1_ACTIVE, "Zähler_Leistung_Phase1")
@@ -67,6 +72,12 @@ class ChargeBig(Meter):
         add_channel(ChargeBig.L1_COS_PHI, "Zähler_CosPhi_Phase1")
         add_channel(ChargeBig.L2_COS_PHI, "Zähler_CosPhi_Phase2")
         add_channel(ChargeBig.L3_COS_PHI, "Zähler_CosPhi_Phase3")
+
+        add_virtual_channel(ChargeBig.CURRENT)
+        add_virtual_channel(Meter.POWER_ACTIVE)
+        add_virtual_channel(Meter.POWER_REACTIVE)
+        add_virtual_channel(ChargeBig.SETPOINT_POWER)
+        add_virtual_channel(ChargeBig.SETPOINT_MAX)
 
         defaults = ChargeBigStation._build_defaults(configs, strict=True)
         defaults[self.data.TYPE][Channels.TYPE]["connector"] = connector.id
@@ -88,6 +99,56 @@ class ChargeBig(Meter):
             station.configure(station_configs)
 
             self.components.add(station)
+
+    def activate(self) -> None:
+        super().activate()
+        self.data.register(
+            self._on_power_received,
+            [self.data[Meter.POWER_L1_ACTIVE], self.data[Meter.POWER_L2_ACTIVE], self.data[Meter.POWER_L3_ACTIVE]],
+            how="any",
+            unique=False,
+        )
+        self.data.register(
+            self._on_current_received,
+            [self.data[Meter.CURRENT_L1], self.data[Meter.CURRENT_L2], self.data[Meter.CURRENT_L3]],
+            how="any",
+            unique=False,
+        )
+        self.data.register(
+            self._on_reactive_power_received,
+            [
+                self.data[Meter.POWER_L1_ACTIVE], self.data[Meter.POWER_L2_ACTIVE], self.data[Meter.POWER_L3_ACTIVE],
+                self.data[ChargeBig.L1_COS_PHI], self.data[ChargeBig.L2_COS_PHI], self.data[ChargeBig.L3_COS_PHI],
+            ],
+            how="any",
+            unique=False,
+        )
+
+    def _on_power_received(self, data: pd.DataFrame) -> None:
+        power = data.loc[:, Meter.POWER_L1_ACTIVE].dropna()
+        power = power + data.loc[power.index, Meter.POWER_L2_ACTIVE].fillna(0)
+        power = power + data.loc[power.index, Meter.POWER_L3_ACTIVE].fillna(0)
+        if not power.empty:
+            self.data[Meter.POWER_ACTIVE].set(power.index[0], power)
+
+    def _on_current_received(self, data: pd.DataFrame) -> None:
+        current = data.loc[:, Meter.CURRENT_L1].dropna()
+        current = current + data.loc[current.index, Meter.CURRENT_L2].fillna(0)
+        current = current + data.loc[current.index, Meter.CURRENT_L3].fillna(0)
+        if not current.empty:
+            self.data[ChargeBig.CURRENT].set(current.index[0], current)
+
+    def _on_reactive_power_received(self, data: pd.DataFrame) -> None:
+        def phase_reactive(power_col, cos_phi_col) -> pd.Series:
+            power = data.loc[:, power_col]
+            cos_phi = data.loc[:, cos_phi_col]
+            return power * np.sqrt(1 - cos_phi**2) / cos_phi
+
+        reactive = phase_reactive(Meter.POWER_L1_ACTIVE, ChargeBig.L1_COS_PHI).dropna()
+        reactive = reactive + phase_reactive(Meter.POWER_L2_ACTIVE, ChargeBig.L2_COS_PHI).reindex(reactive.index).fillna(0)
+        reactive = reactive + phase_reactive(Meter.POWER_L3_ACTIVE, ChargeBig.L3_COS_PHI).reindex(reactive.index).fillna(0)
+        if not reactive.empty:
+            self.data[Meter.POWER_REACTIVE].set(reactive.index[0], reactive)
 
 
 class ChargeBigStation(EVSE):
