@@ -1,0 +1,4 @@
+#!/bin/bash
+# /etc/cron.daily/sparcs: crontab script for sparcs database supervision
+sudo -u sparcs /usr/lib/lories/bin/sparcs -c /etc/sparcs rotate >/dev/null 2>&1
+exit 0

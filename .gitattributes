@@ -18,4 +18,4 @@
 # Note: .db, .p, and .pkl files are associated
 # with the python modules ``pickle``, ``dbm.*``,
 # ``shelve``, ``marshal``, ``anydbm``, & ``bsddb``
-# (among others).penguin/_version.py export-subst
+# (among others).sparcs/_version.py export-subst

@@ -1,0 +1,12 @@
+/var/log/sparcs/*.log
+{
+    su sparcs sparcs
+    rotate 4
+    weekly
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    nocreate
+}

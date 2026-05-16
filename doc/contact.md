@@ -1,6 +1,6 @@
 # Contact
 
-The penguin project is aiming to provide an extensive FAQ to help with common issues in the future.  
+The sparcs project is aiming to provide an extensive FAQ to help with common issues in the future.  
 In the meantime, you can get help from the developers directly.
 
 ![ISC logo](_images/isc-logo-full.png)

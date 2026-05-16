@@ -1,0 +1,9 @@
+#!/usr/bin/dh-exec
+etc/sparcs/logging.conf  /etc/sparcs/
+etc/sparcs/settings.conf /etc/sparcs/
+
+etc/cron.d/sparcs      /etc/cron.d/
+etc/cron.daily/sparcs  /etc/cron.daily/
+etc/logrotate.d/sparcs /etc/logrotate.d/
+
+usr/lib/tmpfiles.d/sparcs.conf /usr/lib/tmpfiles.d/

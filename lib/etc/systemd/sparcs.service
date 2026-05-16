@@ -1,0 +1,16 @@
+[Unit]
+Description=Solar Prediction, Analytics & Resource Control System
+After=network.target
+
+[Service]
+User=sparcs
+Group=sparcs
+Type=simple
+Restart=always
+RestartSec=60s
+TimeoutStopSec=30
+ExecStart=/usr/lib/lories/bin/sparcs -c /etc/sparcs start
+WorkingDirectory=/var/lib/sparcs
+
+[Install]
+WantedBy=multi-user.target
