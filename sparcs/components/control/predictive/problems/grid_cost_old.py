@@ -38,7 +38,7 @@ class GridCostProblem(Optimization):
         super().configure(configs)
 
         # get tariff type
-        self.objective_config = configs.get_section("objective")
+        self.objective_config = configs.get_member("objective")
 
 
 

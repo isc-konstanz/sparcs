@@ -36,6 +36,7 @@ class Model:
     _system_matrices: Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]]
     _components: Dict[str, Component]
     _channels: Dict
+    _state_bounds: Dict[str, Tuple[float, float]]
 
 
     def __init__(
@@ -54,9 +55,10 @@ class Model:
         self._system_matrices = {}
         self._components = {}
         self._channels = {}
+        self._state_bounds = {}
 
         solver = configs.get("solver", default=Model.IPOPT)
-        solver_configs = configs.get_section(solver, defaults={})
+        solver_configs = configs.get_member(solver, defaults={})
 
         if solver not in Model.SOLVERS:
             raise ResourceError(
@@ -88,12 +90,14 @@ class Model:
     def set_initials(self, prior: pd.DataFrame) -> None:
         for component_id, component in self._components.items():
             if isinstance(component, ElectricalEnergyStorage):
-                soc_column = f"mpc_{component.data[ElectricalEnergyStorage.STATE_OF_CHARGE].column}"
-                if prior is not None and soc_column in prior.columns:
-                    #TODO: 0 or last? is prior or?
-                    state_0 = prior[soc_column].values[0] / 100 * component.capacity
+                soc_column = component.data[ElectricalEnergyStorage.STATE_OF_CHARGE].column
+                if prior is not None and not prior.empty and soc_column in prior.columns:
+                    state_0 = prior[soc_column].values[-1] / 100 * component.capacity
                 else:
                     state_0 = component.capacity / 2 # 50% initial state
+                # Clip into the (possibly margin-tightened) hard bounds so IPOPT starts feasible.
+                lo, hi = self._state_bounds[component_id]
+                state_0 = float(np.clip(state_0, lo, hi))
                 self.opti.set_value(self.parameters[component_id]["state_0"], state_0)
 
             else:
@@ -140,9 +144,13 @@ class Model:
 
         order = 1
         a = np.array([[0]])
-        b_in = np.array([1 / 3600])
-        #b_out = np.array([component.efficiency / 3600])
-        b_out = np.array([1 / 3600])
+        # Round-trip efficiency split symmetrically: sqrt(eff) on each leg so
+        # charge→discharge returns η of the energy. b_in scales grid→battery energy
+        # gain; b_out scales battery→grid energy drain (grid-side power u_out
+        # corresponds to battery drain of u_out / sqrt(eff)).
+        sqrt_eff = np.sqrt(component.efficiency)
+        b_in = np.array([sqrt_eff / 3600])
+        b_out = np.array([1 / (sqrt_eff * 3600)])
 
         state_0 = self.opti.parameter(order)
 
@@ -150,6 +158,9 @@ class Model:
         states = self.opti.variable(order, num_steps)
         inputs_in = self.opti.variable(num_steps)
         inputs_out = self.opti.variable(num_steps)
+
+        # Initialize states strictly interior so the log barrier is well-defined at iteration 0.
+        self.opti.set_initial(states, component.capacity / 2.0)
 
         self.parameters[component_id] = {}
         self.variables[component_id] = {}
@@ -164,6 +175,23 @@ class Model:
         charge_cost = configs.get_float("charge_cost", default=0.001) * 3 / (2 * component.power_max)
         discharge_cost = configs.get_float("discharge_cost", default=0.001) * 3 / (2 * component.power_max)
 
+        # Optional ramp-rate limit on net battery power (kW per hour).
+        # Configured per-EES. Default None disables the constraint.
+        power_change_max = configs.get_float("power_change_max", default=None)
+
+        # Soft safety margin: log barrier on SoC inside [soc_margin, 100 - soc_margin] %.
+        # Hard bound is tightened to the same band so the log is always defined.
+        soc_margin = configs.get_float("soc_margin", default=0.0)
+        soc_margin_weight = configs.get_float("soc_margin_weight", default=10.0)
+        soc_lo = soc_margin / 100.0 * component.capacity
+        soc_hi = (1.0 - soc_margin / 100.0) * component.capacity
+        self._state_bounds[component_id] = (soc_lo, soc_hi)
+        print(
+            f"[MPC EES] {component_id}: soc_margin={soc_margin}%, "
+            f"weight={soc_margin_weight}, hard bound=[{soc_lo:.2f}, {soc_hi:.2f}] kWh "
+            f"(capacity={component.capacity})"
+        )
+
         x_k = state_0
         costs = 0
         for index, step_duration in enumerate(self.step_durations):
@@ -172,11 +200,17 @@ class Model:
             x_k1 = states[:, index]
 
             # limit state
-            self.opti.subject_to(self.opti.bounded([0.0], states[:, index], [component.capacity]))
+            self.opti.subject_to(self.opti.bounded([soc_lo], states[:, index], [soc_hi]))
 
             # limit input
             self.opti.subject_to(self.opti.bounded(0, u_k_in, component.power_max / 1000))
             self.opti.subject_to(self.opti.bounded(0, u_k_out, component.power_max / 1000))
+
+            # ramp-rate limit on net battery power (kW per hour → scaled to step)
+            if power_change_max is not None and index > 0:
+                delta = (inputs_in[index] - inputs_out[index]) - (inputs_in[index - 1] - inputs_out[index - 1])
+                delta_max = power_change_max * step_duration / 3600
+                self.opti.subject_to(self.opti.bounded(-delta_max, delta, delta_max))
 
             # only one input at a time
             self.opti.subject_to((u_k_out * u_k_in) ** 2 <= self.epsilon)
@@ -189,16 +223,20 @@ class Model:
             self.opti.subject_to((x_k1_calculated - x_k1) ** 2 <= self.epsilon)
 
 
-            #TODO: square cost
             t_hour = step_duration / 3600
-            #costs += charge_cost * (inputs_in[index] ** 2) * t_hour
-            #costs += discharge_cost * (inputs_out[index] ** 2) * t_hour
+            costs += charge_cost * (inputs_in[index] ** 2) * t_hour
+            costs += discharge_cost * (inputs_out[index] ** 2) * t_hour
 
-            soc = states[:, index] / component.capacity * 100
-            costs += 1000 * ((soc - 50) / 25) ** 4 * t_hour
-            #costs += 1 / soc  - 1 / (100 - soc)
-            #costs += 2 / (soc + 0.1)
-            #costs += 2 / ((100-soc) + 0.1)
+            if soc_margin > 0:
+                # Small additive eps so a transient line-search step at/past the bound
+                # cannot evaluate log of a non-positive number. Inside the band the eps
+                # is negligible (log((0.45 + 1e-3)/1) ≈ log(0.45)).
+                eps_log = 1e-3
+                soc = states[:, index] / component.capacity * 100
+                costs += soc_margin_weight * t_hour * (
+                    -ca.log((soc - soc_margin) / 100.0 + eps_log)
+                    - ca.log((100.0 - soc_margin - soc) / 100.0 + eps_log)
+                )
 
             x_k = x_k1
         self.costs[component_id]["usage"] = costs

@@ -454,12 +454,12 @@ class SolarArray(Component, pv.pvsystem.Array):
                 param_set = self.mount.racking_model.lower()
                 if param_set in ["open_rack", "close_mount", "insulated_back"]:
                     param_set += f"_{self.module_type}"
-                if param_set in temperature.TEMPERATURE_MODEL_PARAMETERS["sapm"]:
-                    params.update(temperature._temperature_model_params("sapm", param_set))
+                if param_set in pv.temperature.TEMPERATURE_MODEL_PARAMETERS["sapm"]:
+                    params.update(pv.temperature._temperature_model_params("sapm", param_set))
                 elif "freestanding" in param_set:
-                    params.update(temperature._temperature_model_params("pvsyst", "freestanding"))
+                    params.update(pv.temperature._temperature_model_params("pvsyst", "freestanding"))
                 elif "insulated" in param_set:  # after SAPM to avoid confusing keys
-                    params.update(temperature._temperature_model_params("pvsyst", "insulated"))
+                    params.update(pv.temperature._temperature_model_params("pvsyst", "insulated"))
 
         if len(params) == 0 and len(self.module_parameters) > 0:
             if "noct" in self.module_parameters.keys():
@@ -478,7 +478,8 @@ class SolarArray(Component, pv.pvsystem.Array):
         if os.path.isfile(transposition_file):
             transposition.update(Configurations.load(transposition_file, **configs.dirs.to_dict()))
 
-        rows = min(transposition.get_int("rows", default=7), self.rows.count)
+        configured_rows = transposition.get_int("rows", default=7)
+        rows = min(configured_rows, self.rows.count) if self.rows.count is not None else configured_rows
         row_modules = transposition.get_int("row_modules", default=21)
         return {
             "rows": rows,
@@ -722,9 +723,9 @@ class SolarArray(Component, pv.pvsystem.Array):
 
         See Also
         --------
-        pvlib.temperature.sapm_cell, pvlib.temperature.pvsyst_cell,
-        pvlib.temperature.faiman, pvlib.temperature.fuentes,
-        pvlib.temperature.noct_sam
+        pv.temperature.sapm_cell, pv.temperature.pvsyst_cell,
+        pv.temperature.faiman, pv.temperature.fuentes,
+        pv.temperature.noct_sam
 
         Notes
         -----

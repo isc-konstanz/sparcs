@@ -80,7 +80,7 @@ class GridCostProblem(Optimization):
 
         self.model_variables = {}
 
-        objective_config = configs.get_section("objective", defaults={})
+        objective_config = configs.get_member("objective", defaults={})
         self.import_limit_active = objective_config.get_bool("import_limit_active", False)
         self.import_limit = objective_config.get_float("import_limit", 1000.0) # Defaults to 1MW
         self.import_limit_tariff = objective_config.get_float("import_limit_tariff", 100.0)  # Defaults to 100 ct/kW
@@ -171,7 +171,7 @@ class GridCostProblem(Optimization):
 
         model.opti.set_value(params[GridCostProblem.IMPORT_TARIFF], data[Tariff.PRICE_IMPORT].values)
         model.opti.set_value(params[GridCostProblem.EXPORT_TARIFF], data[Tariff.PRICE_IMPORT].values)
-        model.opti.set_value(params[GridCostProblem.GRID_EXPECTED], data["el_power"].values / 1000)  # convert to kWh
+        model.opti.set_value(params[GridCostProblem.GRID_EXPECTED], data["ac_power"].values / 1000)  # convert W to kW
         
         if self.stochastic_active:
             model.opti.set_value(params[GridCostProblem.GRID_EXPECTED_STD], data["forecast_std"].values / 1000)  # convert to kWh
@@ -275,44 +275,74 @@ class GridCostProblem(Optimization):
     def _plot_results(self, df: pd.DataFrame):
         import matplotlib.pyplot as plt
 
-        def plot():
-            ax = fig.add_subplot(111)
-            ax.plot(df.index, df["grid_expected"], label="Grid expected (kWh)")
-            ax.plot(df.index, df["grid_solution"], label="Grid MPC solution (kWh)")
-            ax.plot(df.index, df["import_tariff"], label="Import Tariff (ct/kWh)", linestyle='--')
-            ax.plot(df.index, df["export_tariff"], label="Export Tariff (ct/kWh)", linestyle='--')
-            
-            if self.stochastic_active:
-                ax.fill_between(df.index, df["grid_expected"] - df["grid_standard"],
-                                df["grid_expected"] + df["grid_standard"],
-                                color='gray', alpha=0.2, label="Stochastic Range (± std)")
-
-            for component_id, component in self.model._components.items():
-                if isinstance(component, ElectricalEnergyStorage):
-                    soc_column = f"mpc_{component.data[component.STATE_OF_CHARGE].column}"
-                    ax.plot(df.index, df[soc_column], label=f"SoC (%) ({component_id})", linestyle=':')
-                    charge_power_column = f"mpc_{component.data[component.POWER_CHARGE].column}"
-                    ax.plot(df.index, df[charge_power_column] / 1000, label=f"Charge Power (kW) ({component_id})")
-
-            ax.set_xlabel("Time")
-            ax.set_ylabel("Power (kW)")
-            ax.set_xlim(df.index[0], df.index[-1])
-            ax.set_title("Grid power predicted vs MPC solution")
-            ax.legend(loc='upper right')
-            ax.grid(True)
-            plt.tight_layout()
-
-            plt.pause(0.1)
-            #plt.show()
+        # Interactive mode + a backend that supports live updates (TkAgg / QtAgg / MacOSX)
+        # are required. Without ion(), the figure created below never gets shown until
+        # plt.show() is called at the end of the program.
+        plt.ion()
 
         if plt.fignum_exists(1):
             fig = plt.figure(1)
             fig.clf()
-            plot()
-
         else:
             fig = plt.figure(1, figsize=(12, 6))
-            plot()
-            plt.waitforbuttonpress()
+
+        ax_power = fig.add_subplot(111)
+        ax_soc = ax_power.twinx()
+        ax_price = ax_power.twinx()
+        # Offset the second right-side spine outward so the two right axes don't overlap.
+        ax_price.spines["right"].set_position(("axes", 1.08))
+
+        power_lines = []
+        power_lines += ax_power.plot(df.index, df["grid_expected"], label="Grid expected (kW)", color="C0")
+        power_lines += ax_power.plot(df.index, df["grid_solution"], label="Grid MPC solution (kW)", color="C1")
+        if self.stochastic_active:
+            ax_power.fill_between(
+                df.index,
+                df["grid_expected"] - df["grid_standard"],
+                df["grid_expected"] + df["grid_standard"],
+                color="gray", alpha=0.2, label="Stochastic Range (± std)",
+            )
+
+        soc_lines = []
+        for component_id, component in self.model._components.items():
+            if isinstance(component, ElectricalEnergyStorage):
+                soc_column = f"mpc_{component.data[component.STATE_OF_CHARGE].column}"
+                soc_lines += ax_soc.plot(
+                    df.index, df[soc_column],
+                    label=f"SoC % ({component_id})", linestyle=":", color="C2",
+                )
+                charge_power_column = f"mpc_{component.data[component.POWER_CHARGE].column}"
+                power_lines += ax_power.plot(
+                    df.index, df[charge_power_column] / 1000,
+                    label=f"Charge Power (kW) ({component_id})", color="C3",
+                )
+
+        price_lines = []
+        price_lines += ax_price.plot(
+            df.index, df["import_tariff"],
+            label="Import Tariff (ct/kWh)", linestyle="--", color="C4",
+        )
+        price_lines += ax_price.plot(
+            df.index, df["export_tariff"],
+            label="Export Tariff (ct/kWh)", linestyle="--", color="C5",
+        )
+
+        ax_power.set_xlabel("Time")
+        ax_power.set_ylabel("Power (kW)")
+        ax_soc.set_ylabel("SoC (%)")
+        ax_soc.set_ylim(0, 100)
+        ax_price.set_ylabel("Price (ct/kWh)")
+        ax_power.set_xlim(df.index[0], df.index[-1])
+        ax_power.set_title(f"Grid power predicted vs MPC solution @ {df.index[0]}")
+        ax_power.grid(True)
+
+        all_lines = power_lines + soc_lines + price_lines
+        ax_power.legend(all_lines, [line.get_label() for line in all_lines], loc="upper right")
+
+        fig.tight_layout()
+
+        fig.canvas.draw_idle()
+        fig.canvas.flush_events()
+        plt.pause(0.001)
 
 

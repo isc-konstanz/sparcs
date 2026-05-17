@@ -67,12 +67,12 @@ class Optimization(Component, ABC):
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
 
-        timing_config = configs.get_section("timing", defaults={})
+        timing_config = configs.get_member("timing", defaults={})
         if not timing_config:
             raise ResourceError("Missing timing configuration")
         self._configure_timing(timing_config)
 
-        self.model = Model(self.step_durations, configs=configs.get_section("casadi", defaults={}))
+        self.model = Model(self.step_durations, configs=configs.get_member("casadi", defaults={}))
 
         self.results_buffer = None
 
@@ -94,7 +94,7 @@ class Optimization(Component, ABC):
         self.step_durations = []
         for timing in timing_keys:
             #TODO: automatically raise exception if not all keys are present?
-            t_config = configs.get_section(timing)
+            t_config = configs.get_member(timing)
             if not t_config:
                 raise ResourceError(f"Missing timing configuration for {timing}")
 
@@ -137,11 +137,11 @@ class Optimization(Component, ABC):
             pass
             #raise ResourceError(f"No controlled component found in system: {self.controlled_components}")
 
-        model_configs = self.configs.get_section("models", defaults={})
+        model_configs = self.configs.get_member("models", defaults={})
         #constants = []
 
         for controllable in controlled_components:
-            model_config = model_configs.get_section(controllable.id.replace(".", "_"), defaults={})
+            model_config = model_configs.get_member(controllable.id.replace(".", "_"), defaults={})
             self.model.add_component(controllable, model_config)
 
         self.setup(self.model)
@@ -173,15 +173,14 @@ class Optimization(Component, ABC):
 
             self.model.opti.solve()
 
-            timestamps = self._steps_to_datetime(start_time - pd.Timedelta("15min"))
+            timestamps = self._steps_to_datetime(start_time)
 
             result = pd.DataFrame(index=timestamps)
             result = self.model.extract_results(result)
             result = self.extract_results(self.model, result)
 
             result = result.resample("1min").ffill().bfill()
-            # results.index = results.index# - pd.Timedelta("15min")
-            self.result_buffer = result
+            self.results_buffer = result
         except Exception as e:
             print(f"Unable to solve optimization problem @ {start_time}: {e}")
             if self.results_buffer is not None:

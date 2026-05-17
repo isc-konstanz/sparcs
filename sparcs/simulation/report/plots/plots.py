@@ -118,7 +118,7 @@ def plot_system(
         message="This axis already has a converter set and is updating to a potentially incompatible converter",
     )
 
-    columns_power = [System.POWER_EL]
+    columns_power = [System.POWER_AC]
 
     # TODO: Replace with tariff component constants
     has_tariff = "tariff" in data.columns
@@ -140,7 +140,7 @@ def plot_system(
     axes = [ax_power]
 
     sns.lineplot(
-        data_power[System.POWER_EL],
+        data_power[System.POWER_AC],
         linewidth=0.25,
         color=COLORS["residual_blue"].hex,
         label="_hidden",
@@ -165,7 +165,7 @@ def plot_system(
             ax=ax_soc,
         )
 
-        data_ref = data_power[System.POWER_EL] - data_power[ElectricalEnergyStorage.POWER_CHARGE]
+        data_ref = data_power[System.POWER_AC] - data_power[ElectricalEnergyStorage.POWER_CHARGE]
         data_ref.plot.area(
             stacked=False,
             label="_hidden",
@@ -192,7 +192,7 @@ def plot_system(
             ax=ax_power,
         )
 
-    data_power[System.POWER_EL].plot.area(
+    data_power[System.POWER_AC].plot.area(
         stacked=False,
         label="Residual Load",
         alpha=0.25,

@@ -24,6 +24,7 @@ DEFAULTS = dict(
     spectral_model="no_loss",
     dc_ohmic_model="no_loss",
     losses_model="pvwatts",
+    transposition_model="haydavies",  # pvlib ModelChain default; read by SolarSystem._load_arrays
 )
 
 

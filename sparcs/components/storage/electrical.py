@@ -18,7 +18,9 @@ from lories.typing import Configurations, Timestamp
 @register_component_type("ees")
 class ElectricalEnergyStorage(Component):
     POWER_AC = Constant(float, "ac_power", "EES Charging Power", "W", context="ees")
-    POWER_CHARGE = POWER_AC  # branch-local alias; predictive optimization references POWER_CHARGE
+    # Separate column for the predictive-optimization aggregate charge power so it doesn't
+    # collide with the system-level ac_power residual prediction during simulate().
+    POWER_CHARGE = Constant(float, "ees_charge_power", "EES Charge Power (aggregate)", "W", context="ees")
 
     STATE_OF_CHARGE = Constant(float, "soc", "EES State of Charge", "%", context="ees")
 
@@ -87,6 +89,7 @@ class ElectricalEnergyStorage(Component):
 
         add_channel(ElectricalEnergyStorage.POWER_AC)
         add_channel(ElectricalEnergyStorage.STATE_OF_CHARGE, aggregate="last")
+        add_channel(ElectricalEnergyStorage.POWER_CHARGE)
 
     def percent_to_energy(self, percent) -> float:
         return percent * self.capacity / 100
@@ -104,7 +107,7 @@ class ElectricalEnergyStorage(Component):
     ) -> pd.DataFrame:
         from sparcs.system import System
 
-        if data is None or System.POWER_EL not in data.columns:
+        if data is None or System.POWER_AC not in data.columns:
             raise ValueError("Unable to predict battery storage state of charge without import/export power")
 
         columns = [self.STATE_OF_CHARGE, self.POWER_CHARGE]
@@ -118,16 +121,18 @@ class ElectricalEnergyStorage(Component):
             prior_index = None
             soc = 50.0
 
+        mpc_power_charge_column = f"mpc_{self.data[self.POWER_CHARGE].column}"
         for index, row in data.iterrows():
             charge_power = 0
             if prior_index is not None:
-                grid_power = row[System.POWER_EL]
+                grid_power = row[System.POWER_AC]
                 hours = (index - prior_index).total_seconds() / 3600.0
 
-                # Use the MPC predicted charge power if available
-                mpc_power_charge_column = f"mpc_{self.data[self.POWER_CHARGE].column}"
+                # Apply MPC's planned battery action directly (no real-time error correction).
+                # Falls back to the configured mode (peak_shaving / self_consumption / …) when
+                # there's no MPC solution in the row.
                 if mpc_power_charge_column in row:
-                    charge_power = row["grid_solution"] - grid_power
+                    charge_power = row[mpc_power_charge_column]
                     charge_power = self._limit_charge_power(hours, soc, charge_power, hard_max=True)
                 else:
                     charge_power = self._predict_charge_power(hours, soc, grid_power)

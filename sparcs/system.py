@@ -224,7 +224,7 @@ class System(lories.System):
                 solar_column = solar.data[SolarSystem.POWER].column
                 update_channel(solar.data[SolarSystem.POWER_EST], solar_column)
             update_channel(self.data[SolarSystem.POWER_EST], SolarSystem.POWER)
-        update_channel(self.data[System.POWER_EL_EST], System.POWER_EL)
+        update_channel(self.data[System.POWER_AC_EST], System.POWER_AC)
         update_channel(self.data[System.POWER_TH_EST], System.POWER_TH)
 
     def run(self, weather: pd.DataFrame) -> pd.DataFrame:
@@ -296,12 +296,10 @@ class System(lories.System):
     ) -> pd.DataFrame:
 
         # power predictions
-        residual_df = None
-        if self.data.has_logged(System.POWER_EL, start=start, end=end):
-            residual_df = self.data.from_logger([System.POWER_EL], start=start, end=end)
-        else:
+        residual_df = self.data.from_logger([System.POWER_AC], start=start, end=end)
+        if residual_df.empty or residual_df["ac_power"].isna().all():
             residual_df = pd.DataFrame(index=pd.date_range(start, end, freq="1min"))
-            residual_df[System.POWER_EL] = 0
+            residual_df[System.POWER_AC] = 0
 
         has_solar = self.components.has_type(SolarSystem)
         if has_solar and solar_df is not None:
@@ -309,7 +307,7 @@ class System(lories.System):
                 solar_column = solar.data[SolarSystem.POWER].column
                 if not solar.data.has_logged(SolarSystem.POWER, start, end):
                     # Solar System does not have a measured reference and will be subtracted from residual power
-                    residual_df[System.POWER_EL] -= solar_df[solar_column]
+                    residual_df[System.POWER_AC] -= solar_df[solar_column]
                     pass
 
         return residual_df
@@ -350,7 +348,7 @@ class System(lories.System):
     #                 data[ElectricalEnergyStorage.POWER_CHARGE] += ees_power
     #
     #                 # EES does not have a measured reference and will be added to residual power
-    #                 data[System.POWER_EL] += ees_power
+    #                 data[System.POWER_AC] += ees_power
     #
     #                 total_capacity += ees.capacity
     #                 total_energy += ees_data[ElectricalEnergyStorage.STATE_OF_CHARGE] / 100 * ees.capacity
@@ -419,14 +417,14 @@ class System(lories.System):
     #             #from lories.data.forecast import get_forecast
     #             #el_power_forecast = get_forecast(
     #             #    self,
-    #             #    System.POWER_EL,
+    #             #    System.POWER_AC,
     #             #    start=start,
     #             #    end=end,
     #             #    method="real",
     #             #    #method="persistence_3weeks",
     #             #)
     #             # upsample load predictions
-    #             #real = self.data.from_logger(["el_power"], start=start, end=end)["el_power"].copy()
+    #             #real = self.data.from_logger(["ac_power"], start=start, end=end)["ac_power"].copy()
 
 
     #             el_power_forecast = self.residual_forecast(start, end)
@@ -539,12 +537,12 @@ class System(lories.System):
         #data.index = data.index - pd.Timedelta(minutes=15)
 
 
-        # if System.POWER_EL not in data.columns:
-        #     if self.data.has_logged(System.POWER_EL, start=start, end=end):
-        #         self._logger.debug(f"Reference {System.POWER_EL.name} will be as missing prediction.")
-        #         data.insert(0, System.POWER_EL, self.data.from_logger([System.POWER_EL], start=start, end=end))
+        # if System.POWER_AC not in data.columns:
+        #     if self.data.has_logged(System.POWER_AC, start=start, end=end):
+        #         self._logger.debug(f"Reference {System.POWER_AC.name} will be as missing prediction.")
+        #         data.insert(0, System.POWER_AC, self.data.from_logger([System.POWER_AC], start=start, end=end))
         #     else:
-        #         self._logger.debug(f"Reference {System.POWER_EL.name} cannot be found.")
+        #         self._logger.debug(f"Reference {System.POWER_AC.name} cannot be found.")
 
         # # data = self._simulate_solar(data, start, end, prior)
         # if self.components.has_type(SolarSystem):
@@ -552,7 +550,7 @@ class System(lories.System):
         #         solar_column = solar.data[SolarSystem.POWER].column
         #         if not solar.data.has_logged(SolarSystem.POWER, start, end):
         #             # Solar System does not have a measured reference and will be subtracted from residual power
-        #             data[System.POWER_EL] -= data[solar_column]
+        #             data[System.POWER_AC] -= data[solar_column]
         #             pass
 
         has_opti = self.components.has_type(Optimization)
@@ -619,7 +617,7 @@ class System(lories.System):
                         data.loc[_start:_end, ElectricalEnergyStorage.POWER_CHARGE] += ees_power
 
                         # EES does not have a measured reference and will be added to residual power
-                        data.loc[_start:_end, System.POWER_EL] += ees_power
+                        data.loc[_start:_end, System.POWER_AC] += ees_power
 
                     total_energy.loc[_start:_end] += ees_data[ElectricalEnergyStorage.STATE_OF_CHARGE] / 100 * ees.capacity
 
@@ -636,6 +634,16 @@ class System(lories.System):
             data.drop(columns=[Tariff.PRICE_EXPORT], inplace=True)
 
         data = data.loc[start:real_end]
+
+        # Phase 1 band-aid: simulate() builds helper columns (MPC intermediates, bare-keyed
+        # constants) that the results database doesn't know. Drop unknown columns so the write
+        # succeeds. Proper fix is to either register these as channels (Phase 3) or rewrite the
+        # simulate() data flow to use channel ids.
+        known = {c.id for c in self.data.channels}
+        for component in self.components.get_all():
+            known.update(c.id for c in component.data.channels)
+        data = data[[c for c in data.columns if c in known]]
+
         return data
     
     # noinspection PyUnusedLocal
@@ -722,6 +730,9 @@ class System(lories.System):
 
         data = data.iloc[15:] # drop first 15 minutes to avoid initialization issues
 
+        if "predictions" not in data.columns.get_level_values(0):
+            return data
+
         self._evaluate_yield(results, data)
         self._evaluate_storage(results, data)
         self._evaluate_system(results, data)
@@ -779,7 +790,8 @@ class System(lories.System):
                     data.drop(columns=[("references", column)], inplace=True)
 
         data = data.copy()
-        data = data.drop(columns=[("predictions", col) for col in solar_columns if col in data["references"].columns])
+        if "references" in data.columns.get_level_values(0):
+            data = data.drop(columns=[("predictions", col) for col in solar_columns if col in data["references"].columns])
         data = data.droplevel(0, axis=1)
 
         solar_kwps = pd.DataFrame([{solar.id: solar.power_max for solar in solar_systems}])
@@ -1100,7 +1112,7 @@ class System(lories.System):
         hours = pd.Series(data.index, index=data.index)
         hours = (hours - hours.shift(1)).bfill().dt.total_seconds() / 3600.0
 
-        power = data[("predictions", System.POWER_EL)]
+        power = data[("predictions", System.POWER_AC)]
         energy = power * hours / 1000.0  # kWh
         neg_energy = energy.where(energy < 0, other=0)
         pos_energy = energy.where(energy > 0, other=0)
@@ -1389,7 +1401,7 @@ class System(lories.System):
                     forecast_values.iloc[index] + kappa * (results[index - 1] - forecast_values.iloc[index - 1]))
             return pd.Series(results, index=forecast_values.index, name=forecast_values.name)
 
-        column = System.POWER_EL
+        column = System.POWER_AC
         try:
             if start > self.buffered_forecast.index[0] and end < self.buffered_forecast.index[-1]:
                 return self.buffered_forecast
