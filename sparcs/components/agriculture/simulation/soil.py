@@ -8,7 +8,6 @@ sparcs.components.agriculture.soil_simulation
 
 from __future__ import annotations
 
-import io
 import logging
 import os
 import sys
@@ -29,7 +28,7 @@ from scipy.interpolate import griddata
 import numpy as np
 import pandas as pd
 
-from . import plot_style
+from . import plot_render
 from lories import Component, Constant
 from lories.components.weather import Weather
 from lories.typing import Configurations
@@ -825,21 +824,12 @@ class SoilSimulation(SoilBase):
 
         if self._plot_config.show:
             plt.ion()
-        x_extent = self._mesh_config.width
-        y_extent = self._mesh_config.height
-        fig, ax = plt.subplots(figsize=plot_style.compute_fig_size(x_extent, y_extent), dpi=plot_style.DPI)
-        # Smoothstep norm stretches the mid-saturation range visually so
-        # typical operating values (Se ≈ 0.3–0.7) get most of the
-        # colorbar's contrast, while near-dry / near-saturated bands are
-        # compressed. Colorbar tick labels stay in physical Se units
-        # because ``SmoothstepNorm.inverse`` is the analytic inverse.
-        self._plot_norm = plot_style.saturation_norm(vmin=0.0, vmax=1.0)
-        sm = plt.cm.ScalarMappable(cmap=plot_style.COLORMAP, norm=self._plot_norm)
-        sm.set_array([])
-        fig.colorbar(sm, ax=ax, shrink=plot_style.CBAR_SHRINK, label="relative saturation [-]")
-        plot_style.apply_subplots_adjust(fig)
+        fig, ax, norm = plot_render.init_rel_sat_figure(
+            self._mesh_config.width, self._mesh_config.height,
+        )
         self._plot_fig = fig
         self._plot_ax = ax
+        self._plot_norm = norm
 
         if self._plot_config.live:
             self._write_progress_html()
@@ -872,31 +862,13 @@ class SoilSimulation(SoilBase):
     def _render_progress(self, sim_t: pd.Timestamp) -> None:
         if self._plot_fig is None:
             self._init_progress_figure()
-        ax = self._plot_ax
 
-        x, y = self._pde.mesh.cellCenters
-        xi = np.linspace(np.min(x), np.max(x), 100)
-        yi = np.linspace(np.min(y), np.max(y), 100)
-        zi = griddata(
-            (np.asarray(x), np.asarray(y)),
-            self._pde.rel_sat.value,
-            (xi[None, :], yi[:, None]),
-            method="cubic",
+        # Render the figure to PNG once, then fan out to all sinks (channel
+        # for database persistence, live overwrite, archived per-frame file).
+        png_bytes = plot_render.render_rel_sat_png(
+            self._plot_fig, self._plot_ax, self._plot_norm,
+            self._pde.mesh, self._pde.rel_sat.value, sim_t,
         )
-
-        ax.clear()
-        # Contour levels stay linear in Se (the iso-saturation lines are
-        # physically meaningful at evenly spaced Se values); the colour
-        # mapping is reshaped by ``self._plot_norm`` so the same 15
-        # bands give finer mid-range gradient and coarser endpoint
-        # gradient.
-        ax.contourf(xi, yi, zi, levels=15, cmap=plot_style.COLORMAP, norm=self._plot_norm)
-        ax.contour(xi, yi, zi, levels=15, linewidths=0.5, colors="k")
-        plot_style.apply_axes_style(ax)
-        # Mesh y is positive depth; flip so the surface (y=0) sits at the top
-        # of the figure and depth grows downward.
-        ax.invert_yaxis()
-        ax.set_title(plot_style.format_progress_title("Relative saturation", sim_t))
 
         if self._plot_config.show:
             try:
@@ -904,12 +876,6 @@ class SoilSimulation(SoilBase):
                 plt.pause(0.001)
             except Exception:  # noqa: BLE001
                 pass
-
-        # Render the figure to PNG once, then fan out to all sinks (channel
-        # for database persistence, live overwrite, archived per-frame file).
-        buf = io.BytesIO()
-        self._plot_fig.savefig(buf, dpi=120, format="png")
-        png_bytes = buf.getvalue()
 
         self.data[SoilSimulation.SOIL_PROGRESS_IMAGE].set(sim_t, png_bytes)
 
