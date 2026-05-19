@@ -3,37 +3,38 @@
 sparcs.components.agriculture.simulation.soil_predictor
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Forecast-driven horizon predictor. For each watering strategy in
-``[0%, 20%, ..., 100%]`` (where 100% defaults to 1 L/h), integrates the
-Richards-equation soil PDE over the available weather forecast and
-publishes the predicted relative saturation at every probe defined on the
-live ``SoilSimulation``. The live solver is never touched: the predictor
-owns its own FiPy mesh, equation, and ``CellVariable``s.
+Forecast-driven horizon predictor. Integrates the Richards-equation soil
+PDE over the available weather forecast **with no irrigation applied** and
+publishes the predicted relative saturation at every probe defined on
+the live ``SoilSimulation``. The live solver is never touched: the
+predictor owns its own FiPy mesh, equation, and ``CellVariable``s.
 
-The expensive compute step is isolated in :meth:`SoilPredictor._solve_strategies`
+Optionally archives the full saturation field at ``save_freq`` cadence
+across the horizon on bytes channels ``predict_state`` (npz blob) and
+``predict_plot`` (PNG, rendered via :mod:`plot_render`).
+
+The expensive compute step is isolated in :meth:`SoilPredictor._solve`
 so a future server-attached backend (sparcs running on an edge device,
-strategy roll-outs offloaded to a server) can replace just that one
-method with an HTTP / RPC call without touching forecast retrieval,
-chain replay, or channel publishing.
+predictions offloaded to a server) can replace just that one method
+with an HTTP / RPC call without touching forecast retrieval, chain
+replay, or channel publishing.
 """
 
 from __future__ import annotations
 
 import io
 import logging
-from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
 
-from lories import Component
 from lories.components.weather import Weather
 from lories.typing import Configurations
 from lories.util import to_timedelta
 
-from ._soil import SoilBase
-
+from . import plot_render
+from ._soil import ClipDiagnostics, FluxRates, MeshConfig, SoilBase
 # FiPy mesh, Richards-equation assembly, segment index, and the pure
 # integration primitives (apply_source, solve, sample, total_water, state
 # I/O) live on the shared :class:`SoilPDECore` so SoilPredictor and
@@ -47,29 +48,22 @@ from sparcs.components.agriculture.simulation.soil import (
 )
 
 
-_DEFAULT_STRATEGIES: tuple[float, ...] = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
-# 100 % strategy = 1 L/h. SoilSimulation expresses irrigation in L/min, so
-# 1 L/h = 1/60 L/min. Override via [soil_predictor].flow_lpm_at_100.
-_DEFAULT_FLOW_LPM_AT_100: float = 1.0 / 60.0
 _DEFAULT_HORIZON: str = "24h"
+_DEFAULT_SAVE_FREQ: str = "1h"
 
-
-@dataclass
-class StrategyResult:
-    """One strategy's prediction.
-
-    ``end_rel_sat`` is the full saturation field at horizon end (kept so
-    the end-state can be archived as a bytes channel and so a future
-    remote backend has a single typed payload to return).
-    ``probe_trajectories`` maps probe channel id → predicted
-    volume-weighted mean rel_sat sampled at each forecast row. The time
-    axis is shared across probes and strategies; the parent emits it on
-    a separate ``predict_timestamps`` channel each tick.
-    """
-
-    strategy: float
-    end_rel_sat: np.ndarray
-    probe_trajectories: dict[str, list[float]]
+# Diagnostic flux Constants the predictor mirrors from the live solver so
+# the predict-side channels carry identical names / units (and the UI can
+# match them side-by-side under different component cards). Order is the
+# emission order — same as :class:`SoilSimulation.configure`.
+_DIAGNOSTIC_CONSTANTS = (
+    SoilSimulation.WATER_TOP_IN,
+    SoilSimulation.WATER_TOP_OUT,
+    SoilSimulation.WATER_BOTTOM,
+    SoilSimulation.WATER_TRANSP,
+    SoilSimulation.WATER_RUNOFF,
+    SoilSimulation.WATER_DEMAND_UNMET,
+    SoilSimulation.WATER_BALANCE_RESIDUAL,
+)
 
 
 class SoilPredictor(SoilBase):
@@ -78,29 +72,38 @@ class SoilPredictor(SoilBase):
     TYPE: str = "soil_predictor"
     INCLUDES = ["pde"]
 
-    _strategies: tuple[float, ...]
-    _flow_lpm_at_100: float
-    _horizon: pd.Timedelta
-    _save_end_states: bool
+    # Matches the lories Weather convention so SQL connectors that
+    # special-case ``timestamp_creation`` (composite PK promotion in
+    # ``connectors/sql/schema.py``) work unchanged.
+    _TIMESTAMP_CREATION_KEY: str = "timestamp_creation"
+    _STATE_CHANNEL_KEY: str = "predict_state"
+    _PLOT_CHANNEL_KEY: str = "predict_plot"
 
-    _mesh_config: object
+    _horizon: pd.Timedelta
+    _save_freq: pd.Timedelta
+    _save_state: bool
+    _save_plot: bool
+
+    _mesh_config: MeshConfig
     _ode_config: PDEConfig
     _pde: SoilPDECore
 
-    # (probe_channel_id, strategy_fraction) → predict-channel id.
-    # The literal key ``"__state__"`` is reserved for the optional
-    # per-strategy end-state archive channel.
-    _channel_keys: dict[tuple[str, float], str]
+    # Lazy-init render scaffolding (only built when ``save_plot`` is on and
+    # the first snapshot needs rendering).
+    _plot_fig: Any = None
+    _plot_ax: Any = None
+    _plot_norm: Any = None
+
+    # probe.channel_id → predict-channel id.
+    _channel_keys: dict[str, str]
 
     _probes: list[ProbeSpec]
 
-    # Last ``now`` we ran a prediction for. The simulation callback fires
-    # once per input-channel update; multiple channels updating at the same
-    # data timestamp (e.g. all weather columns at the top of a Brightsky
-    # hour) re-fire the listener with identical ``now``. Without dedup,
-    # ``set(now, value)`` lands twice on the same channel → CSV gets two
-    # rows with identical index → ``validate_index`` rejects on read-back.
-    _last_predicted_at: Optional[pd.Timestamp] = None
+    # Dedup gate keyed on ``(now, forecast_creation)`` so a fresh DWD
+    # forecast at the same simulated ``now`` still flows through (that's
+    # the whole point of stamping rows with ``timestamp_creation``), while
+    # duplicate listener re-fires for an identical pair no-op out.
+    _last_predicted_key: Optional[tuple[pd.Timestamp, pd.Timestamp]] = None
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
@@ -122,14 +125,10 @@ class SoilPredictor(SoilBase):
             )
         self._mesh_config = mesh_config
 
-        self._strategies = tuple(
-            float(s) for s in configs.get("strategies", default=list(_DEFAULT_STRATEGIES))
-        )
-        self._flow_lpm_at_100 = float(
-            configs.get("flow_lpm_at_100", default=_DEFAULT_FLOW_LPM_AT_100)
-        )
         self._horizon = to_timedelta(configs.get("horizon", default=_DEFAULT_HORIZON))
-        self._save_end_states = configs.get_bool("save_end_states", default=False)
+        self._save_freq = to_timedelta(configs.get("save_freq", default=_DEFAULT_SAVE_FREQ))
+        self._save_state = configs.get_bool("save_state", default=False)
+        self._save_plot = configs.get_bool("save_plot", default=False)
 
         # Pull soil_simulation's loaded config block (file + parent overrides
         # already merged) so we can read its [pde] params (model selector +
@@ -163,46 +162,72 @@ class SoilPredictor(SoilBase):
             probes_cfg, self._pde.mesh, self._mesh_config, log_name=self.name,
         )
 
-        # Channel layout: predict_<probe_id>_w<pct> per (probe, strategy),
-        # plus optional predict_state_w<pct> for the saturation field.
-        # Each per-probe channel holds a ``list[float]`` — the predicted
-        # rel_sat trajectory sampled at each forecast row. The shared
-        # ``predict_timestamps`` channel publishes the matching time axis.
+        # Composite-PK partner for every row this predictor emits. Mirrors
+        # ``WeatherForecast``'s ``timestamp_creation`` (see
+        # ``lories.components.weather.dwd.provider``) so the SQL schema
+        # layer promotes ``(timestamp, timestamp_creation)`` to the table's
+        # primary key and multiple forecasts addressing the same target
+        # timestamp coexist as distinct rows. Registered before the
+        # per-probe loop so it's present even when there are no probes.
+        self.data.add(
+            key=self._TIMESTAMP_CREATION_KEY,
+            name="Predictor Creation Timestamp",
+            type=pd.Timestamp,
+            aggregate="last",
+            logger={
+                "primary": True,
+                "nullable": False,
+                "enabled": True,
+            },
+        )
+
+        # Channel layout: one ``predict_<probe_id>`` float channel per probe,
+        # holding a scalar predicted rel_sat per row. ``predict()`` emits N
+        # rows (one per forecast step) in a single ``set`` call per channel;
+        # the target timestamps live on the row index.
         self._channel_keys = {}
-        self._timestamps_key = "predict_timestamps"
         for probe in self._probes:
-            for s in self._strategies:
-                pct = int(round(s * 100))
-                key = f"predict_{probe.channel_id}_w{pct:03d}"
-                self._channel_keys[(probe.channel_id, s)] = key
-                self.data.add(
-                    key,
-                    type=list,
-                    name=f"Predicted {probe.name} @ {pct}% irrigation",
-                    unit="-",
-                    aggregate="last",
-                    logger={"enabled": True},
-                )
-        if self._probes:
+            key = f"predict_{probe.channel_id}"
+            self._channel_keys[probe.channel_id] = key
             self.data.add(
-                self._timestamps_key,
-                type=list,
-                name="Predicted Trajectory Timestamps",
+                key,
+                type=float,
+                name=f"Predicted {probe.name}",
+                unit="-",
                 aggregate="last",
                 logger={"enabled": True},
             )
-        if self._save_end_states:
-            for s in self._strategies:
-                pct = int(round(s * 100))
-                key = f"predict_state_w{pct:03d}"
-                self._channel_keys[("__state__", s)] = key
-                self.data.add(
-                    key,
-                    type=bytes,
-                    name=f"Predicted soil state @ {pct}% irrigation",
-                    aggregate="last",
-                    logger={"enabled": True},
-                )
+
+        if self._save_state:
+            # Saturation-field snapshots sampled at ``save_freq`` across the
+            # horizon (plus the final forecast row). Same set-with-Series
+            # idiom as the probe channels — each row is one binary blob.
+            self.data.add(
+                self._STATE_CHANNEL_KEY,
+                type=bytes,
+                name="Predicted soil state",
+                aggregate="last",
+                logger={"enabled": True},
+            )
+
+        if self._save_plot:
+            # PNG of the saturation field at every save tick, rendered with
+            # the same colorbar / styling as the live solver's progress.png
+            # via the shared :mod:`plot_render` helpers.
+            self.data.add(
+                self._PLOT_CHANNEL_KEY,
+                type=bytes,
+                name="Predicted soil progress image",
+                unit="png",
+                aggregate="last",
+                logger={"enabled": True},
+            )
+
+        # Per-forecast-interval flux-density diagnostics, mirroring the live
+        # solver's 7 channels. Each forecast row contributes one value;
+        # ``_publish_results`` emits the full horizon as a Series.
+        for c in _DIAGNOSTIC_CONSTANTS:
+            self.data.add(c, aggregate="last", logger={"enabled": True})
 
         if not self._probes:
             logging.warning(
@@ -216,26 +241,57 @@ class SoilPredictor(SoilBase):
     # Public driver
     # =========================================================================
 
-    def predict(self, now: pd.Timestamp) -> None:
+    def predict(self, now: pd.Timestamp, forecast_creation: Optional[pd.Timestamp]) -> None:
         """One prediction tick. Silently skips when no forecast is available
         or the live soil solver hasn't produced a state yet — predictions
-        are best-effort and must not break the live callback chain."""
-        # Dedup: ``how="any"`` listener fires once per updated input channel,
-        # so multiple channels updating at the same data timestamp would
-        # re-enter ``predict()`` with identical ``now`` and write duplicate
-        # CSV rows. Skip if we've already produced a prediction for this
-        # timestamp (or an earlier one, which can happen if a logger replay
-        # rolls the index backwards).
-        if self._last_predicted_at is not None and now <= self._last_predicted_at:
+        are best-effort and must not break the live callback chain.
+
+        ``forecast_creation`` is the DWD forecast's ``timestamp_creation``
+        (read by ``FieldSimulation._forecast_callback``) and becomes the
+        composite-PK partner stamped onto every emitted row. When the
+        upstream hasn't populated it yet (cold start, non-DWD weather
+        source, network hiccup), we fall back to ``now`` so the predictor
+        still emits instead of going dark — the PK invariant (a non-null
+        Timestamp on every row) is preserved; the only thing lost is the
+        join-back trace to the exact upstream forecast issue time. A
+        debug log records each fallback so the cause is visible if the
+        situation turns out to be persistent rather than transient.
+        """
+        if forecast_creation is None:
+            logging.debug(
+                "%s: forecast_creation unavailable (upstream "
+                "weather.forecast.timestamp_creation not valid yet); "
+                "falling back to now=%s for the PK column.",
+                self.name, now,
+            )
+            forecast_creation = now
+
+        # Dedup on the (target, creation) pair. A genuine new forecast at
+        # the same ``now`` must flow through (this is the entire reason
+        # for the timestamp_creation column); only an exact re-fire of the
+        # same listener event no-ops out.
+        key = (now, forecast_creation)
+        if self._last_predicted_key == key:
+            # Duplicate listener re-fires (forecast trigger spins on
+            # future-dated channel.timestamp) hit this every time, so DEBUG.
+            logging.debug(
+                "%s: predict skipped — already published for (now=%s, creation=%s).",
+                self.name, now, forecast_creation,
+            )
             return
 
         forecast = self._fetch_forecast(now)
         if forecast is None or forecast.empty:
+            logging.info(
+                "%s: predict skipped — no forecast rows in [%s, %s].",
+                self.name, now, now + self._horizon,
+            )
             return
 
         field = self.context
         soil = getattr(field, "soil_simulation", None)
         if soil is None:
+            logging.info("%s: predict skipped — no soil_simulation sibling.", self.name)
             return
 
         # Skip until the live solver has actually produced a state — predicting
@@ -243,11 +299,12 @@ class SoilPredictor(SoilBase):
         # publishes trajectories that don't match the field. SoilSimulation
         # sets ``_last_simulated_at`` from ``_save_state`` after each successful
         # advance, so this gate clears exactly when the first real callback
-        # has committed a saturation field.
+        # has committed a saturation field. DEBUG because cold-start refires
+        # this gate many times before the first soil advance lands.
         if getattr(soil, "_last_simulated_at", None) is None:
             logging.debug(
-                "%s: live solver has no state yet (cold-start still running); "
-                "skipping forecast tick at %s.", self.name, now,
+                "%s: predict skipped — live solver has no state yet "
+                "(cold-start still running) at %s.", self.name, now,
             )
             return
 
@@ -259,51 +316,83 @@ class SoilPredictor(SoilBase):
             )
             return
         if et_data.empty or et_data.shape[0] < 2:
-            # Need at least two rows to define one (t, t+Δt) integration step.
+            logging.info(
+                "%s: predict skipped — chain replay returned %d row(s), need ≥ 2.",
+                self.name, et_data.shape[0],
+            )
             return
 
         ic_rel_sat = soil.get_rel_sat_snapshot()
         try:
-            results = self._solve_strategies(ic_rel_sat, et_data, seg_et)
+            timestamps, trajectories, snapshots, diagnostics = self._solve(
+                ic_rel_sat, et_data, seg_et
+            )
         except Exception:  # noqa: BLE001
             logging.exception(
-                "%s: strategy integration failed; skipping tick.", self.name
+                "%s: integration failed; skipping tick.", self.name
             )
             return
 
-        self._publish_results(now, results, self._probes)
-        self._last_predicted_at = now
+        # Wrap _publish_results: any exception here propagates up to
+        # lories' Listener.__call__, whose ``finally: return self`` (see
+        # listener.py:85) SWALLOWS the exception completely — no
+        # traceback, no "Failed notifying listener" warning. Without
+        # this try/except a converter / set_frame failure is invisible.
+        try:
+            self._publish_results(
+                trajectories, self._probes, timestamps, snapshots,
+                diagnostics, forecast_creation,
+            )
+        except Exception:  # noqa: BLE001
+            logging.exception(
+                "%s: publishing results failed; predictor channels stay "
+                "stale this tick (now=%s, creation=%s).",
+                self.name, now, forecast_creation,
+            )
+            return
+        self._last_predicted_key = key
+        logging.info(
+            "%s: predict OK — %d probes, %d rows emitted "
+            "(now=%s, creation=%s).",
+            self.name, len(self._probes), len(timestamps),
+            now, forecast_creation,
+        )
 
     # =========================================================================
     # Backend split-point — replace this method with a remote call to offload
     # =========================================================================
 
-    def _solve_strategies(
+    def _solve(
         self,
         ic_rel_sat: np.ndarray,
         et_data: pd.DataFrame,
         seg_et: dict[str, pd.DataFrame],
-    ) -> list[StrategyResult]:
+    ) -> tuple[
+        list[pd.Timestamp],
+        dict[str, list[float]],
+        dict[pd.Timestamp, np.ndarray],
+        dict[str, list[float]],
+    ]:
         """Local PDE backend.
 
         A future server-attached deployment can swap this method for an
         RPC: the inputs (initial saturation field + ET-augmented forecast +
-        per-segment ET decomposition) and the ``StrategyResult`` outputs
-        are already a self-contained, pickle-friendly payload.
+        per-segment ET decomposition) and the outputs (probe + diagnostic
+        trajectories + optional state snapshots) are already a
+        self-contained, pickle-friendly payload.
+
+        Returns ``(timestamps, trajectories, snapshots, diagnostics)``.
+        ``timestamps`` is the time axis from ``_integrate_horizon`` (the
+        forecast row index); ``trajectories[probe_id]`` is the matching
+        list of probe rel_sat values; ``snapshots`` maps save-tick
+        timestamps to raw saturation-field arrays (empty when neither
+        ``save_state`` nor ``save_plot`` is on); ``diagnostics[key]`` is
+        the per-interval kg/(m²·h) flux density (one entry per forecast
+        interval, ``NaN`` at the IC row where there is no interval to
+        diagnose yet).
         """
-        results: list[StrategyResult] = []
-        # ``_integrate_horizon`` returns the same time axis for every strategy
-        # (it's just the forecast row index); keep the last one so
-        # ``_publish_results`` can emit it on the shared timestamps channel.
-        self._last_trajectory_timestamps: list[pd.Timestamp] = []
-        for strategy in self._strategies:
-            flow_m3s = strategy * self._flow_lpm_at_100 / 60_000.0
-            self._pde.set_state(ic_rel_sat)
-            timestamps, trajectories = self._integrate_horizon(et_data, seg_et, flow_m3s)
-            end_state = self._pde.snapshot()
-            results.append(StrategyResult(strategy, end_state, trajectories))
-            self._last_trajectory_timestamps = timestamps
-        return results
+        self._pde.set_state(ic_rel_sat)
+        return self._integrate_horizon(et_data, seg_et)
 
     # =========================================================================
     # Forecast retrieval
@@ -347,29 +436,50 @@ class SoilPredictor(SoilBase):
         self,
         et_data: pd.DataFrame,
         seg_et: dict[str, pd.DataFrame],
-        flow_m3s: float,
-    ) -> tuple[list[pd.Timestamp], dict[str, list[float]]]:
+    ) -> tuple[
+        list[pd.Timestamp],
+        dict[str, list[float]],
+        dict[pd.Timestamp, np.ndarray],
+        dict[str, list[float]],
+    ]:
         """Step the predictor PDE through every (t, t+Δt) interval covered
         by the forecast. Per-segment ET / rain values are read from the
-        forecast row at each step; the irrigation flow is held constant
-        over the horizon at the strategy's value.
+        forecast row at each step; no irrigation source is applied.
 
-        Returns ``(timestamps, trajectories)`` where ``timestamps`` is the
-        list of forecast rows sampled (including the initial state) and
-        ``trajectories[probe_id]`` is the matching list of probe
-        rel_sat values.
+        Returns ``(timestamps, trajectories, snapshots, diagnostics)``.
+        Diagnostics carry one entry per timestamp — ``NaN`` at the IC row
+        (no interval to diagnose yet), then per-interval kg/(m²·h) flux
+        densities computed from the same mass-balance math the live
+        solver runs via :meth:`SoilBase._compute_diagnostics`.
         """
         dt_max = self._ode_config.dt
         dt_min = max(self._ode_config.dt_min, 1.0e-6)
         idx = et_data.index
         timestamps: list[pd.Timestamp] = []
         trajectories: dict[str, list[float]] = {p.channel_id: [] for p in self._probes}
+        snapshots: dict[pd.Timestamp, np.ndarray] = {}
+        diagnostics: dict[str, list[float]] = {c.key: [] for c in _DIAGNOSTIC_CONSTANTS}
+        last_save_ts: Optional[pd.Timestamp] = None
+        capture_snapshots = self._save_state or self._save_plot
+
+        def _maybe_snapshot(ts: pd.Timestamp) -> None:
+            nonlocal last_save_ts
+            if not capture_snapshots:
+                return
+            if last_save_ts is not None and (ts - last_save_ts) < self._save_freq:
+                return
+            snapshots[ts] = self._pde.snapshot()
+            last_save_ts = ts
 
         # Initial state — the IC the caller just reset.
         if len(idx) > 0:
             timestamps.append(idx[0])
             for p in self._probes:
                 trajectories[p.channel_id].append(self._pde.sample(p))
+            # No interval has elapsed yet at the IC, so diagnostics are NaN.
+            for key in diagnostics:
+                diagnostics[key].append(float("nan"))
+            _maybe_snapshot(idx[0])
 
         for ts_prev, ts_next in zip(idx[:-1], idx[1:]):
             elapsed_s = (ts_next - ts_prev).total_seconds()
@@ -378,21 +488,31 @@ class SoilPredictor(SoilBase):
 
             seg_evap, seg_transp = self._segment_flux_dicts(seg_et, ts_next)
             rain_flux = self._rain_flux(et_data, ts_next, elapsed_s)
+            rates = FluxRates(
+                seg_evap=seg_evap,
+                seg_transp=seg_transp,
+                flow_m3s=0.0,
+                rain_flux=rain_flux,
+            )
+            clip_total = ClipDiagnostics()
+            storage_before = self._total_water()
 
             # HYDRUS-style adaptive walk over this forecast interval —
             # snapshot the state, attempt ``sub_dt``, halve on
             # non-convergence (down to ``dt_min``), grow back after fast
-            # convergence. Mirrors :meth:`SoilSimulation._walk`.
+            # convergence. Mirrors :meth:`SoilSimulation._walk`; the
+            # per-substep ``ClipDiagnostics`` are accumulated for the
+            # interval-level diagnostic computation below.
             sub_dt = dt_max
             t_offset = 0.0
             while t_offset < elapsed_s - 1.0e-9:
                 attempted = min(sub_dt, elapsed_s - t_offset)
                 snapshot = self._pde.snapshot()
-                self._pde.apply_source(
-                    seg_evap=seg_evap,
-                    seg_transp=seg_transp,
-                    rain_flux=rain_flux,
-                    flow_m3s=flow_m3s,
+                clip = self._pde.apply_source(
+                    seg_evap=rates.seg_evap,
+                    seg_transp=rates.seg_transp,
+                    rain_flux=rates.rain_flux,
+                    flow_m3s=rates.flow_m3s,
                     dt=attempted,
                 )
                 result = self._pde.solve(attempted, log_name=self.name)
@@ -401,14 +521,29 @@ class SoilPredictor(SoilBase):
                     sub_dt = max(dt_min, attempted / 3.0)
                     continue
                 t_offset += attempted
+                clip_total.add(clip)
                 if result.converged and result.sweeps <= 3 and sub_dt < dt_max:
                     sub_dt = min(dt_max, sub_dt * 1.5)
 
             timestamps.append(ts_next)
             for p in self._probes:
                 trajectories[p.channel_id].append(self._pde.sample(p))
+            delta_storage = self._total_water() - storage_before
+            interval_diag = self._compute_diagnostics(
+                rates, delta_storage, elapsed_s, clip_total,
+            )
+            for key in diagnostics:
+                diagnostics[key].append(interval_diag.get(key, float("nan")))
+            _maybe_snapshot(ts_next)
 
-        return timestamps, trajectories
+        # Always archive the final row so the horizon-end state is
+        # available even when it falls < save_freq after the last save.
+        if capture_snapshots and timestamps:
+            final_ts = timestamps[-1]
+            if final_ts not in snapshots:
+                snapshots[final_ts] = self._pde.snapshot()
+
+        return timestamps, trajectories, snapshots, diagnostics
 
     @staticmethod
     def _segment_flux_dicts(
@@ -448,28 +583,116 @@ class SoilPredictor(SoilBase):
 
     def _publish_results(
         self,
-        now: pd.Timestamp,
-        results: list[StrategyResult],
+        trajectories: dict[str, list[float]],
         probes: list[ProbeSpec],
+        timestamps: list[pd.Timestamp],
+        snapshots: dict[pd.Timestamp, np.ndarray],
+        diagnostics: dict[str, list[float]],
+        forecast_creation: pd.Timestamp,
     ) -> None:
-        # Shared time axis — published once per tick so downstream readers
-        # can zip ``predict_timestamps`` with each per-probe trajectory.
-        ts_strs = [t.isoformat() for t in self._last_trajectory_timestamps]
-        if ts_strs and self._timestamps_key in self.data:
-            self.data[self._timestamps_key].set(now, ts_strs)
+        # Per-probe emission: one row per forecast target timestamp, every
+        # row stamped with the same ``forecast_creation``. The composite
+        # ``(timestamp, timestamp_creation)`` PK lets multiple forecasts
+        # addressing the same target coexist as distinct rows.
+        #
+        # ``self.data`` on a Component is a ``DataAccess`` (a registry-like
+        # facade over individual channels); it does not expose a
+        # frame-level ``set_frame``. The lories pattern for multi-row
+        # channel values is to hand each channel a ``pd.Series`` indexed
+        # by the row timestamps — ``Channel.to_series`` then forwards the
+        # Series straight to the logger, which lands N rows in one INSERT
+        # (mirrors what WeatherForecast does after a Brightsky read).
+        if not timestamps:
+            return
 
-        for result in results:
-            for probe in probes:
-                key = self._channel_keys.get((probe.channel_id, result.strategy))
-                if key is None:
-                    continue
-                traj = result.probe_trajectories.get(probe.channel_id, [])
-                self.data[key].set(now, list(traj))
-            if self._save_end_states:
-                key = self._channel_keys.get(("__state__", result.strategy))
-                if key is None:
-                    continue
-                buf = io.BytesIO()
-                np.savez(buf, rel_sat=result.end_rel_sat)
-                self.data[key].set(now, buf.getvalue())
+        index = pd.DatetimeIndex(timestamps, name="timestamp")
 
+        # ``timestamp_creation``: same value on every emitted row (composite
+        # PK partner). Broadcasting the scalar through pandas gives us a
+        # Series of identical Timestamps, indexed by the target timestamps.
+        creation_series = pd.Series(forecast_creation, index=index)
+        self.data[self._TIMESTAMP_CREATION_KEY].set(index[0], creation_series)
+
+        for probe in probes:
+            key = self._channel_keys.get(probe.channel_id)
+            if key is None:
+                continue
+            traj = trajectories.get(probe.channel_id, [])
+            if len(traj) != len(index):
+                # Defensive: integration produced a different sample
+                # count than the shared time axis. Skip rather than
+                # broadcast or truncate silently.
+                continue
+            self.data[key].set(index[0], pd.Series(traj, index=index, dtype=float))
+
+        # Per-interval flux-density diagnostics on the same time axis. The
+        # IC row carries NaN (no interval to diagnose yet); pandas
+        # serialises that as SQL NULL so the joined-on-timestamp logger
+        # frame stays consistent and the dashboard table renders the
+        # row as "—".
+        for constant in _DIAGNOSTIC_CONSTANTS:
+            values = diagnostics.get(constant.key, [])
+            if len(values) != len(index):
+                continue
+            self.data[constant.key].set(
+                index[0], pd.Series(values, index=index, dtype=float),
+            )
+
+        if not snapshots:
+            return
+
+        # Snapshot rows share timestamps with probe rows (we sample
+        # save_freq-aligned forecast rows), so the timestamp_creation
+        # Series above already covers them. Sort once so state and plot
+        # rows line up to the same time axis.
+        save_index = pd.DatetimeIndex(sorted(snapshots), name="timestamp")
+
+        if self._save_state:
+            state_values = [self._encode_state(snapshots[t]) for t in save_index]
+            self.data[self._STATE_CHANNEL_KEY].set(
+                save_index[0],
+                pd.Series(state_values, index=save_index, dtype=object),
+            )
+
+        if self._save_plot:
+            plot_values: list[bytes] = []
+            for t in save_index:
+                try:
+                    plot_values.append(self._render_snapshot_png(snapshots[t], t))
+                except Exception:  # noqa: BLE001
+                    # Disable for the rest of this tick — a failure here
+                    # must not strand the state / probe channels we've
+                    # already (or are about to) publish above.
+                    logging.exception(
+                        "%s: predict_plot render failed at %s; skipping "
+                        "remaining plot snapshots this tick.",
+                        self.name, t,
+                    )
+                    plot_values = []
+                    break
+            if plot_values:
+                self.data[self._PLOT_CHANNEL_KEY].set(
+                    save_index[0],
+                    pd.Series(plot_values, index=save_index, dtype=object),
+                )
+
+    @staticmethod
+    def _encode_state(rel_sat: np.ndarray) -> bytes:
+        buf = io.BytesIO()
+        np.savez(buf, rel_sat=rel_sat)
+        return buf.getvalue()
+
+    def _render_snapshot_png(self, rel_sat: np.ndarray, sim_t: pd.Timestamp) -> bytes:
+        """Render one saturation snapshot to PNG bytes via the shared
+        :mod:`plot_render` helpers. Builds the fig/ax/norm lazily on the
+        first call and reuses them across the tick so 24 hourly frames
+        don't allocate 24 figures."""
+        if self._plot_fig is None:
+            self._plot_fig, self._plot_ax, self._plot_norm = plot_render.init_rel_sat_figure(
+                self._mesh_config.width, self._mesh_config.height,
+            )
+        return plot_render.render_rel_sat_png(
+            self._plot_fig, self._plot_ax, self._plot_norm,
+            self._pde.mesh, rel_sat, sim_t,
+            title="Predicted relative saturation",
+        )

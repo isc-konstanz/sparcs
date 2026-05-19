@@ -147,7 +147,7 @@ class SoilSimulation(SoilBase):
             SoilSimulation.WATER_DEMAND_UNMET,
             SoilSimulation.WATER_BALANCE_RESIDUAL,
         ):
-            self.data.add(c, aggregate="mean", logger={"enabled": False})
+            self.data.add(c, aggregate="mean", logger={"enabled": True})
 
         # (mesh ensure + PDECore built together by SoilBase._build_pde below)
 

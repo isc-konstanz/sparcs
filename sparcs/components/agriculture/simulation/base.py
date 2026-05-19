@@ -82,8 +82,6 @@ class FieldSimulation(Component):
     _irrigation_flow_lpm: float = 0.0
 
     _weather_channels: Optional[Channels] = None
-    _forecast_channels: Optional[Channels] = None
-    _last_forecast_epoch: Optional[pd.Timestamp] = None
     _required_weather_keys: tuple[str, ...] = ()
     _weather_default_warned: set[str]
 
@@ -317,43 +315,18 @@ class FieldSimulation(Component):
         # Live trigger: advance the soil one step per new observation frame.
         # Listening only on the weather observation channels (not vegetation
         # or ground_shading, which the chain *writes*) avoids self-retrigger.
+        # This is also the predictor's trigger: ``_weather_callback`` calls
+        # ``soil_predictor.predict`` after each ``soil.advance``. A separate
+        # forecast-channel listener used to live here, but it tight-looped
+        # on the future-dated ``timestamp_creation`` (and Brightsky returns
+        # forecast + observations in one read, so the weather-channel
+        # listener covers new forecast issuances anyway).
         self.data.register(
             self._weather_callback,
             self._weather_channels,
             how="any",
             unique=True,
         )
-
-        # Independent trigger for the predictor: each forecast refresh runs
-        # a fresh what-if pass. Listening on every forecast channel was a
-        # foot-gun — forecast rows are *future-dated* (up to 8 days out), so
-        # ``Listener.has_update()`` compared the listener's wall-clock
-        # completion to a future data timestamp and refired in a tight loop.
-        # ``timestamp_creation`` is wall-clock-stamped at fetch time and
-        # advances exactly once per DWD refresh, so listening on it alone
-        # gives one trigger per refresh. Callback-level dedup against the
-        # creation epoch (the channel *value*) protects against connector
-        # re-reads of the same forecast.
-        forecast_sub = getattr(self.weather, "forecast", None)
-        if (
-            self.soil_predictor is not None
-            and forecast_sub is not None
-            and forecast_sub.is_enabled()
-        ):
-            trigger = forecast_sub.data.get("timestamp_creation", None)
-            if trigger is None:
-                # Fallback: pick a single channel rather than registering on
-                # every forecast channel (avoids the future-timestamp loop).
-                values = list(forecast_sub.data.values())
-                trigger = values[0] if values else None
-            if trigger is not None:
-                self._forecast_channels = Channels([trigger])
-                self.data.register(
-                    self._forecast_callback,
-                    self._forecast_channels,
-                    how="any",
-                    unique=True,
-                )
 
     def _weather_callback(self, data: pd.DataFrame) -> None:
         if not self._weather_inputs_valid():
@@ -378,27 +351,18 @@ class FieldSimulation(Component):
         now = et_data.index[-1]
         self.soil_simulation.advance(et_data, now, seg_et)
 
-    def _forecast_callback(self, data: pd.DataFrame) -> None:
-        # Predictor reads ``weather.forecast`` itself via ``_fetch_forecast``;
-        # the listener's ``data`` frame is only the trigger. Use the most
-        # recent live-soil simulation time as ``now`` so predict() dedupes
-        # correctly and starts from the freshest available state.
-        if self.soil_predictor is None or self.soil_simulation is None:
-            return
-
-        # Skip when the forecast creation epoch hasn't actually advanced —
-        # the connector may re-read ``timestamp_creation`` faster than DWD
-        # actually issues a new forecast.
-        epoch = self._read_forecast_epoch()
-        if epoch is not None:
-            if self._last_forecast_epoch is not None and epoch <= self._last_forecast_epoch:
-                return
-            self._last_forecast_epoch = epoch
-
-        now = getattr(self.soil_simulation, "_last_simulated_at", None)
-        if now is None:
-            now = pd.Timestamp.now(tz="UTC")
-        self.soil_predictor.predict(now)
+        # Trigger a fresh prediction on every committed soil advance: the
+        # predictor's IC is the live state we just produced, and the
+        # output trajectory shifts forward with ``now``. ``predict()`` has
+        # its own ``(now, forecast_creation)`` dedup gate so re-fires for
+        # an unchanged pair no-op out, and a cold-start advance is the
+        # natural moment for the first prediction (no separate stash
+        # needed). Brightsky reads forecast and observations together, so
+        # this is also where new forecast issuances reach the predictor.
+        if self.soil_predictor is not None:
+            self.soil_predictor.predict(
+                now, forecast_creation=self._read_forecast_epoch(),
+            )
 
     def _read_forecast_epoch(self) -> Optional[pd.Timestamp]:
         forecast_sub = getattr(self.weather, "forecast", None)
@@ -407,8 +371,19 @@ class FieldSimulation(Component):
         channel = forecast_sub.data.get("timestamp_creation", None)
         if channel is None or not channel.is_valid():
             return None
+        value = channel.value
+        # Brightsky returns a multi-row forecast frame; ``set_frame`` then
+        # stores ``timestamp_creation`` as a length-N ``pd.Series`` of
+        # identical timestamps (all rows share one issue epoch). Collapse
+        # that to a single Timestamp before constructing — ``pd.Timestamp``
+        # raises ``TypeError`` on a Series directly.
+        if isinstance(value, pd.Series):
+            value = value.dropna()
+            if value.empty:
+                return None
+            value = value.iloc[0]
         try:
-            return pd.Timestamp(channel.value)
+            return pd.Timestamp(value)
         except (TypeError, ValueError):
             return None
 
