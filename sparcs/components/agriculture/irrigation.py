@@ -35,7 +35,6 @@ class Irrigation(Component):
         def add_channel(constant: Constant, **custom) -> None:
             channel = constant.to_dict()
             channel["name"] = constant.name.replace("Irrigation", self.name, 1)
-            channel["column"] = constant.key
             channel.update(custom)
             self.data.add(**channel)
 
