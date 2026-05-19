@@ -50,7 +50,7 @@ class IrrigationPage(ComponentPage[Irrigation]):
             Input("view-update", "n_intervals"),
         )
         def _update_flow(*_) -> html.P | dbc.Spinner:
-            _flow = self.data.flow
+            _flow = self.data.irrigation_flow
             if _flow.is_valid():
                 return html.P(
                     [round(_flow.value, 1), _build_flow_unit(_flow.get("unit", None))],
@@ -85,7 +85,7 @@ class IrrigationPage(ComponentPage[Irrigation]):
             force_no_output=True,
         )
         def _update_state(state: bool) -> None:
-            _state = self.data.state
+            _state = self.data.irrigation_state
             if _state.is_valid() and _state.value != state:
                 _state.write(state)
 
@@ -94,7 +94,7 @@ class IrrigationPage(ComponentPage[Irrigation]):
             Input(f"{_state_id}-update", "n_intervals"),
         )
         def _update_switch(*_) -> bool:
-            _state = self.data.state
+            _state = self.data.irrigation_state
             if _state.is_valid():
                 return _state.value
             return False

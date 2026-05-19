@@ -18,8 +18,8 @@ from sparcs.components.agriculture import SoilMoisture
 class Irrigation(Component):
     TYPE = "irrigation"
 
-    STATE = Constant(bool, "state", "Irrigation State", context="irrigation")
-    FLOW = Constant(float, "flow", "Irrigation Flow", context="irrigation", unit="l/min")
+    STATE = Constant(bool, "irrigation_state", "Irrigation State")
+    FLOW = Constant(float, "irrigation_flow", "Irrigation Flow", unit="l/min")
 
     soil: Sequence[SoilMoisture]
 
