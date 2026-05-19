@@ -82,7 +82,9 @@ def _patch_pvfactors_numpy2_compat() -> None:
             for x in lst:
                 arr = np.asarray(x, dtype=float)
                 if arr.ndim == 0 or arr.size == 1:
-                    arr = np.full(n, float(arr), dtype=float)
+                    # ``.item()`` handles both 0-d and 1-d size-1 arrays;
+                    # ``float(arr)`` raises on the latter under numpy >= 2.
+                    arr = np.full(n, arr.item(), dtype=float)
                 elif arr.shape[0] != n:
                     # Surface produced a different-length array than n_states;
                     # pad or truncate to keep the matrix rectangular. This
