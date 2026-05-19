@@ -106,15 +106,9 @@ class SoilSimulation(SoilBase):
 
     _mesh_filename: str
 
-    # FiPy mesh, Richards-equation assembly, segment index, and the pure
-    # integration primitives all live on ``_pde`` (shared with
-    # :class:`SoilPredictor`). The legacy ``_mesh_fipy`` / ``_soil_model`` /
-    # ``_segment_*`` attributes are exposed below as thin properties so
-    # plotting and diagnostic call-sites stay compact.
-    _pde: SoilPDECore
-
-    _mesh_config: MeshConfig
-    _ode_config: PDEConfig
+    # FiPy mesh, Richards-equation assembly, segment index, integration
+    # primitives, and diagnostic math all live on :class:`SoilBase` /
+    # :class:`SoilPDECore` (shared with :class:`SoilPredictor`).
     _plot_config: Optional[PlotConfig] = None
 
     _last_simulated_at: Optional[pd.Timestamp] = None
@@ -129,56 +123,6 @@ class SoilSimulation(SoilBase):
     # User-defined relative-saturation probes (points + areas). Each entry
     # has its own ``probe_<name>`` channel sampled once per advance().
     _probes: list[ProbeSpec]
-
-    # -- thin accessors onto SoilPDECore --------------------------------------
-
-    @property
-    def _mesh_fipy(self) -> Gmsh2D:
-        return self._pde.mesh
-
-    @property
-    def _soil_model(self) -> SoilModel:
-        return self._pde.soil_model
-
-    @property
-    def _segment_cells(self) -> dict[str, np.ndarray]:
-        return self._pde.segment_cells
-
-    @property
-    def _segment_face_len(self) -> dict[str, float]:
-        return self._pde.segment_face_len
-
-    @property
-    def _segment_cell_volume(self) -> dict[str, float]:
-        return self._pde.segment_cell_volume
-
-    @property
-    def _top_segment_names(self) -> list[str]:
-        return self._pde.top_segment_names
-
-    @property
-    def _open_sky_segment_names(self) -> list[str]:
-        return self._pde.open_sky_segment_names
-
-    @property
-    def _plant_cells(self) -> np.ndarray:
-        return self._pde.plant_cells
-
-    @property
-    def _plant_volume(self) -> float:
-        return self._pde.plant_volume
-
-    @property
-    def _theta_diff(self) -> float:
-        return self._pde.theta_diff
-
-    @property
-    def _irrigation_factor(self) -> float:
-        return self._pde.irrigation_factor
-
-    @property
-    def _rain_face_len(self) -> float:
-        return self._pde.rain_face_len
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
@@ -517,37 +461,6 @@ class SoilSimulation(SoilBase):
             )
         return window_s
 
-    def _total_water(self) -> float:
-        return self._pde.total_water()
-
-    def _balance_drainage_flux(
-        self,
-        rates: FluxRates,
-        delta_storage: float,
-        duration_s: float,
-    ) -> float:
-        # Bottom drainage from the integral mass balance:
-        #   drainage_mass = (rain_in + irr_in - evap_out - transp_out)·dt - Δstorage
-        # then divided by (bottom_face_len · dt) to land back in kg/(m²·s).
-        # The face-flux estimator that lived here previously missed the
-        # contribution of the Dirichlet BC at the bottom, so it always
-        # under-reported drainage during a wet front passing through.
-        bottom_len = self._segment_face_len.get("GroundBottomSegment", 0.0)
-        if bottom_len <= 0 or duration_s <= 0:
-            return 0.0
-        evap_mass = sum(
-            value * self._segment_face_len.get(name, 0.0)
-            for name, value in rates.seg_evap.items()
-        )
-        transp_mass = sum(
-            value * self._segment_face_len.get(name, 0.0)
-            for name, value in rates.seg_transp.items()
-        )
-        in_rate = rates.rain_flux * self._rain_face_len + rates.flow_m3s * RHO_W
-        out_rate = evap_mass + transp_mass
-        drainage_mass = (in_rate - out_rate) * duration_s - delta_storage
-        return drainage_mass / (bottom_len * duration_s)
-
     def _record_diagnostics(
         self,
         rates: FluxRates,
@@ -556,78 +469,21 @@ class SoilSimulation(SoilBase):
         elapsed_s: float,
         clip: ClipDiagnostics,
     ) -> dict[str, float]:
-        """Write the six per-callback flux-density channels in kg/(m²·h).
-
-        WATER_TOP_OUT and WATER_TRANSP are reported as face-length-weighted
-        spatial means so a single number stays meaningful while the underlying
-        physics is per-segment. WATER_RUNOFF and WATER_DEMAND_UNMET come
-        from the per-substep ClipDiagnostics accumulated in :meth:`advance`
-        and are normalised against the top face length (runoff: rain face
-        length; demand-unmet: all evaporating top segments). Internal flux
-        math runs in kg/(m²·s); we convert at this boundary so channels
-        and the returned diagnostics DataFrame agree with the unit
-        declared on each Constant.
-        """
-        watering_len = self._segment_face_len.get("WateringTopSegment", 0.0)
-        irr_flux = rates.flow_m3s * RHO_W / watering_len if watering_len > 0 else 0.0
-        # WATER_TOP_IN reports total top input (irrigation drip + rain).
-        top_in = irr_flux + rates.rain_flux
-
-        e_flux_mean = self._face_weighted_mean(rates.seg_evap, self._top_segment_names)
-        t_flux_mean = self._face_weighted_mean(rates.seg_transp, self._top_segment_names)
-        bottom = self._balance_drainage_flux(rates, delta_storage, elapsed_s)
-        # Independent boundary-flux estimate for the mass-balance check.
-        direct_bottom = self._pde.bottom_drainage_estimate()  # kg/(m²·s)
-        balance_residual = bottom - direct_bottom              # kg/(m²·s)
-
-        # Rejected mass → area-normalised rates. Runoff is normalised
-        # against the open-sky strip length (where rain falls + plant
-        # tops where irrigation could spill if it ponded). Unmet demand
-        # is normalised against the union of all evaporating segments.
-        top_face_len = float(self._rain_face_len) + sum(
-            self._segment_face_len.get(n, 0.0)
-            for n in ("PlantTopLeftSegment", "PlantTopRightSegment", "WateringTopSegment")
-        )
-        evap_face_len = sum(
-            self._segment_face_len.get(n, 0.0) for n in self._top_segment_names
-        )
-        # WATER_RUNOFF combines clipper-rejected influx (ponding-off mode)
-        # and deliberate ponding overflow (ponding-on mode). With ponding
-        # enabled, top_rejected should be ~0 (the bucket absorbs the
-        # excess before it reaches the cell clip) and ponding_overflow
-        # carries the runoff; with ponding disabled, ponding_overflow is
-        # 0 by construction. Either way, the channel publishes total
-        # rejected top mass normalised against the top face length.
-        runoff_mass = clip.top_rejected + clip.ponding_overflow
-        runoff_rate = (
-            runoff_mass / (top_face_len * elapsed_s)
-            if top_face_len > 0 and elapsed_s > 0 else 0.0
-        )
-        unmet_rate = (
-            clip.bottom_rejected / (evap_face_len * elapsed_s)
-            if evap_face_len > 0 and elapsed_s > 0 else 0.0
-        )
-
-        kg_per_s_to_kg_per_h = 3600.0
-        diagnostics = {
-            self.data[SoilSimulation.WATER_TOP_OUT]: e_flux_mean * kg_per_s_to_kg_per_h,
-            self.data[SoilSimulation.WATER_TRANSP]: t_flux_mean * kg_per_s_to_kg_per_h,
-            self.data[SoilSimulation.WATER_TOP_IN]: top_in * kg_per_s_to_kg_per_h,
-            self.data[SoilSimulation.WATER_BOTTOM]: bottom * kg_per_s_to_kg_per_h,
-            self.data[SoilSimulation.WATER_RUNOFF]: runoff_rate * kg_per_s_to_kg_per_h,
-            self.data[SoilSimulation.WATER_DEMAND_UNMET]: unmet_rate * kg_per_s_to_kg_per_h,
-            self.data[SoilSimulation.WATER_BALANCE_RESIDUAL]: balance_residual * kg_per_s_to_kg_per_h,
-        }
-        for channel, value in diagnostics.items():
-            channel.set(now, value)
+        """Write the seven per-callback flux-density channels in kg/(m²·h).
+        Delegates the math to :meth:`SoilBase._compute_diagnostics` so the
+        predictor reports directly comparable numbers, then publishes each
+        value on its channel and samples the probes."""
+        diagnostics = self._compute_diagnostics(rates, delta_storage, elapsed_s, clip)
+        for key, value in diagnostics.items():
+            self.data[key].set(now, value)
         self._sample_probes(now)
-        return {channel.id: value for channel, value in diagnostics.items()}
+        return {self.data[key].id: value for key, value in diagnostics.items()}
 
     def _configure_probes(self, configs: Configurations) -> None:
         """Resolve probe specs from the ``[probes]`` block via the shared
         :func:`resolve_probes` helper, then register one ``<key>`` float
         channel per probe so values can be logged like any other diagnostic.
-        ``SoilPredictor`` calls the same helper to keep its own per-strategy
+        ``SoilPredictor`` calls the same helper to keep its own predict
         channels lined up against the same physical points / areas."""
         self._probes = []
         if not configs.has_member("probes"):
@@ -663,24 +519,6 @@ class SoilSimulation(SoilBase):
             return
         for probe in self._probes:
             self.data[probe.channel_id].set(now, self._pde.sample(probe))
-
-    def _face_weighted_mean(
-        self,
-        per_segment: dict[str, float],
-        names: list[str],
-    ) -> float:
-        """Face-length-weighted mean over ``names``; missing entries count as 0."""
-        total_len = 0.0
-        weighted = 0.0
-        for name in names:
-            face_len = self._segment_face_len.get(name, 0.0)
-            if face_len <= 0:
-                continue
-            total_len += face_len
-            weighted += per_segment.get(name, 0.0) * face_len
-        if total_len <= 0:
-            return 0.0
-        return weighted / total_len
 
     def _plot_mesh(self, save_path: Optional[str] = None):
         mesh = meshio.read(self._mesh_config.filename)

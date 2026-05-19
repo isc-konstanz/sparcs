@@ -3,13 +3,18 @@
 sparcs.components.agriculture.simulation._soil
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Shared base for the soil simulation chain. Contains the mesh / PDE
-config dataclasses, ``SoilPDECore``, and the mesh-generation helpers
-that both :class:`SoilSimulation` (live solver) and :class:`SoilPredictor`
-(forecast roll-outs) consume.
+Shared base for the soil simulation chain. Holds:
 
-A future phase will add a shared ``SoilBase`` parent component class
-that wraps the common ``configure()`` logic.
+* the mesh / PDE / plot config dataclasses (``MeshConfig``,
+  ``PDEConfig``, ``PondingConfig``, ``FeddesConfig``, ``PlotConfig``);
+* the FiPy mesh + Richards-equation core (``SoilPDECore``);
+* the per-window diagnostic math (``_compute_diagnostics`` etc.) shared
+  via the :class:`SoilBase` parent component;
+* the mesh-generation helpers (``create_mesh`` / ``ensure_mesh``) and
+  probe parsing (``resolve_probes`` / ``ProbeSpec``).
+
+Both :class:`SoilSimulation` (live solver) and :class:`SoilPredictor`
+(forecast roll-outs) inherit from :class:`SoilBase` here.
 """
 
 from __future__ import annotations
@@ -185,9 +190,9 @@ def resolve_probes(
 
     Caller is responsible for channel registration. Shared by ``SoilSimulation``
     (registers ``<key>`` probe channels) and ``SoilPredictor`` (registers
-    ``predict_<key>_w<pct>`` per-strategy channels) — both end up with
-    identical cell-index / weight recipes because they reuse the same .msh
-    file, so a single parser keeps them in lock-step.
+    ``predict_<key>`` channels) — both end up with identical cell-index /
+    weight recipes because they reuse the same .msh file, so a single
+    parser keeps them in lock-step.
 
     Coordinates: ``x`` bay-centered, ``y`` positive depth in metres (see
     ``soil_simulation.conf`` header for the full convention).
@@ -1158,6 +1163,157 @@ class SoilBase(Component):
             self._ode_config,
             rel_sat_name=self.REL_SAT_NAME,
         )
+
+    # -- thin accessors onto SoilPDECore --------------------------------------
+
+    @property
+    def _mesh_fipy(self) -> Gmsh2D:
+        return self._pde.mesh
+
+    @property
+    def _soil_model(self) -> SoilModel:
+        return self._pde.soil_model
+
+    @property
+    def _segment_cells(self) -> dict[str, np.ndarray]:
+        return self._pde.segment_cells
+
+    @property
+    def _segment_face_len(self) -> dict[str, float]:
+        return self._pde.segment_face_len
+
+    @property
+    def _segment_cell_volume(self) -> dict[str, float]:
+        return self._pde.segment_cell_volume
+
+    @property
+    def _top_segment_names(self) -> list[str]:
+        return self._pde.top_segment_names
+
+    @property
+    def _open_sky_segment_names(self) -> list[str]:
+        return self._pde.open_sky_segment_names
+
+    @property
+    def _plant_cells(self) -> np.ndarray:
+        return self._pde.plant_cells
+
+    @property
+    def _plant_volume(self) -> float:
+        return self._pde.plant_volume
+
+    @property
+    def _theta_diff(self) -> float:
+        return self._pde.theta_diff
+
+    @property
+    def _irrigation_factor(self) -> float:
+        return self._pde.irrigation_factor
+
+    @property
+    def _rain_face_len(self) -> float:
+        return self._pde.rain_face_len
+
+    def _total_water(self) -> float:
+        return self._pde.total_water()
+
+    # -- shared diagnostic math -----------------------------------------------
+
+    def _face_weighted_mean(
+        self,
+        per_segment: dict[str, float],
+        names: list[str],
+    ) -> float:
+        """Face-length-weighted mean over ``names``; missing entries count as 0."""
+        total_len = 0.0
+        weighted = 0.0
+        for name in names:
+            face_len = self._segment_face_len.get(name, 0.0)
+            if face_len <= 0:
+                continue
+            total_len += face_len
+            weighted += per_segment.get(name, 0.0) * face_len
+        if total_len <= 0:
+            return 0.0
+        return weighted / total_len
+
+    def _balance_drainage_flux(
+        self,
+        rates: FluxRates,
+        delta_storage: float,
+        duration_s: float,
+    ) -> float:
+        # Bottom drainage from the integral mass balance:
+        #   drainage_mass = (rain_in + irr_in - evap_out - transp_out)·dt - Δstorage
+        # then divided by (bottom_face_len · dt) to land back in kg/(m²·s).
+        bottom_len = self._segment_face_len.get("GroundBottomSegment", 0.0)
+        if bottom_len <= 0 or duration_s <= 0:
+            return 0.0
+        evap_mass = sum(
+            value * self._segment_face_len.get(name, 0.0)
+            for name, value in rates.seg_evap.items()
+        )
+        transp_mass = sum(
+            value * self._segment_face_len.get(name, 0.0)
+            for name, value in rates.seg_transp.items()
+        )
+        in_rate = rates.rain_flux * self._rain_face_len + rates.flow_m3s * RHO_W
+        out_rate = evap_mass + transp_mass
+        drainage_mass = (in_rate - out_rate) * duration_s - delta_storage
+        return drainage_mass / (bottom_len * duration_s)
+
+    def _compute_diagnostics(
+        self,
+        rates: FluxRates,
+        delta_storage: float,
+        elapsed_s: float,
+        clip: ClipDiagnostics,
+    ) -> dict[str, float]:
+        """Compute the 7 per-window flux-density diagnostics in kg/(m²·h).
+
+        Pure math — no channel writes. Used by :class:`SoilSimulation` (one
+        call per live ``advance``) and :class:`SoilPredictor` (one call per
+        forecast interval) so the two solvers report directly comparable
+        numbers. Returns a dict keyed by channel-key strings — callers look
+        up the matching channel on ``self.data``.
+        """
+        watering_len = self._segment_face_len.get("WateringTopSegment", 0.0)
+        irr_flux = rates.flow_m3s * RHO_W / watering_len if watering_len > 0 else 0.0
+        top_in = irr_flux + rates.rain_flux
+
+        e_flux_mean = self._face_weighted_mean(rates.seg_evap, self._top_segment_names)
+        t_flux_mean = self._face_weighted_mean(rates.seg_transp, self._top_segment_names)
+        bottom = self._balance_drainage_flux(rates, delta_storage, elapsed_s)
+        direct_bottom = self._pde.bottom_drainage_estimate()  # kg/(m²·s)
+        balance_residual = bottom - direct_bottom              # kg/(m²·s)
+
+        top_face_len = float(self._rain_face_len) + sum(
+            self._segment_face_len.get(n, 0.0)
+            for n in ("PlantTopLeftSegment", "PlantTopRightSegment", "WateringTopSegment")
+        )
+        evap_face_len = sum(
+            self._segment_face_len.get(n, 0.0) for n in self._top_segment_names
+        )
+        runoff_mass = clip.top_rejected + clip.ponding_overflow
+        runoff_rate = (
+            runoff_mass / (top_face_len * elapsed_s)
+            if top_face_len > 0 and elapsed_s > 0 else 0.0
+        )
+        unmet_rate = (
+            clip.bottom_rejected / (evap_face_len * elapsed_s)
+            if evap_face_len > 0 and elapsed_s > 0 else 0.0
+        )
+
+        kg_per_s_to_kg_per_h = 3600.0
+        return {
+            "water_top_out": e_flux_mean * kg_per_s_to_kg_per_h,
+            "water_transpiration": t_flux_mean * kg_per_s_to_kg_per_h,
+            "water_top_in": top_in * kg_per_s_to_kg_per_h,
+            "water_bottom": bottom * kg_per_s_to_kg_per_h,
+            "water_runoff": runoff_rate * kg_per_s_to_kg_per_h,
+            "water_demand_unmet": unmet_rate * kg_per_s_to_kg_per_h,
+            "water_balance_residual": balance_residual * kg_per_s_to_kg_per_h,
+        }
 
 
 def create_mesh(mesh_config: MeshConfig) -> None:
