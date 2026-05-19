@@ -50,7 +50,7 @@ class IrrigationPage(ComponentPage[Irrigation]):
             Input("view-update", "n_intervals"),
         )
         def _update_flow(*_) -> html.P | dbc.Spinner:
-            _flow = self.data.irrigation_flow
+            _flow = self.data.flow
             if _flow.is_valid():
                 return html.P(
                     [round(_flow.value, 1), _build_flow_unit(_flow.get("unit", None))],
@@ -79,22 +79,24 @@ class IrrigationPage(ComponentPage[Irrigation]):
     # noinspection PyShadowingBuiltins
     def _build_switch_layout(self) -> html.Div:
         _state_id = f"{self.id}-state"
+        writable = self._component.writable
 
-        @callback(
-            Input(_state_id, "value"),
-            force_no_output=True,
-        )
-        def _update_state(state: bool) -> None:
-            _state = self.data.irrigation_state
-            if _state.is_valid() and _state.value != state:
-                _state.write(state)
+        if writable:
+            @callback(
+                Input(_state_id, "value"),
+                force_no_output=True,
+            )
+            def _update_state(state: bool) -> None:
+                _state = self.data.state
+                if _state.is_valid() and _state.value != state:
+                    _state.write(state)
 
         @callback(
             Output(_state_id, "value"),
             Input(f"{_state_id}-update", "n_intervals"),
         )
         def _update_switch(*_) -> bool:
-            _state = self.data.irrigation_state
+            _state = self.data.state
             if _state.is_valid():
                 return _state.value
             return False
@@ -106,6 +108,7 @@ class IrrigationPage(ComponentPage[Irrigation]):
                     # label="State",
                     style={"min-width": "7rem", "padding-top": "1rem", "fontSize": "1.5rem"},
                     value=_update_switch(),
+                    disabled=not writable,
                 ),
                 dcc.Interval(
                     id=f"{_state_id}-update",

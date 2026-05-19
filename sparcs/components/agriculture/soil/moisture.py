@@ -52,7 +52,7 @@ class SoilMoisture(Component):
         def add_channel(constant: Constant, **custom) -> None:
             channel = constant.to_dict()
             channel["name"] = constant.name.replace("Soil", self.name, 1)
-            channel["column"] = constant.name.replace("soil", self.key, 1)
+            channel["column"] = constant.key
             channel["aggregate"] = "mean"
             channel.update(custom)
             self.data.add(**channel)

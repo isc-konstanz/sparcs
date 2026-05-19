@@ -18,10 +18,11 @@ from sparcs.components.agriculture import SoilMoisture
 class Irrigation(Component):
     TYPE = "irrigation"
 
-    STATE = Constant(bool, "irrigation_state", "Irrigation State")
-    FLOW = Constant(float, "irrigation_flow", "Irrigation Flow", unit="l/min")
+    STATE = Constant(bool, "state", "Irrigation State", context="irrigation")
+    FLOW = Constant(float, "flow", "Irrigation Flow", context="irrigation", unit="l/min")
 
     soil: Sequence[SoilMoisture]
+    writable: bool
 
     def __init__(self, context: Component, configs: Configurations, soil: Sequence[SoilMoisture]) -> None:
         super().__init__(context=context, configs=configs)
@@ -29,11 +30,12 @@ class Irrigation(Component):
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
+        self.writable = configs.get_bool("writable", default=True)
 
         def add_channel(constant: Constant, **custom) -> None:
             channel = constant.to_dict()
             channel["name"] = constant.name.replace("Irrigation", self.name, 1)
-            channel["column"] = constant.id.replace("irrigation", self.key, 1)
+            channel["column"] = constant.key
             channel.update(custom)
             self.data.add(**channel)
 
