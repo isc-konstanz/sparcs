@@ -128,9 +128,6 @@ def render_rel_sat_png(
     ax.contourf(xi, yi, zi, levels=15, cmap=plot_style.COLORMAP, norm=norm)
     ax.contour(xi, yi, zi, levels=15, linewidths=0.5, colors="k")
     plot_style.apply_axes_style(ax)
-    # Mesh y is positive depth; flip so the surface (y=0) sits at the top
-    # of the figure and depth grows downward.
-    ax.invert_yaxis()
     ax.set_title(plot_style.format_progress_title(title, sim_t))
 
     buf = io.BytesIO()
