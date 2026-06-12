@@ -375,19 +375,6 @@ class SoilSimulation(SoilBase):
             rain_flux=rain_flux,
         )
 
-    def _apply_source(self, rates: FluxRates, dt: float) -> ClipDiagnostics:
-        """Thin wrapper that unpacks :class:`FluxRates` and delegates to
-        :meth:`SoilPDECore.apply_source`. Returns the per-step clipping
-        diagnostics so the wall-clock walk in :meth:`_walk` can
-        accumulate runoff / unmet demand across substeps."""
-        return self._pde.apply_source(
-            seg_evap=rates.seg_evap,
-            seg_transp=rates.seg_transp,
-            rain_flux=rates.rain_flux,
-            flow_m3s=rates.flow_m3s,
-            dt=dt,
-        )
-
     def _walk(
         self,
         *,
@@ -399,65 +386,45 @@ class SoilSimulation(SoilBase):
     ) -> float:
         """HYDRUS-style adaptive-dt wall-clock walk.
 
-        Integrates ``rates`` over a window of ``window_s`` seconds. Each
-        substep is attempted at ``sub_dt``; on non-convergence (the
-        Picard sweep loop hits ``max_sweeps`` without meeting
-        ``tol_th``), the state is rolled back to the pre-substep
-        snapshot and the substep is retried at ``sub_dt / 3`` — until
-        the substep converges or ``sub_dt`` drops to ``ode_config.dt_min``,
-        at which point the under-converged state is accepted and a
-        warning is logged. After a fast convergence (≤ 3 sweeps) the
-        attempted ``sub_dt`` is allowed to grow back up to
-        ``ode_config.dt`` (×1.5 per step).
-
-        Plot-frame throttling is keyed off the in-walk simulation
-        timestamp so live `progress.png` keeps refreshing across the
-        retry loop. Returns the actual elapsed seconds covered, which
-        is always ``window_s`` (we either converge or accept the
-        non-converged state at ``dt_min``).
+        Thin wrapper around :meth:`SoilPDECore.walk_window` (accept mode:
+        an under-converged but finite state at ``dt_min`` is accepted, a
+        non-finite / raised substep is rolled back and skipped). Plot-frame
+        throttling is keyed off the in-walk simulation timestamp via the
+        ``on_step`` hook so live `progress.png` keeps refreshing across
+        the retry loop. Returns the actual elapsed seconds covered, which
+        is always ``window_s``.
         """
-        dt_max = self._ode_config.dt
-        dt_min = max(self._ode_config.dt_min, 1.0e-6)
-        sub_dt = dt_max
-        t_offset = 0.0
-        retries = 0
 
-        while t_offset < window_s - 1.0e-9:
-            remaining = window_s - t_offset
-            attempted = min(sub_dt, remaining)
-            snapshot = self._pde.snapshot()
-            clip = self._apply_source(rates, attempted)
-            result = self._pde.solve(attempted, log_name=self.name)
+        def on_step(t_offset: float) -> None:
+            if plot_interval is None:
+                return
+            sim_t = sim_t0 + pd.Timedelta(seconds=t_offset)
+            if (
+                self._last_plot_simtime is None
+                or (sim_t - self._last_plot_simtime) >= plot_interval
+            ):
+                self._render_progress_safe(sim_t)
 
-            if not result.converged and attempted > dt_min:
-                # Roll back the PDE state and retry at a smaller substep.
-                self._pde.set_state(snapshot)
-                sub_dt = max(dt_min, attempted / 3.0)
-                retries += 1
-                continue
+        result = self._pde.walk_window(
+            rates=rates,
+            window_s=window_s,
+            accept_at_dt_min=True,
+            on_step=on_step,
+            log_name=self.name,
+        )
+        clip_total.add(result.clip)
 
-            # Accept the step (converged, or we're already at dt_min).
-            t_offset += attempted
-            clip_total.add(clip)
-
-            # Grow back toward dt_max after a fast convergence so we don't
-            # spend the rest of the window inching forward at the shrunken
-            # substep once a hard patch is behind us.
-            if result.converged and result.sweeps <= 3 and sub_dt < dt_max:
-                sub_dt = min(dt_max, sub_dt * 1.5)
-
-            if plot_interval is not None:
-                sim_t = sim_t0 + pd.Timedelta(seconds=t_offset)
-                if (
-                    self._last_plot_simtime is None
-                    or (sim_t - self._last_plot_simtime) >= plot_interval
-                ):
-                    self._render_progress_safe(sim_t)
-
-        if retries:
+        if result.skipped_s > 0:
+            logging.warning(
+                "%s: held state through %.1fs of a %.1fs window (substeps "
+                "unsolvable at dt_min) — mass-balance diagnostics exclude "
+                "the skipped slices.",
+                self.name, result.skipped_s, window_s,
+            )
+        if result.retries:
             logging.debug(
                 "%s: adaptive walk completed window=%.1fs with %d retry(s)",
-                self.name, window_s, retries,
+                self.name, window_s, result.retries,
             )
         return window_s
 
@@ -731,8 +698,7 @@ class SoilSimulation(SoilBase):
             with open(os.path.join(self._plot_config.dir, fname), "wb") as f:
                 f.write(png_bytes)
 
-    # PDE assembly, segment indexing, and the Picard solve are owned by
-    # :class:`SoilPDECore` (``self._pde``). ``_apply_source`` above is the
-    # thin wrapper for the live-callback flux build; the adaptive-dt
-    # wall-clock walk lives in :meth:`_walk` and consumes the SolveResult
-    # returned by ``self._pde.solve`` directly.
+    # PDE assembly, segment indexing, the Picard solve, and the adaptive-dt
+    # wall-clock walk are owned by :class:`SoilPDECore` (``self._pde``);
+    # :meth:`_walk` above only adds plot throttling and logging on top of
+    # ``self._pde.walk_window``.

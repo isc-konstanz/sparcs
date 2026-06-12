@@ -297,8 +297,8 @@ Richards is nonlinear (`K`, `dh/dSe` depend on `Se`), so each
 configured substep `dt` is solved iteratively. The inner loop in
 `SoilPDECore.solve`:
 
-1. Call `eq.sweep(dt=dt, var=rel_sat)`. Each sweep reassembles `K` and
-   `dh/dSe` from the current iterate.
+1. Call `eq.sweep(dt=dt, var=rel_sat, solver=...)`. Each sweep
+   reassembles `K` and `dh/dSe` from the current iterate.
 2. Convergence is judged on a **physical criterion**:
    `max|Δθ_per_sweep| = max|(θ_s−θ_r)·ΔSe| ≤ tol_th`, with
    `tol_th = 1e-3` by default. This matches HYDRUS-1D's `TolTh`
@@ -306,20 +306,48 @@ configured substep `dt` is solved iteratively. The inner loop in
 3. Up to `MAX_SWEEPS = 25` iterations per substep; if the loop fails
    to converge it returns a `SolveResult(residual, converged=False, sweeps)`.
 
+The linear systems are solved with **GMRES + ILU**
+(`LinearGMRESSolver(tolerance=1e-8, iterations=1000, precon="default")`,
+built once per `SoilPDECore`) — never FiPy's direct-LU default. scipy's
+LU **C-aborts (uncatchable SIGSEGV)** on the near-singular matrices
+that high-rain cumulative saturation produces; GMRES reports the same
+condition as graceful non-convergence, which the adaptive walk handles
+by rollback. This was established empirically with the parameter-sweep
+tool (`sparcs/soil_tuning.py`) replaying a real high-rain week.
+
+Three hardening layers wrap the sweep loop:
+
+- a sweep that **raises** is caught and reported via
+  `SolveResult.error`; the state is not committed;
+- a **non-finite** post-sweep field sets `SolveResult.finite = False`
+  and is likewise never committed (`updateOld` skipped) — NaN can
+  never reach the `SIMULATION_STATE` blob;
+- a finite field is **safety-clipped** to `[SE_MIN, SE_MAX]` before
+  `updateOld()` (HYDRUS-style post-solve clip), so both the current and
+  the old state stay inside the physical band even when a sweep
+  overshoots.
+
 ### 7.3 Adaptive wall-clock walk
 
-`SoilSimulation.advance` (live) and `SoilPredictor._integrate_horizon`
-(forecast) each integrate a wall-clock window second-by-second using
-an adaptive substep:
+The walk is implemented once, in `SoilPDECore.walk_window`, and shared
+by `SoilSimulation._walk` (live), `SoilPredictor._integrate_horizon`
+(forecast), and `soil_tuning._walk_substeps` (parameter sweeps):
 
 - Snapshot the saturation field, apply the source, call `solve(sub_dt)`.
-- **Non-convergence** with `sub_dt > dt_min` → roll back, retry with
-  `sub_dt /= 3`.
+- **Failure** (non-convergence, raised solver, or non-finite field)
+  with `sub_dt > dt_min` → roll back, retry with `sub_dt /= 3`.
 - **Easy convergence** (≤ 3 sweeps) → grow `sub_dt ×= 1.5` toward the
   target `dt` (default 50 s).
-- At `sub_dt = dt_min` (default 1 s) and still non-converged → accept
-  the under-converged state so the walk always makes progress, log a
-  warning.
+- At `sub_dt = dt_min` (default 1 s) the modes diverge
+  (`accept_at_dt_min`):
+  - **Accept mode** (live + predictor): an under-converged but *finite*
+    state is accepted with a warning so the walk keeps pace with the
+    wall clock; a non-finite / raised substep is rolled back and
+    **skipped** (state held, no source applied, seconds accumulated in
+    `WalkResult.skipped_s`).
+  - **Strict mode** (tuning): any failure at `dt_min` rolls back and
+    aborts the walk with `WalkResult(ok=False, reason=...)` — a sweep
+    run *wants* to learn that a parameter set is unstable.
 
 This is structurally what HYDRUS-1D's `TIME.FOR` does, just simpler.
 

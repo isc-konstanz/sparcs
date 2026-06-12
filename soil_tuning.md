@@ -1,0 +1,124 @@
+# soil_tuning.py — usage
+
+Standalone Dash app ([`soil_tuning.py`](soil_tuning.py)) for evaluating
+`SoilSimulation` PDE parameter choices against real logged sensor
+measurements. It re-instantiates the FiPy soil core with overridden
+parameters, replays a window of logged weather + ET + irrigation, and
+streams the resulting saturation traces into a live graph so you can
+compare parameter sets against the soil-moisture sensors.
+
+It is intentionally **separate** from the running sparcs app: it never
+touches live state and never calls `Application.main()` — only
+`configure()` + `activate()` run, then it serves its own Dash UI. Kept
+standalone for offline tuning of a project that isn't running live. (A
+component-page integration into the main sparcs UI was discussed; the
+standalone is kept for offline/iterative use.)
+
+## Command
+
+```powershell
+conda activate lories_sparcs_new
+cd sparcs
+python soil_tuning.py test_agri_sim --data-dir ./data/test_agri_sim --end 2017-06-01
+```
+
+Then open the UI at <http://127.0.0.1:8051>. Exit with Ctrl+C — the app
+cancels/kills its worker sims and disconnects sparcs automatically (no
+manual process killing needed).
+
+### Arguments
+
+| Arg | Default | Purpose |
+|---|---|---|
+| `project` (positional) | — | **Display-only** label. The actual project is selected by `--data-dir`. |
+| `--data-dir <path>` | from `sparcs/conf/settings.conf` | Points the loader at the project's `conf/` and re-reads its `settings.conf`. Required whenever `sparcs/conf/settings.conf` doesn't already point at the project you want to tune. |
+| `--end <ISO ts>` | `now` (UTC) | Anchor the end of the replay window. **Use this if the project's logged data doesn't reach the current wall clock** — otherwise the window is empty and startup fails with `no weather logged in [...]`. |
+| `--port` | `8051` | Dash port. |
+| `--host` | `127.0.0.1` | Bind address (`0.0.0.0` to expose on the LAN). |
+| `-v` / `--verbose` | off | DEBUG logging. |
+
+### Picking a project + window
+
+Use a project that has logged weather on disk. **`test_agri_sim`** has the
+logged Brightsky CSVs (`weather/brightsky/2016-06.csv` … `2017-05.csv`).
+The sibling `test_agri_sim_logged` shares the configs but its
+`weather/brightsky/` is **empty**, so history loading fails. For
+`test_agri_sim`, also make sure `[connectors.csv] enabled = true` in
+`conf/weather.conf` — otherwise the logger can't read the CSVs back.
+
+The replay window is `(end − history_window) .. end`. With
+`history_window = "30d"`, `--end 2017-06-01` gives `2017-05-02 .. 2017-06-01`,
+which sits inside the logged `2016-06 .. 2017-05` range. Pick `--end` so the
+window lands inside the data you have.
+
+## Activation gate
+
+The UI refuses to start unless the project's `SoilSimulation` has a
+`[testing]` block with `enabled = true`, in
+`conf/agri_pv.d/field.d/field_simulation.d/soil_simulation.conf`:
+
+```toml
+[testing]
+enabled        = true
+history_window = "30d"    # how far back from --end to replay
+max_workers    = 5        # parallel worker processes (oldest evicted at n+1)
+poll_interval  = 2.0      # Dash refresh seconds
+```
+
+A shorter `history_window` (e.g. `"7d"`) means less data to replay — faster
+startup and faster per-run sweeps.
+
+## Using the UI
+
+1. Each row of number inputs is a writable `PDEConfig` knob:
+   `theta_r`, `theta_s`, `alpha`, `n`, `k_s`, `dt`, `dt_min`.
+2. **Submit run** spawns a worker process that seeds the core from the
+   state snapshot at `end − history_window`, replays the window, and
+   streams its probe traces into the graph (solid/dashed colored lines).
+   The black dotted lines are the real sensor channels to match against.
+3. The right panel shows the live 2-D saturation (Se) field of the most
+   recently started run.
+4. Up to `max_workers` runs go in parallel; submitting more evicts the
+   oldest. **Cancel** / **Cancel all** stop runs between substeps.
+5. A tuning run **fails hard** if a parameter set is unstable at `dt_min`
+   (unlike the live solver, which accepts an under-converged step) — the
+   whole point is to surface unstable parameter choices.
+
+Workers use the `spawn` start method, so each child re-imports sparcs +
+FiPy from scratch (~30 s cold start per run) but then runs fully parallel.
+
+## Dependencies
+
+On top of `lories` + `sparcs` (both editable-installed in the
+`lories_sparcs_new` env), the UI needs the full Dash + lories-view stack:
+
+```powershell
+pip install "dash>=2.16" dash-bootstrap-components plotly `
+            flask-bcrypt flask-login dash-auth
+```
+
+`flask-bcrypt`, `flask-login`, and `dash-auth` are required by
+`lories.application.view` (the login/auth pages). Without them,
+`lories.application.__init__` silently swallows the `ModuleNotFoundError`
+(its `view` import is wrapped in `try/except ModuleNotFoundError`), the
+`dash` **interface type never registers**, and `sparcs.Application(settings)`
+dies with `Unknown interface type 'dash'`.
+
+> Use the **`lories_sparcs_new`** env. The older `lories_sparcs` env is
+> incomplete on this machine (no `lories` installed).
+
+## Troubleshooting
+
+- **`Unknown interface type 'dash'`** — a `lories.application.view` dep is
+  missing (`flask-bcrypt` / `flask-login` / `dash-auth`); the import error
+  is swallowed silently. Install the full stack above. To see the real
+  missing module, run `import lories.application.view` directly.
+- **`module 'h5py' has no attribute 'File'`** (during `app.configure`, via
+  `pvlib ... lookup_altitude`) — `h5py` is broken: a stray
+  `site-packages/h5py/` dir holds only HDF5 DLLs and no Python package, so
+  it imports as an empty namespace. Fix: delete that dir and
+  `pip install h5py` (the wheel bundles its own HDF5 DLLs).
+- **`no weather logged in [...]`** — the replay window is outside the
+  project's logged data, the weather CSVs are missing, or the CSV connector
+  is disabled. Check `--end`, the `weather/brightsky/` contents, and
+  `[connectors.csv] enabled` in `conf/weather.conf`.

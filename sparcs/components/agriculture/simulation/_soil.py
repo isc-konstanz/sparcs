@@ -24,14 +24,15 @@ import logging
 import os
 import sys
 import threading
-from dataclasses import dataclass
-from typing import Any, Optional
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
 
 import gmsh
 import matplotlib
 import matplotlib.pyplot as plt
 import meshio
 from fipy import CellVariable, DiffusionTerm, FaceVariable, TransientTerm
+from fipy.solvers import LinearGMRESSolver
 from fipy.meshes import Gmsh2D
 from fipy.tools import serialComm
 from matplotlib.collections import LineCollection, PolyCollection
@@ -66,14 +67,44 @@ class SolveResult:
     ``converged`` is the physical criterion: ``max|Δθ_per_sweep| ≤ tol_th``.
     ``residual`` is the FiPy linear-system residual at the final sweep
     (kept for logging — not a direct convergence criterion). ``sweeps``
-    is how many `eq.sweep` calls were performed. The wall-clock walk in
-    :meth:`SoilSimulation.advance` uses these to decide whether to halve
-    ``dt`` and retry the current substep.
+    is how many `eq.sweep` calls were performed. ``finite`` is False when
+    the post-sweep saturation field contains NaN/Inf — such a state is
+    never committed (``updateOld`` is skipped) and the caller must roll
+    back. ``error`` carries the exception message when the sweep itself
+    raised. The wall-clock walk in :meth:`SoilPDECore.walk_window` uses
+    these to decide whether to shrink ``dt`` and retry the current substep.
     """
 
     residual: float
     converged: bool
     sweeps: int
+    finite: bool = True
+    error: Optional[str] = None
+
+    @property
+    def failed(self) -> bool:
+        """True when the substep must be rolled back or retried."""
+        return not self.converged or not self.finite or self.error is not None
+
+
+@dataclass
+class WalkResult:
+    """Outcome of one :meth:`SoilPDECore.walk_window` call.
+
+    ``ok`` is False only in strict mode (``accept_at_dt_min=False``) when
+    a substep still failed at ``dt_min``, or when ``cancel()`` fired —
+    ``reason`` then describes why. In accept mode the walk always covers
+    the full window; substeps whose solve produced a non-finite state at
+    ``dt_min`` are rolled back and *skipped* (state held, no source
+    applied) and their seconds accumulate in ``skipped_s``.
+    """
+
+    ok: bool = True
+    reason: Optional[str] = None
+    clip: "ClipDiagnostics" = field(default_factory=lambda: ClipDiagnostics())
+    retries: int = 0
+    skipped_s: float = 0.0
+    cancelled: bool = False
 
 
 @dataclass
@@ -599,6 +630,14 @@ class SoilPDECore:
         self.mesh_config = mesh_config
         self.ode_config = ode_config
         self.soil_model = ode_config.build_model()
+        # GMRES + ILU instead of FiPy's default direct LU. scipy's LU
+        # C-aborts (uncatchable SIGSEGV) on the near-singular matrices
+        # that high-rain cumulative saturation produces; GMRES reports
+        # non-convergence gracefully so the adaptive walk can roll back
+        # and shrink dt. ``precon="default"`` is ILU on the scipy backend.
+        self._solver = LinearGMRESSolver(
+            tolerance=1.0e-8, iterations=1000, precon="default",
+        )
         self.mesh = Gmsh2D(mesh_config.filename, communicator=serialComm)
         self._build_eq(rel_sat_name)
         self._build_segment_index()
@@ -1021,13 +1060,26 @@ class SoilPDECore:
     ) -> SolveResult:
         """Picard sweep loop. Converges on ``max|Δθ_per_sweep| ≤ tol_th``.
 
-        Always commits the post-sweep state (``rel_sat.updateOld()``). The
-        caller decides whether to keep the result or roll back (via
-        :meth:`snapshot` / :meth:`set_state`) and retry with a smaller
-        ``dt``. ``log_name`` is only consulted on non-convergence and
-        only used for the warning message — the wall-clock walk that
-        wraps this logs at a higher level too when no further retry is
-        possible.
+        Solves with the GMRES + ILU instance built at construction time
+        (never FiPy's direct-LU default — see ``__init__``). Three
+        hardening layers on top of the plain sweep loop:
+
+        - a sweep that **raises** is caught and reported via
+          ``SolveResult.error`` (state may be garbage; ``updateOld`` is
+          skipped and the caller must roll back);
+        - a **non-finite** post-sweep field sets ``finite=False`` and is
+          likewise never committed;
+        - a finite field is **safety-clipped** to ``[SE_MIN, SE_MAX]``
+          before ``updateOld()`` (HYDRUS-style post-solve clip) so both
+          the current and the old state stay inside the physical band.
+
+        On the healthy path the post-sweep state is committed
+        (``rel_sat.updateOld()``). The caller decides whether to keep the
+        result or roll back (via :meth:`snapshot` / :meth:`set_state`) and
+        retry with a smaller ``dt``. ``log_name`` is only consulted on
+        non-convergence and only used for the warning message — the
+        wall-clock walk that wraps this logs at a higher level too when
+        no further retry is possible.
         """
         eq = self.richards
         rel_sat = self.rel_sat
@@ -1038,7 +1090,18 @@ class SoilPDECore:
         dtheta_max = float("inf")
         sweeps = 0
         for k in range(max_sweeps):
-            res = eq.sweep(dt=dt, var=rel_sat)
+            try:
+                res = eq.sweep(dt=dt, var=rel_sat, solver=self._solver)
+            except Exception as e:  # noqa: BLE001 — scipy/FiPy raise a zoo of types
+                if log_name is not None:
+                    logging.warning(
+                        "%s: PDE sweep raised at dt=%.2fs (sweep %d): %s: %s",
+                        log_name, float(dt), k + 1, type(e).__name__, e,
+                    )
+                return SolveResult(
+                    residual=float("inf"), converged=False, sweeps=k,
+                    finite=False, error=f"{type(e).__name__}: {e}",
+                )
             cur_se = np.asarray(rel_sat.value)
             dtheta_max = float(np.max(np.abs(coeff * (cur_se - prev_se))))
             sweeps = k + 1
@@ -1046,6 +1109,23 @@ class SoilPDECore:
                 converged = True
                 break
             prev_se = cur_se.copy()
+
+        se = np.asarray(rel_sat.value)
+        finite = bool(np.all(np.isfinite(se)))
+        if not finite:
+            if log_name is not None:
+                logging.warning(
+                    "%s: PDE produced non-finite Se at dt=%.2fs after %d "
+                    "sweeps — state not committed.",
+                    log_name, float(dt), sweeps,
+                )
+            return SolveResult(
+                residual=float(res), converged=False, sweeps=sweeps, finite=False,
+            )
+
+        if np.any(se > SE_MAX) or np.any(se < SE_MIN):
+            rel_sat.setValue(np.clip(se, SE_MIN, SE_MAX))
+
         if not converged and log_name is not None:
             logging.warning(
                 "%s: PDE non-converged at dt=%.2fs in %d sweeps (final "
@@ -1054,6 +1134,111 @@ class SoilPDECore:
             )
         rel_sat.updateOld()
         return SolveResult(residual=float(res), converged=converged, sweeps=sweeps)
+
+    def walk_window(
+        self,
+        *,
+        rates: FluxRates,
+        window_s: float,
+        accept_at_dt_min: bool = True,
+        cancel: Optional[Callable[[], bool]] = None,
+        on_step: Optional[Callable[[float], None]] = None,
+        log_name: Optional[str] = None,
+    ) -> WalkResult:
+        """HYDRUS-style adaptive-dt walk over one wall-clock window.
+
+        Integrates ``rates`` over ``window_s`` seconds. Each substep is
+        attempted at ``sub_dt``; on failure (Picard non-convergence, a
+        raised solver, or a non-finite field) the state is rolled back to
+        the pre-substep snapshot and the substep retried at ``sub_dt / 3``
+        — down to ``ode_config.dt_min``. After a fast convergence
+        (≤ 3 sweeps) ``sub_dt`` grows back toward ``ode_config.dt``
+        (×1.5 per step).
+
+        At ``dt_min`` the two modes diverge:
+
+        - ``accept_at_dt_min=True`` (live solver / predictor): an
+          under-converged but **finite** state is accepted with a warning;
+          a non-finite state (or a raised solver) is rolled back and the
+          substep **skipped** — the state holds, no source is applied, and
+          the skipped seconds accumulate in ``WalkResult.skipped_s`` so the
+          simulation keeps pace with the wall clock without ever
+          committing NaN.
+        - ``accept_at_dt_min=False`` (strict / tuning): any failure at
+          ``dt_min`` rolls back and aborts the walk with
+          ``WalkResult(ok=False, reason=...)``.
+
+        ``cancel`` is polled before every substep (worker eviction);
+        ``on_step(t_offset)`` fires after each accepted or skipped substep
+        (plot throttling). Clip diagnostics from skipped substeps are
+        **not** accumulated — the water was never applied.
+        """
+        dt_max = self.ode_config.dt
+        dt_min = max(self.ode_config.dt_min, 1.0e-6)
+        sub_dt = dt_max
+        t_offset = 0.0
+        out = WalkResult()
+
+        while t_offset < window_s - 1.0e-9:
+            if cancel is not None and cancel():
+                out.ok = False
+                out.cancelled = True
+                out.reason = "cancelled"
+                return out
+
+            attempted = min(sub_dt, window_s - t_offset)
+            snap = self.snapshot()
+            clip = self.apply_source(
+                seg_evap=rates.seg_evap,
+                seg_transp=rates.seg_transp,
+                rain_flux=rates.rain_flux,
+                flow_m3s=rates.flow_m3s,
+                dt=attempted,
+            )
+            result = self.solve(attempted, log_name=log_name)
+
+            if result.failed and attempted > dt_min:
+                self.set_state(snap)
+                sub_dt = max(dt_min, attempted / 3.0)
+                out.retries += 1
+                continue
+
+            if result.failed:
+                # At dt_min — no further retry possible.
+                failure = result.error or (
+                    "non-finite Se field" if not result.finite else
+                    f"non-convergent after {result.sweeps} sweeps "
+                    f"(res={result.residual:.3g})"
+                )
+                if not accept_at_dt_min:
+                    self.set_state(snap)
+                    out.ok = False
+                    out.reason = f"{failure} at dt_min={dt_min:g}s"
+                    return out
+                if not result.finite or result.error is not None:
+                    # Never commit a poisoned state; hold and move on.
+                    self.set_state(snap)
+                    out.skipped_s += attempted
+                    logging.warning(
+                        "%s: substep skipped at dt_min=%gs (%s) — state "
+                        "held for %.1fs of the window.",
+                        log_name or "SoilPDECore", dt_min, failure, attempted,
+                    )
+                    t_offset += attempted
+                    if on_step is not None:
+                        on_step(t_offset)
+                    continue
+                # Finite but under-converged: accept (warning already
+                # logged by solve()) and fall through to the normal path.
+
+            t_offset += attempted
+            out.clip.add(clip)
+            if result.converged and result.sweeps <= 3 and sub_dt < dt_max:
+                sub_dt = min(dt_max, sub_dt * 1.5)
+            if on_step is not None:
+                on_step(t_offset)
+
+        return out
 
     # -- diagnostics & state ---------------------------------------------------
 

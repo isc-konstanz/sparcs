@@ -34,7 +34,7 @@ from lories.typing import Configurations
 from lories.util import to_timedelta
 
 from . import plot_render
-from ._soil import ClipDiagnostics, FluxRates, MeshConfig, SoilBase
+from ._soil import FluxRates, MeshConfig, SoilBase
 # FiPy mesh, Richards-equation assembly, segment index, and the pure
 # integration primitives (apply_source, solve, sample, total_water, state
 # I/O) live on the shared :class:`SoilPDECore` so SoilPredictor and
@@ -452,8 +452,6 @@ class SoilPredictor(SoilBase):
         densities computed from the same mass-balance math the live
         solver runs via :meth:`SoilBase._compute_diagnostics`.
         """
-        dt_max = self._ode_config.dt
-        dt_min = max(self._ode_config.dt_min, 1.0e-6)
         idx = et_data.index
         timestamps: list[pd.Timestamp] = []
         trajectories: dict[str, list[float]] = {p.channel_id: [] for p in self._probes}
@@ -494,36 +492,19 @@ class SoilPredictor(SoilBase):
                 flow_m3s=0.0,
                 rain_flux=rain_flux,
             )
-            clip_total = ClipDiagnostics()
             storage_before = self._total_water()
 
             # HYDRUS-style adaptive walk over this forecast interval —
-            # snapshot the state, attempt ``sub_dt``, halve on
-            # non-convergence (down to ``dt_min``), grow back after fast
-            # convergence. Mirrors :meth:`SoilSimulation._walk`; the
-            # per-substep ``ClipDiagnostics`` are accumulated for the
-            # interval-level diagnostic computation below.
-            sub_dt = dt_max
-            t_offset = 0.0
-            while t_offset < elapsed_s - 1.0e-9:
-                attempted = min(sub_dt, elapsed_s - t_offset)
-                snapshot = self._pde.snapshot()
-                clip = self._pde.apply_source(
-                    seg_evap=rates.seg_evap,
-                    seg_transp=rates.seg_transp,
-                    rain_flux=rates.rain_flux,
-                    flow_m3s=rates.flow_m3s,
-                    dt=attempted,
-                )
-                result = self._pde.solve(attempted, log_name=self.name)
-                if not result.converged and attempted > dt_min:
-                    self._pde.set_state(snapshot)
-                    sub_dt = max(dt_min, attempted / 3.0)
-                    continue
-                t_offset += attempted
-                clip_total.add(clip)
-                if result.converged and result.sweeps <= 3 and sub_dt < dt_max:
-                    sub_dt = min(dt_max, sub_dt * 1.5)
+            # shared with the live solver via SoilPDECore.walk_window
+            # (accept mode: under-converged finite states are kept at
+            # dt_min, non-finite substeps are rolled back and skipped).
+            walk = self._pde.walk_window(
+                rates=rates,
+                window_s=elapsed_s,
+                accept_at_dt_min=True,
+                log_name=self.name,
+            )
+            clip_total = walk.clip
 
             timestamps.append(ts_next)
             for p in self._probes:
