@@ -18,8 +18,8 @@ from sparcs.components.agriculture import SoilMoisture
 class Irrigation(Component):
     TYPE = "irrigation"
 
-    STATE = Constant(bool, "irrigation_state", "Irrigation State")
-    FLOW = Constant(float, "irrigation_flow", "Irrigation Flow", unit="l/min")
+    STATE = Constant(bool, "state", "Irrigation State", context="irrigation")
+    FLOW = Constant(float, "flow", "Irrigation Flow", unit="l/min", context="irrigation")
 
     soil: Sequence[SoilMoisture]
 
@@ -33,7 +33,7 @@ class Irrigation(Component):
         def add_channel(constant: Constant, **custom) -> None:
             channel = constant.to_dict()
             channel["name"] = constant.name.replace("Irrigation", self.name, 1)
-            channel["column"] = constant.id.replace("irrigation", self.key, 1)
+            # channel["column"] = constant.id.replace("irrigation", self.key, 1)
             channel.update(custom)
             self.data.add(**channel)
 

@@ -30,13 +30,13 @@ from typing import Any, Tuple
 
 import matplotlib
 import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
 from matplotlib.colors import Normalize
 from scipy.interpolate import griddata
 
-from . import plot_style
+import numpy as np
+import pandas as pd
 
+from . import plot_style
 
 _NON_GUI_BACKENDS = ("agg", "module://matplotlib_inline.backend_inline")
 
@@ -52,9 +52,7 @@ def _ensure_safe_backend() -> None:
     if backend in _NON_GUI_BACKENDS:
         return
     on_main_thread = threading.current_thread() is threading.main_thread()
-    has_display = sys.platform != "linux" or bool(
-        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
-    )
+    has_display = sys.platform != "linux" or bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
     if on_main_thread and has_display:
         return
     logging.getLogger(__name__).debug(
@@ -65,7 +63,8 @@ def _ensure_safe_backend() -> None:
 
 
 def init_rel_sat_figure(
-    width_m: float, height_m: float,
+    width_m: float,
+    height_m: float,
 ) -> Tuple[Any, Any, Normalize]:
     """Build a fig/ax/norm triple sized for a ``width_m × height_m`` soil
     cross-section, with the shared smoothstep saturation colorbar attached.
@@ -87,7 +86,9 @@ def init_rel_sat_figure(
     sm = plt.cm.ScalarMappable(cmap=plot_style.COLORMAP, norm=norm)
     sm.set_array([])
     fig.colorbar(
-        sm, ax=ax, shrink=plot_style.CBAR_SHRINK,
+        sm,
+        ax=ax,
+        shrink=plot_style.CBAR_SHRINK,
         label="relative saturation [-]",
     )
     plot_style.apply_subplots_adjust(fig)

@@ -24,6 +24,7 @@ This file is fully self-contained: it imports the existing FiPy core, the
 PDE-config dataclass, and ``FieldSimulation._run_chain`` from sparcs, but
 does not modify any existing module.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -60,10 +61,10 @@ import numpy as np
 import pandas as pd
 
 try:
-    import dash
-    from dash import Dash, Input, Output, State, ctx, dcc, html, no_update, ALL
+    import dash  # noqa: F401  (availability probe; names used via `from dash import ...`)
     import dash_bootstrap_components as dbc
     import plotly.graph_objects as go
+    from dash import ALL, Dash, Input, Output, State, ctx, dcc, html, no_update
 except ImportError as e:  # pragma: no cover - friendly bail-out
     sys.stderr.write(
         "soil_tuning needs dash + dash-bootstrap-components + plotly:\n"
@@ -73,12 +74,10 @@ except ImportError as e:  # pragma: no cover - friendly bail-out
     sys.exit(1)
 
 import sparcs
-from lories.application import Application as LoriesApplication
 from lories.application.settings import Settings
 from lories.components.weather import Weather
 from sparcs.components.agriculture import Irrigation, SoilMoisture
-from sparcs.components.agriculture.simulation import FieldSimulation, SoilSimulation
-from sparcs.components.agriculture.simulation import plot_render
+from sparcs.components.agriculture.simulation import FieldSimulation, SoilSimulation, plot_render
 from sparcs.components.agriculture.simulation._soil import (
     FluxRates,
     PDEConfig,
@@ -99,10 +98,12 @@ def _install_log_handler() -> None:
         if getattr(h, "_soil_tuning_owned", False):
             log.removeHandler(h)
     handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter(
-        "%(asctime)s %(levelname)-7s soil_tuning: %(message)s",
-    ))
-    handler._soil_tuning_owned = True   # type: ignore[attr-defined]
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(levelname)-7s soil_tuning: %(message)s",
+        )
+    )
+    handler._soil_tuning_owned = True  # type: ignore[attr-defined]
     log.addHandler(handler)
     log.setLevel(logging.INFO)
     log.propagate = False
@@ -117,6 +118,7 @@ _install_log_handler()
 # downstream. ``np.seterr`` covers the dtype path; ``warnings.filterwarnings``
 # covers the explicit ``warnings.warn(..., RuntimeWarning)`` path FiPy uses.
 import warnings as _warnings
+
 np.seterr(all="ignore")
 _warnings.filterwarnings("ignore", category=RuntimeWarning)
 logging.getLogger("fipy").setLevel(logging.WARNING)
@@ -126,8 +128,13 @@ logging.getLogger("fipy").setLevel(logging.WARNING)
 _PARAMS: tuple[str, ...] = ("theta_r", "theta_s", "alpha", "n", "k_s", "dt", "dt_min")
 
 _PARAM_STEP = {
-    "theta_r": 0.005, "theta_s": 0.005, "alpha": 0.001,
-    "n": 0.01, "k_s": 1.0e-5, "dt": 1.0, "dt_min": 0.1,
+    "theta_r": 0.005,
+    "theta_s": 0.005,
+    "alpha": 0.001,
+    "n": 0.01,
+    "k_s": 1.0e-5,
+    "dt": 1.0,
+    "dt_min": 0.1,
 }
 
 # --- job state -------------------------------------------------------------
@@ -138,7 +145,7 @@ class TuningJob:
     job_id: str
     params: dict[str, float]
     label: str
-    status: str = "pending"   # pending | running | done | failed | cancelled
+    status: str = "pending"  # pending | running | done | failed | cancelled
     error: Optional[str] = None
     # ``df_buffer`` is rebuilt in the parent from streamed row dicts so we
     # never have to pickle a growing DataFrame across the process boundary.
@@ -199,7 +206,9 @@ class TuningRunner:
         self._progress_q: mp.Queue = mp.Queue()
         self._shutdown = threading.Event()
         self._consumer = threading.Thread(
-            target=self._consume_progress, daemon=True, name="tuning-progress",
+            target=self._consume_progress,
+            daemon=True,
+            name="tuning-progress",
         )
         self._consumer.start()
 
@@ -229,10 +238,18 @@ class TuningRunner:
             target=_worker_simulate,
             name=f"tune-{job.job_id}",
             args=(
-                job.job_id, job.label, self.mesh_config, ode,
-                self.probes, self.et_data, self.seg_et, self.irrigation,
-                self.initial_blob, self.render_stride,
-                self._progress_q, cancel_event,
+                job.job_id,
+                job.label,
+                self.mesh_config,
+                ode,
+                self.probes,
+                self.et_data,
+                self.seg_et,
+                self.irrigation,
+                self.initial_blob,
+                self.render_stride,
+                self._progress_q,
+                cancel_event,
             ),
             daemon=True,
         )
@@ -267,7 +284,8 @@ class TuningRunner:
             jobs = list(self._jobs.values())
         candidates = sorted(
             (j for j in jobs if j.latest_png is not None),
-            key=lambda j: j.submitted_at, reverse=True,
+            key=lambda j: j.submitted_at,
+            reverse=True,
         )
         return candidates[0] if candidates else None
 
@@ -308,8 +326,7 @@ class TuningRunner:
     # --- internals ---
 
     def _evict_if_full_locked(self) -> None:
-        active = [j for j in self._jobs.values()
-                  if j.status in ("pending", "running")]
+        active = [j for j in self._jobs.values() if j.status in ("pending", "running")]
         while len(active) >= self.max_workers:
             oldest = active.pop(0)
             log.info("evicting oldest active job %s (%s)", oldest.job_id, oldest.label)
@@ -421,6 +438,7 @@ class TuningRunner:
             elif mtype == "warn":
                 log.warning("[%s] %s", job_id, msg.get("msg"))
 
+
 # --- worker (child process) ------------------------------------------------
 
 
@@ -435,8 +453,8 @@ def _worker_simulate(
     irrigation: pd.Series,
     initial_blob: Optional[bytes],
     render_stride: int,
-    progress_q: Any,        # mp.Queue
-    cancel_event: Any,      # mp.Event
+    progress_q: Any,  # mp.Queue
+    cancel_event: Any,  # mp.Event
 ) -> None:
     """Run one tuning simulation in its own process.
 
@@ -478,7 +496,8 @@ def _worker_simulate(
             return
 
         fig, ax, norm = plot_render.init_rel_sat_figure(
-            mesh_config.width, mesh_config.height,
+            mesh_config.width,
+            mesh_config.height,
         )
         render_every = max(1, render_stride)
 
@@ -499,7 +518,11 @@ def _worker_simulate(
                 continue
 
             rates = _build_flux_rates(
-                t_now, elapsed_s, et_data, seg_et, irrigation,
+                t_now,
+                elapsed_s,
+                et_data,
+                seg_et,
+                irrigation,
             )
             ok, reason = _walk_substeps(pde, rates, elapsed_s, cancel_event)
             if not ok:
@@ -510,11 +533,13 @@ def _worker_simulate(
                 return
 
             row = _sample_probe_row(pde, t_now, ode, probes)
-            put({
-                "type": "row",
-                "row": row,
-                "progress": i / max(1, len(timeline) - 1),
-            })
+            put(
+                {
+                    "type": "row",
+                    "row": row,
+                    "progress": i / max(1, len(timeline) - 1),
+                }
+            )
 
             if i % render_every == 0 or i == len(timeline) - 1:
                 _push_render(progress_q, job_id, label, fig, ax, norm, pde, t_now)
@@ -547,10 +572,7 @@ def _walk_substeps(
         return True, None
     if walk.cancelled:
         return False, "cancelled"
-    return False, (
-        f"{walk.reason} — params unstable for this forcing "
-        "(likely rain spike saturating top cells)."
-    )
+    return False, (f"{walk.reason} — params unstable for this forcing " "(likely rain spike saturating top cells).")
 
 
 def _build_flux_rates(
@@ -627,13 +649,22 @@ def _push_render(
 ) -> None:
     try:
         png = plot_render.render_rel_sat_png(
-            fig, ax, norm, pde.mesh,
-            np.asarray(pde.rel_sat.value), sim_t,
+            fig,
+            ax,
+            norm,
+            pde.mesh,
+            np.asarray(pde.rel_sat.value),
+            sim_t,
             title=label,
         )
-        progress_q.put({
-            "job_id": job_id, "type": "png", "png": png, "ts": sim_t,
-        })
+        progress_q.put(
+            {
+                "job_id": job_id,
+                "type": "png",
+                "png": png,
+                "ts": sim_t,
+            }
+        )
     except Exception:
         # Render is best-effort; bail silently rather than crash the
         # whole simulation.
@@ -670,8 +701,7 @@ def _find_soil_simulation(app) -> tuple[SoilSimulation, FieldSimulation]:
                 parent = c.context
                 if not isinstance(parent, FieldSimulation):
                     raise RuntimeError(
-                        f"SoilSimulation {c.id} parent is "
-                        f"{type(parent).__name__}, expected FieldSimulation"
+                        f"SoilSimulation {c.id} parent is " f"{type(parent).__name__}, expected FieldSimulation"
                     )
                 return c, parent
     raise RuntimeError("no SoilSimulation found in this project")
@@ -751,19 +781,35 @@ def _load_history(
 
 
 _PALETTE = [
-    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
-    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+    "#1f77b4",
+    "#ff7f0e",
+    "#2ca02c",
+    "#d62728",
+    "#9467bd",
+    "#8c564b",
+    "#e377c2",
+    "#7f7f7f",
+    "#bcbd22",
+    "#17becf",
 ]
 
 
 def _param_input(name: str, default: float):
-    return html.Div([
-        dbc.Label(name, html_for=f"in-{name}", className="small mb-0"),
-        dbc.Input(
-            id=f"in-{name}", type="number", value=float(default),
-            step=_PARAM_STEP.get(name, 0.001), debounce=True, size="sm",
-        ),
-    ], className="me-2 mb-2", style={"minWidth": "120px"})
+    return html.Div(
+        [
+            dbc.Label(name, html_for=f"in-{name}", className="small mb-0"),
+            dbc.Input(
+                id=f"in-{name}",
+                type="number",
+                value=float(default),
+                step=_PARAM_STEP.get(name, 0.001),
+                debounce=True,
+                size="sm",
+            ),
+        ],
+        className="me-2 mb-2",
+        style={"minWidth": "120px"},
+    )
 
 
 def build_app(
@@ -773,9 +819,7 @@ def build_app(
     poll_seconds: float,
 ) -> Dash:
     base = runner.base_pde_config
-    measurement_frame = (
-        pd.concat(measurements, axis=1).sort_index() if measurements else pd.DataFrame()
-    )
+    measurement_frame = pd.concat(measurements, axis=1).sort_index() if measurements else pd.DataFrame()
 
     app = Dash(
         __name__,
@@ -799,48 +843,65 @@ def build_app(
             return Response(status=204)
         return Response(job.latest_png, mimetype="image/png")
 
-    controls = dbc.Card(dbc.CardBody([
-        html.H5("Parameters", className="mb-2"),
-        html.Div(
-            [_param_input(p, getattr(base, p)) for p in _PARAMS],
-            className="d-flex flex-wrap",
-        ),
-        html.Div([
-            dbc.Button("Submit run", id="btn-submit", color="primary", className="me-2"),
-            dbc.Button("Cancel all", id="btn-cancel-all", color="secondary", outline=True),
-        ]),
-        html.Div(id="submit-feedback", className="text-muted small mt-2"),
-    ]), className="mb-3")
-
-    app.layout = dbc.Container([
-        html.H3("Soil tuning — live parameter sweep", className="my-3"),
-        html.Div(
-            f"Window: {runner.et_data.index[0]} .. {runner.et_data.index[-1]} "
-            f"({len(runner.et_data)} rows) — {len(runner.probes)} probe(s), "
-            f"{len(measurement_frame.columns)} sensor channel(s)",
-            className="text-muted small mb-2",
-        ),
-        controls,
-        dbc.Row([
-            dbc.Col(
-                dcc.Graph(id="trace-graph", style={"height": "560px"}),
-                md=8,
-            ),
-            dbc.Col([
-                html.H6(id="state-panel-title", className="mb-1"),
-                html.Div(id="state-panel-caption", className="text-muted small mb-2"),
-                html.Img(
-                    id="state-panel-img",
-                    style={"width": "100%", "border": "1px solid #ddd", "borderRadius": "4px"},
+    controls = dbc.Card(
+        dbc.CardBody(
+            [
+                html.H5("Parameters", className="mb-2"),
+                html.Div(
+                    [_param_input(p, getattr(base, p)) for p in _PARAMS],
+                    className="d-flex flex-wrap",
                 ),
-            ], md=4),
-        ]),
-        html.H6("Runs", className="mt-3"),
-        html.Div(id="job-table"),
-        dcc.Interval(
-            id="poll", interval=int(max(0.25, poll_seconds) * 1000), n_intervals=0,
+                html.Div(
+                    [
+                        dbc.Button("Submit run", id="btn-submit", color="primary", className="me-2"),
+                        dbc.Button("Cancel all", id="btn-cancel-all", color="secondary", outline=True),
+                    ]
+                ),
+                html.Div(id="submit-feedback", className="text-muted small mt-2"),
+            ]
         ),
-    ], fluid=True)
+        className="mb-3",
+    )
+
+    app.layout = dbc.Container(
+        [
+            html.H3("Soil tuning — live parameter sweep", className="my-3"),
+            html.Div(
+                f"Window: {runner.et_data.index[0]} .. {runner.et_data.index[-1]} "
+                f"({len(runner.et_data)} rows) — {len(runner.probes)} probe(s), "
+                f"{len(measurement_frame.columns)} sensor channel(s)",
+                className="text-muted small mb-2",
+            ),
+            controls,
+            dbc.Row(
+                [
+                    dbc.Col(
+                        dcc.Graph(id="trace-graph", style={"height": "560px"}),
+                        md=8,
+                    ),
+                    dbc.Col(
+                        [
+                            html.H6(id="state-panel-title", className="mb-1"),
+                            html.Div(id="state-panel-caption", className="text-muted small mb-2"),
+                            html.Img(
+                                id="state-panel-img",
+                                style={"width": "100%", "border": "1px solid #ddd", "borderRadius": "4px"},
+                            ),
+                        ],
+                        md=4,
+                    ),
+                ]
+            ),
+            html.H6("Runs", className="mt-3"),
+            html.Div(id="job-table"),
+            dcc.Interval(
+                id="poll",
+                interval=int(max(0.25, poll_seconds) * 1000),
+                n_intervals=0,
+            ),
+        ],
+        fluid=True,
+    )
 
     @app.callback(
         Output("submit-feedback", "children"),
@@ -883,13 +944,16 @@ def build_app(
             s = measurement_frame[col].dropna()
             if s.empty:
                 continue
-            fig.add_trace(go.Scatter(
-                x=s.index, y=s.values,
-                name=f"sensor: {col}",
-                mode="lines",
-                line=dict(color="#222", width=2, dash="dot"),
-                opacity=0.85,
-            ))
+            fig.add_trace(
+                go.Scatter(
+                    x=s.index,
+                    y=s.values,
+                    name=f"sensor: {col}",
+                    mode="lines",
+                    line=dict(color="#222", width=2, dash="dot"),
+                    opacity=0.85,
+                )
+            )
 
         for idx, job in enumerate(jobs):
             color = _PALETTE[idx % len(_PALETTE)]
@@ -898,16 +962,20 @@ def build_app(
                 continue
             theta_cols = [c for c in df.columns if c.endswith("__theta")]
             for j, col in enumerate(theta_cols):
-                fig.add_trace(go.Scatter(
-                    x=df.index, y=df[col].values,
-                    name=f"{job.label} · {col[:-7]} [{job.status}]",
-                    mode="lines",
-                    line=dict(
-                        color=color, width=2,
-                        dash="solid" if j == 0 else "dash",
-                    ),
-                    opacity=0.95 if job.status == "running" else 0.55,
-                ))
+                fig.add_trace(
+                    go.Scatter(
+                        x=df.index,
+                        y=df[col].values,
+                        name=f"{job.label} · {col[:-7]} [{job.status}]",
+                        mode="lines",
+                        line=dict(
+                            color=color,
+                            width=2,
+                            dash="solid" if j == 0 else "dash",
+                        ),
+                        opacity=0.95 if job.status == "running" else 0.55,
+                    )
+                )
 
         fig.update_layout(
             xaxis_title="time",
@@ -918,29 +986,51 @@ def build_app(
             uirevision="keep",
         )
 
-        table = dbc.Table([
-            html.Thead(html.Tr([
-                html.Th("Job"), html.Th("Params"), html.Th("Status"),
-                html.Th("Progress"), html.Th(""),
-            ])),
-            html.Tbody([
-                html.Tr([
-                    html.Td(j.job_id),
-                    html.Td(j.label),
-                    html.Td(
-                        j.status if not j.error else f"failed: {j.error}",
-                        className=("text-danger" if j.status == "failed" else None),
-                    ),
-                    html.Td(f"{j.progress * 100:5.1f}%"),
-                    html.Td(dbc.Button(
-                        "cancel",
-                        id={"role": "cancel", "job": j.job_id},
-                        size="sm", color="secondary", outline=True,
-                        disabled=j.status not in ("pending", "running"),
-                    )),
-                ]) for j in jobs
-            ]),
-        ], hover=True, size="sm", striped=True, bordered=False)
+        table = dbc.Table(
+            [
+                html.Thead(
+                    html.Tr(
+                        [
+                            html.Th("Job"),
+                            html.Th("Params"),
+                            html.Th("Status"),
+                            html.Th("Progress"),
+                            html.Th(""),
+                        ]
+                    )
+                ),
+                html.Tbody(
+                    [
+                        html.Tr(
+                            [
+                                html.Td(j.job_id),
+                                html.Td(j.label),
+                                html.Td(
+                                    j.status if not j.error else f"failed: {j.error}",
+                                    className=("text-danger" if j.status == "failed" else None),
+                                ),
+                                html.Td(f"{j.progress * 100:5.1f}%"),
+                                html.Td(
+                                    dbc.Button(
+                                        "cancel",
+                                        id={"role": "cancel", "job": j.job_id},
+                                        size="sm",
+                                        color="secondary",
+                                        outline=True,
+                                        disabled=j.status not in ("pending", "running"),
+                                    )
+                                ),
+                            ]
+                        )
+                        for j in jobs
+                    ]
+                ),
+            ],
+            hover=True,
+            size="sm",
+            striped=True,
+            bordered=False,
+        )
 
         render_job = runner.latest_render_job()
         if render_job is None or render_job.latest_png is None:
@@ -949,16 +1039,10 @@ def build_app(
             caption = ""
         else:
             # ?t=<ts> cache-busts the browser between updates.
-            ts_key = (
-                render_job.latest_png_ts.isoformat()
-                if render_job.latest_png_ts is not None else str(_n)
-            )
+            ts_key = render_job.latest_png_ts.isoformat() if render_job.latest_png_ts is not None else str(_n)
             img_src = f"/job-png?id={render_job.job_id}&t={ts_key}"
             title = f"Current Se field — {render_job.label}"
-            caption = (
-                f"job {render_job.job_id} · sim time {render_job.latest_png_ts} · "
-                f"status {render_job.status}"
-            )
+            caption = f"job {render_job.job_id} · sim time {render_job.latest_png_ts} · " f"status {render_job.status}"
 
         return fig, table, img_src, title, caption
 
@@ -1023,7 +1107,7 @@ def main() -> int:
         proj_settings = os.path.join(settings.dirs.conf, "settings.conf")
         if os.path.isfile(proj_settings):
             settings._load_toml(proj_settings)
-            settings["action"] = "start"   # re-pin in case the file overrode it
+            settings["action"] = "start"  # re-pin in case the file overrode it
         log.info("overrode data_dir=%s conf_dir=%s", data_path, settings.dirs.conf)
 
     app = sparcs.Application(settings)
@@ -1061,11 +1145,16 @@ def main() -> int:
         log.info("history window %s .. %s", start, end)
 
         et_data, seg_et, irrigation, initial_blob, measurements = _load_history(
-            soil_sim, field_sim, start, end,
+            soil_sim,
+            field_sim,
+            start,
+            end,
         )
         log.info(
             "history loaded: et_rows=%d  irrigation_rows=%d  sensors=%d  initial_blob=%s",
-            len(et_data), len(irrigation), len(measurements),
+            len(et_data),
+            len(irrigation),
+            len(measurements),
             "yes" if initial_blob else "no (PDEConfig IC)",
         )
 
@@ -1083,7 +1172,10 @@ def main() -> int:
         dash_app = build_app(runner, measurements, poll_seconds=poll_seconds)
         log.info(
             "Dash app starting at http://%s:%d  (poll=%.1fs, workers=%d)",
-            args.host, args.port, poll_seconds, max_workers,
+            args.host,
+            args.port,
+            poll_seconds,
+            max_workers,
         )
         cleaned = threading.Event()
 
@@ -1094,11 +1186,11 @@ def main() -> int:
                 cleaned.set()
                 log.info("shutting down sims and sparcs")
                 try:
-                    runner.shutdown()          # kills worker sim processes
+                    runner.shutdown()  # kills worker sim processes
                 except Exception:
                     log.exception("runner shutdown failed")
                 try:
-                    app.deactivate()           # disconnects sparcs connectors
+                    app.deactivate()  # disconnects sparcs connectors
                 except Exception:
                     log.exception("deactivate failed")
             # Hard-exit: sparcs' connector threads (Postgres / CSV / weather)

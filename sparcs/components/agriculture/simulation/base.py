@@ -30,7 +30,6 @@ from .ground_shading import GroundShading
 from .soil import MeshConfig, SoilSimulation, top_segment_names_from_mesh
 from .soil_predictor import SoilPredictor
 
-
 _C = TypeVar("_C", bound=Component)
 
 
@@ -93,7 +92,7 @@ class FieldSimulation(Component):
     # forecast responses (the live observation usually carries it).
     _WEATHER_DEFAULTS: dict[str, float] = {
         "clear_sky_index": 0.5,
-        "humidity_relative": 60.0,    # %
+        "humidity_relative": 60.0,  # %
     }
     _OPTIONAL_WEATHER_KEYS: frozenset[str] = frozenset(_WEATHER_DEFAULTS.keys())
 
@@ -129,10 +128,7 @@ class FieldSimulation(Component):
 
         self._lai_type = configs.get("lai_type", default="grass")
         if self._lai_type not in _LAI_BY_TYPE:
-            raise ValueError(
-                f"Unsupported lai_type '{self._lai_type}'. "
-                f"Must be one of: {sorted(_LAI_BY_TYPE)}"
-            )
+            raise ValueError(f"Unsupported lai_type '{self._lai_type}'. " f"Must be one of: {sorted(_LAI_BY_TYPE)}")
 
         self._bay_width = float(configs.get("bay_width", default=3.5))
 
@@ -237,8 +233,7 @@ class FieldSimulation(Component):
         names = self.top_segment_names
         if mapping.keys() != set(names):
             raise ValueError(
-                f"set_segment_values({channel!s}) keys {sorted(mapping)} "
-                f"!= registered segments {sorted(names)}"
+                f"set_segment_values({channel!s}) keys {sorted(mapping)} " f"!= registered segments {sorted(names)}"
             )
         self.data[channel].set(timestamp, [float(mapping[n]) for n in names])
 
@@ -267,9 +262,7 @@ class FieldSimulation(Component):
             return
 
         if self.weather is None:
-            logging.warning(
-                "%s: no Weather component resolved — chain will never tick.", self.name
-            )
+            logging.warning("%s: no Weather component resolved — chain will never tick.", self.name)
             return
 
         # Trigger is timer-driven, not event-driven on these channels: the
@@ -278,9 +271,7 @@ class FieldSimulation(Component):
         # should not gate PDE cadence. We snapshot the latest validated weather
         # row on each tick instead.
         self._weather_channels = Channels(list(self.weather.data.values()))
-        self._required_weather_keys = tuple(
-            c.key for c in Evapotranspiration.REQUIRED_WEATHER_CHANNELS
-        )
+        self._required_weather_keys = tuple(c.key for c in Evapotranspiration.REQUIRED_WEATHER_CHANNELS)
         self._evapo_rename = {c.id: c.key for c in self._weather_channels}
 
         soil_data = self.soil_simulation.data
@@ -361,7 +352,8 @@ class FieldSimulation(Component):
         # this is also where new forecast issuances reach the predictor.
         if self.soil_predictor is not None:
             self.soil_predictor.predict(
-                now, forecast_creation=self._read_forecast_epoch(),
+                now,
+                forecast_creation=self._read_forecast_epoch(),
             )
 
     def _read_forecast_epoch(self) -> Optional[pd.Timestamp]:
@@ -392,14 +384,15 @@ class FieldSimulation(Component):
             return False
         by_key = {c.key: c for c in self._weather_channels}
         missing = [
-            k for k in self._required_weather_keys
-            if k not in self._OPTIONAL_WEATHER_KEYS
-            and (k not in by_key or not by_key[k].is_valid())
+            k
+            for k in self._required_weather_keys
+            if k not in self._OPTIONAL_WEATHER_KEYS and (k not in by_key or not by_key[k].is_valid())
         ]
         if missing:
             logging.debug(
                 "%s: skipping advance — weather channels not valid: %s",
-                self.name, missing,
+                self.name,
+                missing,
             )
             return False
         return True
@@ -520,7 +513,9 @@ class FieldSimulation(Component):
                 if key not in self._weather_default_warned:
                     logging.warning(
                         "%s: weather feed does not supply '%s' — defaulting to %s.",
-                        self.name, key, default,
+                        self.name,
+                        key,
+                        default,
                     )
                     self._weather_default_warned.add(key)
                 df[key] = default

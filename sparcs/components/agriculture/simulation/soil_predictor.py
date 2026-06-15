@@ -28,13 +28,10 @@ from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
-
 from lories.components.weather import Weather
 from lories.typing import Configurations
 from lories.util import to_timedelta
 
-from . import plot_render
-from ._soil import FluxRates, MeshConfig, SoilBase
 # FiPy mesh, Richards-equation assembly, segment index, and the pure
 # integration primitives (apply_source, solve, sample, total_water, state
 # I/O) live on the shared :class:`SoilPDECore` so SoilPredictor and
@@ -47,6 +44,8 @@ from sparcs.components.agriculture.simulation.soil import (
     resolve_probes,
 )
 
+from . import plot_render
+from ._soil import FluxRates, MeshConfig, SoilBase
 
 _DEFAULT_HORIZON: str = "24h"
 _DEFAULT_SAVE_FREQ: str = "1h"
@@ -133,9 +132,7 @@ class SoilPredictor(SoilBase):
         # Pull soil_simulation's loaded config block (file + parent overrides
         # already merged) so we can read its [pde] params (model selector +
         # hydraulic parameters) and its [probes] block for probe definitions.
-        soil_block = self.context.configs.get_member(
-            SoilSimulation.TYPE, defaults={}, ensure_exists=True
-        )
+        soil_block = self.context.configs.get_member(SoilSimulation.TYPE, defaults={}, ensure_exists=True)
         soil_pde = PDEConfig(soil_block.get_member("pde", defaults={}, ensure_exists=True))
 
         # Predictor's own [pde] block overrides the live solver's, so users
@@ -159,7 +156,10 @@ class SoilPredictor(SoilBase):
         # directly with current readings.
         probes_cfg = soil_block.get_member("probes", defaults={}, ensure_exists=True)
         self._probes = resolve_probes(
-            probes_cfg, self._pde.mesh, self._mesh_config, log_name=self.name,
+            probes_cfg,
+            self._pde.mesh,
+            self._mesh_config,
+            log_name=self.name,
         )
 
         # Composite-PK partner for every row this predictor emits. Mirrors
@@ -262,7 +262,8 @@ class SoilPredictor(SoilBase):
                 "%s: forecast_creation unavailable (upstream "
                 "weather.forecast.timestamp_creation not valid yet); "
                 "falling back to now=%s for the PK column.",
-                self.name, now,
+                self.name,
+                now,
             )
             forecast_creation = now
 
@@ -276,7 +277,9 @@ class SoilPredictor(SoilBase):
             # future-dated channel.timestamp) hit this every time, so DEBUG.
             logging.debug(
                 "%s: predict skipped — already published for (now=%s, creation=%s).",
-                self.name, now, forecast_creation,
+                self.name,
+                now,
+                forecast_creation,
             )
             return
 
@@ -284,7 +287,9 @@ class SoilPredictor(SoilBase):
         if forecast is None or forecast.empty:
             logging.info(
                 "%s: predict skipped — no forecast rows in [%s, %s].",
-                self.name, now, now + self._horizon,
+                self.name,
+                now,
+                now + self._horizon,
             )
             return
 
@@ -303,34 +308,30 @@ class SoilPredictor(SoilBase):
         # this gate many times before the first soil advance lands.
         if getattr(soil, "_last_simulated_at", None) is None:
             logging.debug(
-                "%s: predict skipped — live solver has no state yet "
-                "(cold-start still running) at %s.", self.name, now,
+                "%s: predict skipped — live solver has no state yet " "(cold-start still running) at %s.",
+                self.name,
+                now,
             )
             return
 
         try:
             et_data, seg_et = field._run_chain(forecast, publish=False)
         except Exception:  # noqa: BLE001
-            logging.exception(
-                "%s: chain replay on forecast failed; skipping tick.", self.name
-            )
+            logging.exception("%s: chain replay on forecast failed; skipping tick.", self.name)
             return
         if et_data.empty or et_data.shape[0] < 2:
             logging.info(
                 "%s: predict skipped — chain replay returned %d row(s), need ≥ 2.",
-                self.name, et_data.shape[0],
+                self.name,
+                et_data.shape[0],
             )
             return
 
         ic_rel_sat = soil.get_rel_sat_snapshot()
         try:
-            timestamps, trajectories, snapshots, diagnostics = self._solve(
-                ic_rel_sat, et_data, seg_et
-            )
+            timestamps, trajectories, snapshots, diagnostics = self._solve(ic_rel_sat, et_data, seg_et)
         except Exception:  # noqa: BLE001
-            logging.exception(
-                "%s: integration failed; skipping tick.", self.name
-            )
+            logging.exception("%s: integration failed; skipping tick.", self.name)
             return
 
         # Wrap _publish_results: any exception here propagates up to
@@ -340,22 +341,29 @@ class SoilPredictor(SoilBase):
         # this try/except a converter / set_frame failure is invisible.
         try:
             self._publish_results(
-                trajectories, self._probes, timestamps, snapshots,
-                diagnostics, forecast_creation,
+                trajectories,
+                self._probes,
+                timestamps,
+                snapshots,
+                diagnostics,
+                forecast_creation,
             )
         except Exception:  # noqa: BLE001
             logging.exception(
-                "%s: publishing results failed; predictor channels stay "
-                "stale this tick (now=%s, creation=%s).",
-                self.name, now, forecast_creation,
+                "%s: publishing results failed; predictor channels stay " "stale this tick (now=%s, creation=%s).",
+                self.name,
+                now,
+                forecast_creation,
             )
             return
         self._last_predicted_key = key
         logging.info(
-            "%s: predict OK — %d probes, %d rows emitted "
-            "(now=%s, creation=%s).",
-            self.name, len(self._probes), len(timestamps),
-            now, forecast_creation,
+            "%s: predict OK — %d probes, %d rows emitted " "(now=%s, creation=%s).",
+            self.name,
+            len(self._probes),
+            len(timestamps),
+            now,
+            forecast_creation,
         )
 
     # =========================================================================
@@ -511,7 +519,10 @@ class SoilPredictor(SoilBase):
                 trajectories[p.channel_id].append(self._pde.sample(p))
             delta_storage = self._total_water() - storage_before
             interval_diag = self._compute_diagnostics(
-                rates, delta_storage, elapsed_s, clip_total,
+                rates,
+                delta_storage,
+                elapsed_s,
+                clip_total,
             )
             for key in diagnostics:
                 diagnostics[key].append(interval_diag.get(key, float("nan")))
@@ -552,7 +563,7 @@ class SoilPredictor(SoilBase):
         precip = et_data.loc[ts, col]
         if pd.isna(precip) or precip <= 0:
             return 0.0
-        return float(precip) / elapsed_s   # mm/s == kg/(m²·s)
+        return float(precip) / elapsed_s  # mm/s == kg/(m²·s)
 
     # The PDE state (state set/snapshot, apply_source, solve, sample) is
     # owned by :class:`SoilPDECore` (``self._pde``) and shared with
@@ -616,7 +627,8 @@ class SoilPredictor(SoilBase):
             if len(values) != len(index):
                 continue
             self.data[constant.key].set(
-                index[0], pd.Series(values, index=index, dtype=float),
+                index[0],
+                pd.Series(values, index=index, dtype=float),
             )
 
         if not snapshots:
@@ -645,9 +657,9 @@ class SoilPredictor(SoilBase):
                     # must not strand the state / probe channels we've
                     # already (or are about to) publish above.
                     logging.exception(
-                        "%s: predict_plot render failed at %s; skipping "
-                        "remaining plot snapshots this tick.",
-                        self.name, t,
+                        "%s: predict_plot render failed at %s; skipping " "remaining plot snapshots this tick.",
+                        self.name,
+                        t,
                     )
                     plot_values = []
                     break
@@ -670,10 +682,15 @@ class SoilPredictor(SoilBase):
         don't allocate 24 figures."""
         if self._plot_fig is None:
             self._plot_fig, self._plot_ax, self._plot_norm = plot_render.init_rel_sat_figure(
-                self._mesh_config.width, self._mesh_config.height,
+                self._mesh_config.width,
+                self._mesh_config.height,
             )
         return plot_render.render_rel_sat_png(
-            self._plot_fig, self._plot_ax, self._plot_norm,
-            self._pde.mesh, rel_sat, sim_t,
+            self._plot_fig,
+            self._plot_ax,
+            self._plot_norm,
+            self._pde.mesh,
+            rel_sat,
+            sim_t,
             title="Predicted relative saturation",
         )

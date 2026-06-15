@@ -22,28 +22,18 @@ from __future__ import annotations
 import io
 import logging
 import os
-import sys
-import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 import gmsh
-import matplotlib
-import matplotlib.pyplot as plt
-import meshio
 from fipy import CellVariable, DiffusionTerm, FaceVariable, TransientTerm
-from fipy.solvers import LinearGMRESSolver
 from fipy.meshes import Gmsh2D
+from fipy.solvers import LinearGMRESSolver
 from fipy.tools import serialComm
-from matplotlib.collections import LineCollection, PolyCollection
-from scipy.interpolate import griddata
 
 import numpy as np
 import pandas as pd
-
-from . import plot_style
-from lories import Component, Constant
-from lories.components.weather import Weather
+from lories import Component
 from lories.typing import Configurations
 from lories.util import to_timedelta
 from sparcs.components.agriculture.soil import (
@@ -55,9 +45,9 @@ from sparcs.components.agriculture.soil import (
 logging.getLogger("fipy").setLevel(logging.WARNING)
 np.seterr(all="ignore")
 
-RHO_W: float = 1000.0       # kg/m³
-SE_MIN: float = 1e-6        # effective-saturation floor for source clipping
-SE_MAX: float = 0.999       # effective-saturation ceiling for source clipping
+RHO_W: float = 1000.0  # kg/m³
+SE_MIN: float = 1e-6  # effective-saturation floor for source clipping
+SE_MAX: float = 0.999  # effective-saturation ceiling for source clipping
 
 
 @dataclass
@@ -158,6 +148,7 @@ class FluxRates:
     flow_m3s: float
     rain_flux: float
 
+
 # TODO: Remove — exploratory Parameters() draft from before MeshConfig/PDEConfig
 #   landed. Re-introduce as a real Parameters schema if/when lories.Parameter
 #   adds the missing converter / Select / List / Component support.
@@ -239,12 +230,14 @@ def resolve_probes(
             x = float(spec["x"])
             y = float(spec["y"])
             idx = int(np.argmin((cell_x - (x + x_offset)) ** 2 + (cell_y - (-y)) ** 2))
-            probes.append(ProbeSpec(
-                name=f"Probe point (x={x:.3f}, depth={y:.3f})",
-                channel_id=key,
-                cell_indices=np.array([idx], dtype=int),
-                weights=np.array([1.0]),
-            ))
+            probes.append(
+                ProbeSpec(
+                    name=f"Probe point (x={x:.3f}, depth={y:.3f})",
+                    channel_id=key,
+                    cell_indices=np.array([idx], dtype=int),
+                    weights=np.array([1.0]),
+                )
+            )
 
     if probes_cfg.has_member("areas"):
         for key, spec in probes_cfg.get_member("areas").items():
@@ -252,28 +245,31 @@ def resolve_probes(
             x_max = float(spec["x_max"])
             y_min = float(spec["y_min"])
             y_max = float(spec["y_max"])
-            mask = (
-                (cell_x >= x_min + x_offset) & (cell_x <= x_max + x_offset)
-                & (cell_y >= -y_max) & (cell_y <= -y_min)
-            )
+            mask = (cell_x >= x_min + x_offset) & (cell_x <= x_max + x_offset) & (cell_y >= -y_max) & (cell_y <= -y_min)
             indices = np.flatnonzero(mask)
             if indices.size == 0:
                 if log_name:
                     logging.warning(
-                        "%s: probe area '%s' (x=[%.3f,%.3f], depth=[%.3f,%.3f]) "
-                        "covers no mesh cells — skipping.",
-                        log_name, key, x_min, x_max, y_min, y_max,
+                        "%s: probe area '%s' (x=[%.3f,%.3f], depth=[%.3f,%.3f]) " "covers no mesh cells — skipping.",
+                        log_name,
+                        key,
+                        x_min,
+                        x_max,
+                        y_min,
+                        y_max,
                     )
                 continue
-            probes.append(ProbeSpec(
-                name=(
-                    f"Probe area x=[{x_min:.3f},{x_max:.3f}] "
-                    f"depth=[{y_min:.3f},{y_max:.3f}], {indices.size} cells"
-                ),
-                channel_id=key,
-                cell_indices=indices,
-                weights=cell_volumes[indices].copy(),
-            ))
+            probes.append(
+                ProbeSpec(
+                    name=(
+                        f"Probe area x=[{x_min:.3f},{x_max:.3f}] "
+                        f"depth=[{y_min:.3f},{y_max:.3f}], {indices.size} cells"
+                    ),
+                    channel_id=key,
+                    cell_indices=indices,
+                    weights=cell_volumes[indices].copy(),
+                )
+            )
     return probes
 
 
@@ -287,11 +283,7 @@ def top_segment_names_from_mesh(mesh: "MeshConfig") -> list[str]:
     strips.
     """
     n_pv_segments = int((mesh.width - mesh.plant_width) / (2 * mesh.dx))
-    open_sky = [
-        f"{side}TopSegment_{i}"
-        for i in range(n_pv_segments)
-        for side in ("Left", "Right")
-    ]
+    open_sky = [f"{side}TopSegment_{i}" for i in range(n_pv_segments) for side in ("Left", "Right")]
     return [*open_sky, "PlantTopLeftSegment", "PlantTopRightSegment"]
 
 
@@ -325,19 +317,19 @@ class FeddesConfig:
 
     enabled: bool = False
     anaerobic: bool = False
-    p0_pf: float = 0.0    # anaerobic upper limit (only used when anaerobic=True)
-    p1_pf: float = 1.0    # optimal lower (drier side of the anaerobic ramp)
-    p2_pf: float = 3.0    # optimal upper (wetter side of the dry ramp)
-    p3_pf: float = 4.2    # wilting point
+    p0_pf: float = 0.0  # anaerobic upper limit (only used when anaerobic=True)
+    p1_pf: float = 1.0  # optimal lower (drier side of the anaerobic ramp)
+    p2_pf: float = 3.0  # optimal upper (wetter side of the dry ramp)
+    p3_pf: float = 4.2  # wilting point
 
     # Root distribution β(z) on the plant cells. ``"uniform"`` weights
     # every plant cell by its volume; ``"linear"`` decays linearly from
     # the surface (max at top, zero at ``plant_height``); ``"exponential"``
-    # decays as ``exp(−z / root_decay_length)`` where z is depth from the
+    # decays as ``exp(-z / root_decay_length)`` where z is depth from the
     # surface in metres. β is normalised so ``Σ β · cell_vol = 1`` —
     # downstream code is invariant to the unnormalised shape.
     root_distribution: str = "uniform"
-    root_decay_length: float = 0.3   # m, only used for "exponential"
+    root_decay_length: float = 0.3  # m, only used for "exponential"
 
     # Šimůnek compensation threshold. Without compensation
     # (``omega_c = 1.0``, the default), realised transpiration falls to
@@ -366,12 +358,8 @@ class FeddesConfig:
         self.p1_pf = float(configs.get("p1_pf", default=1.0))
         self.p2_pf = float(configs.get("p2_pf", default=3.0))
         self.p3_pf = float(configs.get("p3_pf", default=4.2))
-        self.root_distribution = str(
-            configs.get("root_distribution", default="uniform")
-        ).strip().lower()
-        self.root_decay_length = float(
-            configs.get("root_decay_length", default=0.3)
-        )
+        self.root_distribution = str(configs.get("root_distribution", default="uniform")).strip().lower()
+        self.root_decay_length = float(configs.get("root_decay_length", default=0.3))
         self.omega_c = float(configs.get("omega_c", default=1.0))
 
 
@@ -434,7 +422,7 @@ class PondingConfig:
     """
 
     enabled: bool = False
-    h_max_mm: float = 5.0   # max ponding depth before overflow [mm]
+    h_max_mm: float = 5.0  # max ponding depth before overflow [mm]
 
     def __init__(self, configs: Optional[Configurations] = None):
         if configs is None:
@@ -463,9 +451,7 @@ class PDEConfig:
         # HYDRUS-1D). Class defaults differ (0.5 for VG, 2.0 for BC); we
         # only forward this when the user sets it explicitly so each
         # model keeps its own canonical default.
-        self.bpar: Optional[float] = (
-            float(configs.get("bpar")) if "bpar" in configs else None
-        )
+        self.bpar: Optional[float] = float(configs.get("bpar")) if "bpar" in configs else None
         # PDE timestep as a lories freq string ("50s", "1min", "5min").
         # ``dt`` is the *target* substep size; the wall-clock walk in
         # ``SoilSimulation.advance`` can halve it when the Picard sweep
@@ -486,9 +472,7 @@ class PDEConfig:
         #   physically meaningful IC HYDRUS uses by default.
         self.ic_se: float = float(configs.get("ic_se", default=0.35))
         self.ic_water_table_depth: Optional[float] = (
-            float(configs.get("ic_water_table_depth"))
-            if "ic_water_table_depth" in configs
-            else None
+            float(configs.get("ic_water_table_depth")) if "ic_water_table_depth" in configs else None
         )
 
         # Wall-clock-equivalent duration the cold-start spin-up integrates
@@ -604,9 +588,9 @@ class SoilPDECore:
     plant_volume: float
 
     # Pre-computed conversion factors.
-    theta_diff: float                # θ_s - θ_r
-    irrigation_factor: float         # 1 / vol_watering          [1/m^3]
-    rain_face_len: float             # Σ face_len over open-sky  [m]
+    theta_diff: float  # θ_s - θ_r
+    irrigation_factor: float  # 1 / vol_watering          [1/m^3]
+    rain_face_len: float  # Σ face_len over open-sky  [m]
 
     # Feddes Se-threshold cache (only populated when ode_config.feddes.enabled).
     _feddes_se_p2: Optional[float]
@@ -636,7 +620,9 @@ class SoilPDECore:
         # non-convergence gracefully so the adaptive walk can roll back
         # and shrink dt. ``precon="default"`` is ILU on the scipy backend.
         self._solver = LinearGMRESSolver(
-            tolerance=1.0e-8, iterations=1000, precon="default",
+            tolerance=1.0e-8,
+            iterations=1000,
+            precon="default",
         )
         self.mesh = Gmsh2D(mesh_config.filename, communicator=serialComm)
         self._build_eq(rel_sat_name)
@@ -646,9 +632,7 @@ class SoilPDECore:
         # Ponding bucket — one entry per open-sky segment, in metres of
         # water column. Initialised dry; persists across substeps via the
         # state-blob round-trip. Only used when ode_config.ponding.enabled.
-        self.surface_h: dict[str, float] = {
-            name: 0.0 for name in self.open_sky_segment_names
-        }
+        self.surface_h: dict[str, float] = {name: 0.0 for name in self.open_sky_segment_names}
 
     # -- PDE assembly ----------------------------------------------------------
 
@@ -670,9 +654,7 @@ class SoilPDECore:
         # gravity divergence term carries water out through the bottom.
         gravity_flux = g_faces * kf.faceValue
         gravity_div = gravity_flux.divergence
-        richards = TransientTerm(
-            coeff=self.ode_config.theta_s - self.ode_config.theta_r
-        ) == (
+        richards = TransientTerm(coeff=self.ode_config.theta_s - self.ode_config.theta_r) == (
             DiffusionTerm(coeff=(kf * d_h)) + gravity_div + source
         )
 
@@ -683,8 +665,7 @@ class SoilPDECore:
         if ic_wt is not None:
             rel_sat.setValue(self._hydrostatic_ic_array(ic_wt))
             logging.info(
-                "SoilPDECore: hydrostatic IC (water table at %.2f m below surface) "
-                "Se min=%.3f max=%.3f",
+                "SoilPDECore: hydrostatic IC (water table at %.2f m below surface) " "Se min=%.3f max=%.3f",
                 ic_wt,
                 float(np.min(rel_sat.value)),
                 float(np.max(rel_sat.value)),
@@ -704,12 +685,12 @@ class SoilPDECore:
 
         Mesh y is positive upward with the soil surface at ``y = 0`` and
         the bottom at ``y = -height``. A water table at depth ``h_wt``
-        below the surface sits at ``y_wt = −h_wt``.
+        below the surface sits at ``y_wt = -h_wt``.
 
         At and below the water table the soil is saturated (``ψ = 0`` →
         ``Se = 1``). Above, gravity balances matric suction so the
         pressure head magnitude equals the elevation above the water
-        table: ``|h(z)|_m = max(0, y_cell − y_wt)``. Converting to hPa
+        table: ``|h(z)|_m = max(0, y_cell - y_wt)``. Converting to hPa
         (``1 m water ≈ 98.0665 hPa``) and feeding through
         :meth:`SoilModel.se_from_psi` yields the corresponding Se field,
         clipped to ``[SE_MIN, SE_MAX]`` for safety.
@@ -726,10 +707,7 @@ class SoilPDECore:
         names = top_segment_names_from_mesh(self.mesh_config)
         # Bare-soil strips on the left/right of the plant block. The PV
         # roof covers the plant zone; rain reaches these strips only.
-        self.open_sky_segment_names = [
-            n for n in names
-            if n not in ("PlantTopLeftSegment", "PlantTopRightSegment")
-        ]
+        self.open_sky_segment_names = [n for n in names if n not in ("PlantTopLeftSegment", "PlantTopRightSegment")]
         # Every top segment where soil evaporation acts (open-sky strips
         # + plant top edges). The watering strip is governed by the
         # irrigation source and excluded here.
@@ -755,9 +733,7 @@ class SoilPDECore:
         self.theta_diff = self.ode_config.theta_s - self.ode_config.theta_r
         watering_vol = self.segment_cell_volume.get("WateringTopSegment", 0.0)
         self.irrigation_factor = 1.0 / watering_vol if watering_vol > 0 else 0.0
-        self.rain_face_len = sum(
-            self.segment_face_len[n] for n in self.open_sky_segment_names
-        )
+        self.rain_face_len = sum(self.segment_face_len[n] for n in self.open_sky_segment_names)
 
     def _build_feddes_thresholds(self) -> None:
         """Translate the Feddes pF thresholds into effective-saturation
@@ -790,7 +766,8 @@ class SoilPDECore:
             logging.warning(
                 "Feddes pF thresholds map to non-monotone Se (P2 → Se=%.3f, "
                 "P3 → Se=%.3f). Check pF ordering — dry ramp will be disabled.",
-                self._feddes_se_p2, self._feddes_se_p3,
+                self._feddes_se_p2,
+                self._feddes_se_p3,
             )
 
     def _build_root_beta(self) -> None:
@@ -803,7 +780,7 @@ class SoilPDECore:
           over PlantSurface" behaviour.
         - ``"linear"``: β decays linearly from the surface (max at the
           top of the plant block, zero at depth = ``plant_height``).
-        - ``"exponential"``: β decays as ``exp(−z / root_decay_length)``
+        - ``"exponential"``: β decays as ``exp(-z / root_decay_length)``
           where z is depth from the surface in metres.
 
         The raw shape is divided by ``Σ β · cell_vol`` so the
@@ -831,8 +808,8 @@ class SoilPDECore:
         else:
             if shape != "uniform":
                 logging.warning(
-                    "FeddesConfig.root_distribution=%r unknown; falling back "
-                    "to 'uniform'.", shape,
+                    "FeddesConfig.root_distribution=%r unknown; falling back " "to 'uniform'.",
+                    shape,
                 )
             raw = np.ones_like(cell_vols)
 
@@ -859,7 +836,7 @@ class SoilPDECore:
         """Max metres of water column the cells beneath ``seg_name`` can
         absorb in one ``dt`` step before the per-cell clip kicks in.
 
-        Mirrors the ``max_pos = (SE_MAX − Se)/dt · θ_diff`` per-cell
+        Mirrors the ``max_pos = (SE_MAX - Se)/dt · θ_diff`` per-cell
         clipper limit in :meth:`apply_source`. Sums the per-cell
         headroom volume and divides by the segment's top face length
         to land at a water-column depth (m) over the segment.
@@ -872,9 +849,7 @@ class SoilPDECore:
             return 0.0
         se_cells = np.asarray(self.rel_sat.value)[cells]
         cell_vols = np.asarray(self.mesh.cellVolumes)[cells]
-        headroom_m2 = float(np.sum(
-            np.maximum(SE_MAX - se_cells, 0.0) * self.theta_diff * cell_vols
-        ))
+        headroom_m2 = float(np.sum(np.maximum(SE_MAX - se_cells, 0.0) * self.theta_diff * cell_vols))
         return headroom_m2 / face_len
 
     def _route_rain_through_ponding(
@@ -953,7 +928,8 @@ class SoilPDECore:
         ponding_overflow_mass = 0.0
         if self.ode_config.ponding.enabled:
             effective_flux, ponding_overflow_mass = self._route_rain_through_ponding(
-                rain_flux, dt,
+                rain_flux,
+                dt,
             )
             for name, flux in effective_flux.items():
                 if flux <= 0:
@@ -1007,19 +983,14 @@ class SoilPDECore:
         # below ``ω_c`` we can't fully compensate and total uptake is
         # ``T_pot · ω / ω_c``.
         if seg_transp and self.plant_volume > 0 and self._root_beta_normalized.size > 0:
-            transp_mass = sum(
-                v * self.segment_face_len.get(name, 0.0)
-                for name, v in seg_transp.items()
-            )
+            transp_mass = sum(v * self.segment_face_len.get(name, 0.0) for name, v in seg_transp.items())
             if transp_mass > 0:
                 alpha = self.feddes_alpha(se[self.plant_cells])
                 beta_hat = self._root_beta_normalized
                 omega = float(np.sum(alpha * beta_hat * self._root_cell_volumes))
                 divisor = max(omega, self.ode_config.feddes.omega_c)
                 if divisor > 0:
-                    theta_rate[self.plant_cells] -= (
-                        transp_mass * alpha * beta_hat / (RHO_W * divisor)
-                    )
+                    theta_rate[self.plant_cells] -= transp_mass * alpha * beta_hat / (RHO_W * divisor)
 
         # Per-cell clip — Sₑ ∈ [SE_MIN, SE_MAX] after one dt step.
         max_pos = np.maximum((SE_MAX - se) / dt, 0.0) * coeff
@@ -1033,8 +1004,8 @@ class SoilPDECore:
         # cellVolume is the FiPy 2-D cell area per unit row metre.
         excess = theta_rate - clipped
         cell_vol = np.asarray(self.mesh.cellVolumes)
-        top_excess = np.maximum(excess, 0.0)       # wanted to add, couldn't
-        bot_excess = np.maximum(-excess, 0.0)      # wanted to remove, couldn't
+        top_excess = np.maximum(excess, 0.0)  # wanted to add, couldn't
+        bot_excess = np.maximum(-excess, 0.0)  # wanted to remove, couldn't
         return ClipDiagnostics(
             top_rejected=float(np.sum(top_excess * cell_vol)) * RHO_W * dt,
             bottom_rejected=float(np.sum(bot_excess * cell_vol)) * RHO_W * dt,
@@ -1096,11 +1067,18 @@ class SoilPDECore:
                 if log_name is not None:
                     logging.warning(
                         "%s: PDE sweep raised at dt=%.2fs (sweep %d): %s: %s",
-                        log_name, float(dt), k + 1, type(e).__name__, e,
+                        log_name,
+                        float(dt),
+                        k + 1,
+                        type(e).__name__,
+                        e,
                     )
                 return SolveResult(
-                    residual=float("inf"), converged=False, sweeps=k,
-                    finite=False, error=f"{type(e).__name__}: {e}",
+                    residual=float("inf"),
+                    converged=False,
+                    sweeps=k,
+                    finite=False,
+                    error=f"{type(e).__name__}: {e}",
                 )
             cur_se = np.asarray(rel_sat.value)
             dtheta_max = float(np.max(np.abs(coeff * (cur_se - prev_se))))
@@ -1115,12 +1093,16 @@ class SoilPDECore:
         if not finite:
             if log_name is not None:
                 logging.warning(
-                    "%s: PDE produced non-finite Se at dt=%.2fs after %d "
-                    "sweeps — state not committed.",
-                    log_name, float(dt), sweeps,
+                    "%s: PDE produced non-finite Se at dt=%.2fs after %d " "sweeps — state not committed.",
+                    log_name,
+                    float(dt),
+                    sweeps,
                 )
             return SolveResult(
-                residual=float(res), converged=False, sweeps=sweeps, finite=False,
+                residual=float(res),
+                converged=False,
+                sweeps=sweeps,
+                finite=False,
             )
 
         if np.any(se > SE_MAX) or np.any(se < SE_MIN):
@@ -1128,9 +1110,13 @@ class SoilPDECore:
 
         if not converged and log_name is not None:
             logging.warning(
-                "%s: PDE non-converged at dt=%.2fs in %d sweeps (final "
-                "|Δθ|=%.2e, residual=%.2e, tol_th=%.0e).",
-                log_name, float(dt), sweeps, dtheta_max, float(res), tol_th,
+                "%s: PDE non-converged at dt=%.2fs in %d sweeps (final " "|Δθ|=%.2e, residual=%.2e, tol_th=%.0e).",
+                log_name,
+                float(dt),
+                sweeps,
+                dtheta_max,
+                float(res),
+                tol_th,
             )
         rel_sat.updateOld()
         return SolveResult(residual=float(res), converged=converged, sweeps=sweeps)
@@ -1206,9 +1192,9 @@ class SoilPDECore:
             if result.failed:
                 # At dt_min — no further retry possible.
                 failure = result.error or (
-                    "non-finite Se field" if not result.finite else
-                    f"non-convergent after {result.sweeps} sweeps "
-                    f"(res={result.residual:.3g})"
+                    "non-finite Se field"
+                    if not result.finite
+                    else f"non-convergent after {result.sweeps} sweeps " f"(res={result.residual:.3g})"
                 )
                 if not accept_at_dt_min:
                     self.set_state(snap)
@@ -1220,9 +1206,11 @@ class SoilPDECore:
                     self.set_state(snap)
                     out.skipped_s += attempted
                     logging.warning(
-                        "%s: substep skipped at dt_min=%gs (%s) — state "
-                        "held for %.1fs of the window.",
-                        log_name or "SoilPDECore", dt_min, failure, attempted,
+                        "%s: substep skipped at dt_min=%gs (%s) — state " "held for %.1fs of the window.",
+                        log_name or "SoilPDECore",
+                        dt_min,
+                        failure,
+                        attempted,
                     )
                     t_offset += attempted
                     if on_step is not None:
@@ -1257,7 +1245,7 @@ class SoilPDECore:
         """Independent gravity-drainage flux estimate at the bottom face.
 
         With the free-drainage BC the bottom-face Darcy flux is
-        ``q_bot = −K(h_bot)·cos(α)`` (HYDRUS-1D ``WATFLOW.FOR:213``). In
+        ``q_bot = -K(h_bot)·cos(α)`` (HYDRUS-1D ``WATFLOW.FOR:213``). In
         our coordinate convention that's a downward, out-of-domain
         volumetric flux. We approximate the face Se by the mean of the
         bottom-adjacent cell Se values and return ``K · ρ_w`` so the
@@ -1291,9 +1279,7 @@ class SoilPDECore:
         # it a restored simulation forgets standing surface water and
         # mass balance breaks across the restart boundary.
         surface_names = np.array(list(self.surface_h.keys()), dtype=object)
-        surface_values = np.array(
-            [self.surface_h[k] for k in surface_names], dtype=float
-        )
+        surface_values = np.array([self.surface_h[k] for k in surface_names], dtype=float)
         np.savez(
             buf,
             rel_sat=self.rel_sat.value.copy(),
@@ -1434,14 +1420,8 @@ class SoilBase(Component):
         bottom_len = self._segment_face_len.get("GroundBottomSegment", 0.0)
         if bottom_len <= 0 or duration_s <= 0:
             return 0.0
-        evap_mass = sum(
-            value * self._segment_face_len.get(name, 0.0)
-            for name, value in rates.seg_evap.items()
-        )
-        transp_mass = sum(
-            value * self._segment_face_len.get(name, 0.0)
-            for name, value in rates.seg_transp.items()
-        )
+        evap_mass = sum(value * self._segment_face_len.get(name, 0.0) for name, value in rates.seg_evap.items())
+        transp_mass = sum(value * self._segment_face_len.get(name, 0.0) for name, value in rates.seg_transp.items())
         in_rate = rates.rain_flux * self._rain_face_len + rates.flow_m3s * RHO_W
         out_rate = evap_mass + transp_mass
         drainage_mass = (in_rate - out_rate) * duration_s - delta_storage
@@ -1470,24 +1450,16 @@ class SoilBase(Component):
         t_flux_mean = self._face_weighted_mean(rates.seg_transp, self._top_segment_names)
         bottom = self._balance_drainage_flux(rates, delta_storage, elapsed_s)
         direct_bottom = self._pde.bottom_drainage_estimate()  # kg/(m²·s)
-        balance_residual = bottom - direct_bottom              # kg/(m²·s)
+        balance_residual = bottom - direct_bottom  # kg/(m²·s)
 
         top_face_len = float(self._rain_face_len) + sum(
             self._segment_face_len.get(n, 0.0)
             for n in ("PlantTopLeftSegment", "PlantTopRightSegment", "WateringTopSegment")
         )
-        evap_face_len = sum(
-            self._segment_face_len.get(n, 0.0) for n in self._top_segment_names
-        )
+        evap_face_len = sum(self._segment_face_len.get(n, 0.0) for n in self._top_segment_names)
         runoff_mass = clip.top_rejected + clip.ponding_overflow
-        runoff_rate = (
-            runoff_mass / (top_face_len * elapsed_s)
-            if top_face_len > 0 and elapsed_s > 0 else 0.0
-        )
-        unmet_rate = (
-            clip.bottom_rejected / (evap_face_len * elapsed_s)
-            if evap_face_len > 0 and elapsed_s > 0 else 0.0
-        )
+        runoff_rate = runoff_mass / (top_face_len * elapsed_s) if top_face_len > 0 and elapsed_s > 0 else 0.0
+        unmet_rate = clip.bottom_rejected / (evap_face_len * elapsed_s) if evap_face_len > 0 and elapsed_s > 0 else 0.0
 
         kg_per_s_to_kg_per_h = 3600.0
         return {

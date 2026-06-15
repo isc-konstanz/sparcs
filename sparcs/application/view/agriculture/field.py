@@ -92,20 +92,13 @@ class AgriculturalFieldPage(ComponentGroup[AgriculturalField]):
         soil = sim.soil_simulation
         shading = sim.ground_shading
         et = sim.evapotranspiration
-        image_channel = (
-            soil.data[SoilSimulation.SOIL_PROGRESS_IMAGE.key] if soil is not None else None
-        )
-        et_channel = (
-            et.data[Evapotranspiration.EVAPOTRANSPIRATION.key] if et is not None else None
-        )
-        drainage_channel = (
-            soil.data[SoilSimulation.WATER_BOTTOM.key] if soil is not None else None
-        )
-        shading_channel = (
-            shading.data[GroundShading.SHADING_FACTOR.key] if shading is not None else None
-        )
+        image_channel = soil.data[SoilSimulation.SOIL_PROGRESS_IMAGE.key] if soil is not None else None
+        et_channel = et.data[Evapotranspiration.EVAPOTRANSPIRATION.key] if et is not None else None
+        drainage_channel = soil.data[SoilSimulation.WATER_BOTTOM.key] if soil is not None else None
+        shading_channel = shading.data[GroundShading.SHADING_FACTOR.key] if shading is not None else None
 
         if image_channel is not None:
+
             @callback(
                 Output(image_id, "src"),
                 Output(image_store_id, "data"),

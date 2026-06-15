@@ -46,7 +46,7 @@ The sibling `test_agri_sim_logged` shares the configs but its
 `test_agri_sim`, also make sure `[connectors.csv] enabled = true` in
 `conf/weather.conf` — otherwise the logger can't read the CSVs back.
 
-The replay window is `(end − history_window) .. end`. With
+The replay window is `(end - history_window) .. end`. With
 `history_window = "30d"`, `--end 2017-06-01` gives `2017-05-02 .. 2017-06-01`,
 which sits inside the logged `2016-06 .. 2017-05` range. Pick `--end` so the
 window lands inside the data you have.
@@ -73,7 +73,7 @@ startup and faster per-run sweeps.
 1. Each row of number inputs is a writable `PDEConfig` knob:
    `theta_r`, `theta_s`, `alpha`, `n`, `k_s`, `dt`, `dt_min`.
 2. **Submit run** spawns a worker process that seeds the core from the
-   state snapshot at `end − history_window`, replays the window, and
+   state snapshot at `end - history_window`, replays the window, and
    streams its probe traces into the graph (solid/dashed colored lines).
    The black dotted lines are the real sensor channels to match against.
 3. The right panel shows the live 2-D saturation (Se) field of the most

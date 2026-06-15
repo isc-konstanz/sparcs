@@ -89,6 +89,11 @@ select = [
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["E", "I"]
+# Imports intentionally follow module-level setup (multiprocessing spawn
+# config, a dash-availability try/except, log handler) — E402 is expected.
+"soil_tuning.py" = ["E402"]
+# Imports follow the pvfactors numpy2 compat patch, which must run first.
+"sparcs/components/agriculture/simulation/ground_shading.py" = ["E402"]
 
 [tool.ruff.lint.isort]
 extra-standard-library = ["dateutil"]

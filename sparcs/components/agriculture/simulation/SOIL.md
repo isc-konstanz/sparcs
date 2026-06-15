@@ -43,7 +43,7 @@ The PDE is the **Richards equation** for unsaturated flow, written in
 *effective saturation* form so the unknown stays in `[0, 1]`:
 
 ```
-(θ_s − θ_r) ∂Se/∂t  =  ∇·[ K(Se) · |dh/dSe| · ∇Se ]  +  ∂K/∂y  +  source
+(θ_s - θ_r) ∂Se/∂t  =  ∇·[ K(Se) · |dh/dSe| · ∇Se ]  +  ∂K/∂y  +  source
 ```
 
 Symbols:
@@ -51,7 +51,7 @@ Symbols:
 | Quantity | Meaning | Units |
 |---|---|---|
 | `Se` | effective saturation, the unknown | – |
-| `θ` | volumetric water content `= θ_r + (θ_s−θ_r)·Se` | m³/m³ |
+| `θ` | volumetric water content `= θ_r + (θ_s-θ_r)·Se` | m³/m³ |
 | `θ_r`, `θ_s` | residual and saturated water content | m³/m³ |
 | `h` | pressure head (negative under suction) | m |
 | `K(Se)` | unsaturated hydraulic conductivity | m/s |
@@ -76,7 +76,7 @@ The implementation in `SoilPDECore._build_eq` assembles the equation
 with FiPy:
 
 ```python
-richards = TransientTerm(coeff=θ_s − θ_r) == (
+richards = TransientTerm(coeff=θ_s - θ_r) == (
     DiffusionTerm(coeff=K · dh_dse) + (g_faces · K.faceValue).divergence + source
 )
 ```
@@ -94,8 +94,8 @@ The classical closed-form curves from van Genuchten (1980), with the
 Mualem (1976) conductivity prediction:
 
 ```
-Se(h) = [1 + (α·|h|)^n]^(-m)            m = 1 − 1/n
-K(Se) = K_s · Se^L · [1 − (1 − Se^(1/m))^m]^2
+Se(h) = [1 + (α·|h|)^n]^(-m)            m = 1 - 1/n
+K(Se) = K_s · Se^L · [1 - (1 - Se^(1/m))^m]^2
 ```
 
 The pore-interaction exponent `L` (Mualem's parameter) defaults to
@@ -300,7 +300,7 @@ configured substep `dt` is solved iteratively. The inner loop in
 1. Call `eq.sweep(dt=dt, var=rel_sat, solver=...)`. Each sweep
    reassembles `K` and `dh/dSe` from the current iterate.
 2. Convergence is judged on a **physical criterion**:
-   `max|Δθ_per_sweep| = max|(θ_s−θ_r)·ΔSe| ≤ tol_th`, with
+   `max|Δθ_per_sweep| = max|(θ_s-θ_r)·ΔSe| ≤ tol_th`, with
    `tol_th = 1e-3` by default. This matches HYDRUS-1D's `TolTh`
    tolerance.
 3. Up to `MAX_SWEEPS = 25` iterations per substep; if the loop fails
@@ -377,7 +377,7 @@ normalised by the relevant face length:
 | `WATER_TOP_IN` | total surface water input (rain that infiltrates + irrigation) |
 | `WATER_TOP_OUT` | soil evaporation |
 | `WATER_TRANSP` | plant transpiration (demand) |
-| `WATER_BOTTOM` | drainage out of the bottom face, from the integral balance `inflow − outflow − Δstorage` |
+| `WATER_BOTTOM` | drainage out of the bottom face, from the integral balance `inflow - outflow - Δstorage` |
 | `WATER_RUNOFF` | rejected top influx — ponding overflow plus clipper-discarded rain/irrigation |
 | `WATER_DEMAND_UNMET` | evap + transp demand the soil could not supply |
 | `WATER_BALANCE_RESIDUAL` | integral-balance drainage minus an independent `K(Se_bot)·ρ_w` estimate at the bottom face |
@@ -495,7 +495,7 @@ h_max_mm = 5.0
 | `θ_s` | saturated water content | `[pde].theta_s` | m³/m³ |
 | `α` | inverse air-entry (VG) / `1/h_b` (BC) | `[pde].alpha` | cm⁻¹ |
 | `n` | pore-size parameter (VG) / index λ (BC) | `[pde].n` | – |
-| `m` | `1 − 1/n` | derived | – |
+| `m` | `1 - 1/n` | derived | – |
 | `K_s` | saturated hydraulic conductivity | `[pde].k_s` | m/s |
 | `L` | Mualem pore-interaction exponent | `[pde].bpar` | – |
 | `h` | pressure head (signed; negative under suction) | derived | m |

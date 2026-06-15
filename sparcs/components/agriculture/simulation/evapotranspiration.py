@@ -165,9 +165,7 @@ class Evapotranspiration(Component):
         svp = self._sat_vapor_pressure(temperature=df[Weather.TEMP_AIR], only_pos=True)
         gvp = self._ground_vapor_pressure(hum_rel=df[Weather.HUMIDITY_REL], svp=svp)
         vh = self._vaporization_heat(temperature=df[Weather.TEMP_AIR])
-        svp_slope = self._slope_sat_vapor_pressure(
-            temperature=df[Weather.TEMP_AIR], svp=svp, vh=vh
-        )
+        svp_slope = self._slope_sat_vapor_pressure(temperature=df[Weather.TEMP_AIR], svp=svp, vh=vh)
 
         # Per-segment Penman-Monteith. Vegetation properties and the local
         # radiation scaling come from the segment; everything weather-only
@@ -196,16 +194,10 @@ class Evapotranspiration(Component):
                 plant_height=ones * float(seg.plant_height),
                 measure_height=2.0,
             )
-            soil_heat = self._soil_heat_flow(
-                lai=ones * float(seg.lai), net_irradiance=net_irr
-            )
+            soil_heat = self._soil_heat_flow(lai=ones * float(seg.lai), net_irradiance=net_irr)
             surf_res = self._resistance_surface(lai=ones * float(seg.lai))
-            rad_term = self._radiation_term(
-                svp_slope=svp_slope, net_irradiance=net_irr, soil_heat_flow=soil_heat
-            )
-            aer_term = self._aerodynamic_term(
-                svp=svp, gvp=gvp, aerodynamic_resistance=air_res
-            )
+            rad_term = self._radiation_term(svp_slope=svp_slope, net_irradiance=net_irr, soil_heat_flow=soil_heat)
+            aer_term = self._aerodynamic_term(svp=svp, gvp=gvp, aerodynamic_resistance=air_res)
             et = self._evapotranspiration(
                 radiation_term=rad_term,
                 aerodynamic_term=aer_term,
@@ -261,9 +253,7 @@ class Evapotranspiration(Component):
             Evapotranspiration.AER_TERM,
             Evapotranspiration.EVAPOTRANSPIRATION,
         ):
-            stacked = pd.concat(
-                [seg_terms[s.name][c] for s in seg_list], axis=1
-            )
+            stacked = pd.concat([seg_terms[s.name][c] for s in seg_list], axis=1)
             df[c] = stacked.to_numpy().dot(weights)
 
         # Publish the latest row to each bulk output channel so subscribers
@@ -284,9 +274,7 @@ class Evapotranspiration(Component):
             # T_gnd derived above. The channel is owned by FieldSimulation
             # (parent); write through ``self.context`` so dashboards see the
             # physics-derived value instead of the placeholder.
-            temp_gnd_stack = pd.concat(
-                [seg_temp_gnd[s.name] for s in seg_list], axis=1
-            )
+            temp_gnd_stack = pd.concat([seg_temp_gnd[s.name] for s in seg_list], axis=1)
             temp_gnd_bulk_last = float(temp_gnd_stack.to_numpy().dot(weights)[-1])
             ctx_data = getattr(self.context, "data", None)
             if ctx_data is not None and "temp_ground" in ctx_data:
@@ -299,13 +287,9 @@ class Evapotranspiration(Component):
             field = self.context
             if field.top_segment_names:
                 et_mapping = {
-                    s.name: float(seg_et[s.name]["et"].iloc[-1]) * self._KG_PER_S_TO_KG_PER_H
-                    for s in seg_list
+                    s.name: float(seg_et[s.name]["et"].iloc[-1]) * self._KG_PER_S_TO_KG_PER_H for s in seg_list
                 }
-                tg_mapping = {
-                    s.name: float(seg_temp_gnd[s.name].iloc[-1])
-                    for s in seg_list
-                }
+                tg_mapping = {s.name: float(seg_temp_gnd[s.name].iloc[-1]) for s in seg_list}
                 field.set_segment_values(field.SEG_EVAPOTRANSPIRATION, ts, et_mapping)
                 field.set_segment_values(field.SEG_TEMP_GROUND, ts, tg_mapping)
 

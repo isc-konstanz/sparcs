@@ -27,10 +27,10 @@ from __future__ import annotations
 
 from typing import Optional
 
-import numpy as np
-import pandas as pd
 from matplotlib.colors import Normalize
 
+import numpy as np
+import pandas as pd
 
 # ---------------------------------------------------------------------------
 # Style constants
@@ -75,6 +75,7 @@ TIMESTAMP_FORMAT: str = "%Y-%m-%d %H:%M"
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def compute_fig_size(x_extent: float, y_extent: float) -> tuple[float, float]:
     """Figure ``(width_in, height_in)`` for the shared layout.
@@ -126,7 +127,7 @@ def format_progress_title(label: str, ts: pd.Timestamp, suffix: Optional[str] = 
 class SmoothstepNorm(Normalize):
     """Stretch the middle of ``[vmin, vmax]``, compress the extremes.
 
-    Applies the smoothstep transform ``f(x) = 3x² − 2x³`` to values
+    Applies the smoothstep transform ``f(x) = 3x² - 2x³`` to values
     normalised into ``[0, 1]`` before they reach the colormap. The
     forward derivative is zero at the endpoints and peaks at 1.5 in
     the middle — visually, small differences around Se ≈ 0.5 produce
@@ -136,7 +137,7 @@ class SmoothstepNorm(Normalize):
     but still worth a sentinel colour.
 
     The inverse uses the closed-form smoothstep inverse
-    ``g(y) = 0.5 − sin(arcsin(1 − 2y) / 3)`` so the colorbar tick
+    ``g(y) = 0.5 - sin(arcsin(1 - 2y) / 3)`` so the colorbar tick
     labels stay in physical Se units.
     """
 

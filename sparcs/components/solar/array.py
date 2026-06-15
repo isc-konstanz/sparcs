@@ -30,7 +30,7 @@ import pandas as pd
 from lories.components import Component
 from lories.core import ConfigurationError, Configurations
 from lories.typing import ContextArgument
-from sparcs.components.solar.bifacial import irradiance, temperature
+from sparcs.components.solar.bifacial import temperature
 from sparcs.components.solar.db import ModuleDatabase
 
 
@@ -654,15 +654,15 @@ class SolarArray(Component, pv.pvsystem.Array):
         if airmass is None:
             airmass = atmosphere.get_relative_airmass(solar_zenith)
 
-        orientation = self.mount.get_orientation(solar_zenith, solar_azimuth)
+        # orientation = self.mount.get_orientation(solar_zenith, solar_azimuth)
 
         model = re.sub("[^A-Za-z0-9]+", "", model).lower()
         if model in ["solarfactor", "pvfactor"]:
             # return irradiance.get_pvfactors_irradiance()
-            raise ValueError(f"Not yet implemented pvfactor bifacial irradiance model")
+            raise ValueError("Not yet implemented pvfactor bifacial irradiance model")
         elif model == "raytracing":
             # return irradiance.get_ray_tracing_irradiance()
-            raise ValueError(f"Not yet implemented raytracing bifacial irradiance model")
+            raise ValueError("Not yet implemented raytracing bifacial irradiance model")
 
         return super().get_irradiance(
             solar_zenith,

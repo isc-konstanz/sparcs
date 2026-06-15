@@ -44,11 +44,13 @@ import matplotlib
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
-import numpy as np
-import pandas as pd
 from pvfactors.engine import PVEngine
 from pvfactors.geometry import OrderedPVArray
 from pvlib.tracking import singleaxis
+
+import numpy as np
+import pandas as pd
+
 
 # pvfactors 1.6.1 (and the ``solarfactors`` fork) was written against
 # numpy < 2. ``HybridPerezOrdered.get_full_ts_modeling_vectors`` builds
@@ -61,15 +63,13 @@ from pvlib.tracking import singleaxis
 # is homogeneous and the downstream radiosity math (which expects a 2-D
 # numeric matrix) keeps working. Patch in-place once at import time.
 def _patch_pvfactors_numpy2_compat() -> None:
-    from pvfactors.irradiance.models import HybridPerezOrdered, SKY_REFLECTIVITY_DUMMY
+    from pvfactors.irradiance.models import SKY_REFLECTIVITY_DUMMY, HybridPerezOrdered
 
     if getattr(HybridPerezOrdered, "_lories_numpy2_patched", False):
         return
 
     def get_full_ts_modeling_vectors(self, pvarray):
-        irradiance_mat, rho_mat, inv_rho_mat, total_perez_mat = (
-            self.get_ts_modeling_vectors(pvarray)
-        )
+        irradiance_mat, rho_mat, inv_rho_mat, total_perez_mat = self.get_ts_modeling_vectors(pvarray)
         irradiance_mat.append(self.isotropic_luminance)
         total_perez_mat.append(self.isotropic_luminance)
         rho_mat.append(SKY_REFLECTIVITY_DUMMY * np.ones(pvarray.n_states))
@@ -117,7 +117,6 @@ from lories.typing import Configurations
 
 from . import plot_style
 
-
 # ---------------------------------------------------------------------------
 # 1. Constants
 # ---------------------------------------------------------------------------
@@ -140,9 +139,9 @@ _ZENITH_DAYTIME_LIMIT = 89.0
 _GROUND_X_CLAMP = 100.0
 
 # Geometry modes selected via ``mode = ...`` in the [ground_shading] block.
-MODE_AS_IS = "as_is"            # fixed-tilt rows; supports `mirrored`
+MODE_AS_IS = "as_is"  # fixed-tilt rows; supports `mirrored`
 MODE_HORIZONTAL = "horizontal"  # row geometry forced flat (surface_tilt = 0)
-MODE_TRACKABLE = "trackable"    # single-axis tracker via pvlib.tracking.singleaxis
+MODE_TRACKABLE = "trackable"  # single-axis tracker via pvlib.tracking.singleaxis
 MODE_FREE_FIELD = "free_field"  # no PV array — open-sky reference baseline
 _VALID_MODES = (MODE_AS_IS, MODE_HORIZONTAL, MODE_TRACKABLE, MODE_FREE_FIELD)
 
@@ -150,6 +149,7 @@ _VALID_MODES = (MODE_AS_IS, MODE_HORIZONTAL, MODE_TRACKABLE, MODE_FREE_FIELD)
 # ---------------------------------------------------------------------------
 # 2. Free helpers
 # ---------------------------------------------------------------------------
+
 
 def _qinc_in_range(ground: list[tuple], x_start: float, x_end: float) -> float:
     """Length-weighted mean ``qinc`` over ``[x_start, x_end]`` in ``ground``."""
@@ -201,10 +201,7 @@ def _combine_grounds(grounds_per_setup: list[list[tuple]]) -> list[tuple]:
     # what direct fractions normalise against. Open-sky segments where the
     # panels cast no shadow set the ceiling.
     direct_max = max(
-        (
-            max(0.0, seg[2]["qinc"] - seg[2]["reflection"] - seg[2]["isotropic"])
-            for g in grounds_per_setup for seg in g
-        ),
+        (max(0.0, seg[2]["qinc"] - seg[2]["reflection"] - seg[2]["isotropic"]) for g in grounds_per_setup for seg in g),
         default=0.0,
     )
     n = len(grounds_per_setup)
@@ -254,6 +251,7 @@ def _open_sky_ghi(pv_df: pd.DataFrame) -> np.ndarray:
 # 3. Internal types
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class PlotConfig:
     """Plot output settings, mirroring SoilSimulation's PlotConfig.
@@ -281,11 +279,11 @@ class PlotConfig:
 
 @dataclass
 class _TrackerConfig:
-    axis_tilt: float       # rotation-axis tilt from horizontal [deg]
-    axis_azimuth: float    # rotation-axis bearing [deg], 180 = N–S axis
-    max_angle: float       # tracker rotation limit [deg]
+    axis_tilt: float  # rotation-axis tilt from horizontal [deg]
+    axis_azimuth: float  # rotation-axis bearing [deg], 180 = N–S axis
+    max_angle: float  # tracker rotation limit [deg]
     backtrack: bool
-    gcr: float             # ground coverage ratio used for backtracking
+    gcr: float  # ground coverage ratio used for backtracking
 
 
 class _PVSetup:
@@ -430,7 +428,12 @@ class _PVSetup:
                         {"qinc_front": float(qf), "qinc_back": float(qb)},
                     )
                     for xs, ys, xe, ye, qf, qb in zip(
-                        b1.x, b1.y, b2.x, b2.y, qinc_front, qinc_back,
+                        b1.x,
+                        b1.y,
+                        b2.x,
+                        b2.y,
+                        qinc_front,
+                        qinc_back,
                     )
                 ]
             )
@@ -444,6 +447,7 @@ class _PVSetup:
 # ---------------------------------------------------------------------------
 # 4. GroundShading component
 # ---------------------------------------------------------------------------
+
 
 class GroundShading(Component):
     TYPE: str = "ground_shading"
@@ -527,10 +531,7 @@ class GroundShading(Component):
             else:
                 tilt_max = abs(self._surface_tilt)
             tilt_rad = np.radians(tilt_max)
-            y_panel = max(
-                setup.height + (setup.width / 2.0) * np.sin(tilt_rad)
-                for setup in self._pv_setups
-            )
+            y_panel = max(setup.height + (setup.width / 2.0) * np.sin(tilt_rad) for setup in self._pv_setups)
             self._plot_y_max = y_panel + 1.0
         else:
             # Free-field: no panels. Pick a reasonable open-sky envelope
@@ -578,10 +579,7 @@ class GroundShading(Component):
         """Parse the [ground_shading] block and build the PV setups."""
         mode = str(configs.get("mode", default=MODE_AS_IS)).lower()
         if mode not in _VALID_MODES:
-            raise ValueError(
-                f"Unsupported ground_shading mode '{mode}'. "
-                f"Must be one of: {sorted(_VALID_MODES)}"
-            )
+            raise ValueError(f"Unsupported ground_shading mode '{mode}'. " f"Must be one of: {sorted(_VALID_MODES)}")
         self._mode = mode
         self._albedo = configs.get_float("albedo", default=0.2)
 
@@ -620,7 +618,9 @@ class GroundShading(Component):
         self._surface_azimuth = 180.0
 
     def _build_horizontal_setups(
-        self, configs: Configurations, common: dict[str, Any],
+        self,
+        configs: Configurations,
+        common: dict[str, Any],
     ) -> list[_PVSetup]:
         """Same row geometry as `as_is` but tilt forced flat. ``mirrored`` is
         meaningless at zero tilt and is dropped."""
@@ -637,7 +637,9 @@ class GroundShading(Component):
         ]
 
     def _build_trackable_setups(
-        self, configs: Configurations, common: dict[str, Any],
+        self,
+        configs: Configurations,
+        common: dict[str, Any],
     ) -> list[_PVSetup]:
         """Single-axis tracker — pvfactors accepts per-timestep
         surface_tilt / surface_azimuth, so a single setup is enough; the
@@ -649,9 +651,7 @@ class GroundShading(Component):
         self._mirrored = False
         # Placeholder; overridden per-timestep in ``_build_pvfactors_input``.
         self._surface_tilt = 0.0
-        self._surface_azimuth = configs.get_float(
-            "surface_azimuth", default=common["axis_azimuth"]
-        )
+        self._surface_azimuth = configs.get_float("surface_azimuth", default=common["axis_azimuth"])
         self._tracker = _TrackerConfig(
             axis_tilt=configs.get_float("axis_tilt", default=0.0),
             axis_azimuth=common["axis_azimuth"],
@@ -669,7 +669,9 @@ class GroundShading(Component):
         ]
 
     def _build_as_is_setups(
-        self, configs: Configurations, common: dict[str, Any],
+        self,
+        configs: Configurations,
+        common: dict[str, Any],
     ) -> list[_PVSetup]:
         """Fixed-tilt rows. When ``mirrored = true`` the array is modeled as
         two sub-arrays tilted in opposite directions and offset by half a
@@ -834,15 +836,11 @@ class GroundShading(Component):
             return self._publish_open_sky(data, publish=publish)
         n_t = len(pv_df.index)
         combined_per_t = [
-            _combine_grounds([per_setup_ground[s][t] for s in range(len(per_setup_ground))])
-            for t in range(n_t)
+            _combine_grounds([per_setup_ground[s][t] for s in range(len(per_setup_ground))]) for t in range(n_t)
         ]
         # Concatenate all setups' PV rows per timestep so mirrored arrays
         # show both row sets.
-        pv_rows_per_t = [
-            [row for s in per_setup_pv_rows for row in s[t]]
-            for t in range(n_t)
-        ]
+        pv_rows_per_t = [[row for s in per_setup_pv_rows for row in s[t]] for t in range(n_t)]
 
         if self._segment_ranges:
             seg_factors, seg_ghi = self._aggregate_per_segment(combined_per_t, ghi_open)
@@ -997,6 +995,7 @@ class GroundShading(Component):
         if publish:
             pv_rows = self._last_pv_rows or self._synthesize_pv_rows()
             if pv_rows:
+
                 def _last(col: str, default: float) -> float:
                     series = data.get(col)
                     if series is None or not pd.notna(series.iloc[-1]):
@@ -1091,10 +1090,7 @@ class GroundShading(Component):
         """
         if not self._pv_setups:
             return 1.0
-        middles = [
-            (setup.n_rows - 1) / 2.0 * setup.distance + setup.offset_x
-            for setup in self._pv_setups
-        ]
+        middles = [(setup.n_rows - 1) / 2.0 * setup.distance + setup.offset_x for setup in self._pv_setups]
         center_x = float(np.mean(middles))
         distance = self._pv_setups[0].distance
         bay_lo = center_x - distance / 2.0
@@ -1134,10 +1130,7 @@ class GroundShading(Component):
         for the last timestep, used to project shadow lines."""
         if not self._plot_progress or self._plot_config is None:
             return
-        if (
-            self._last_plot_ts is not None
-            and (ts - self._last_plot_ts) < self._plot_config.interval
-        ):
+        if self._last_plot_ts is not None and (ts - self._last_plot_ts) < self._plot_config.interval:
             return
         self._last_plot_ts = ts
         try:
@@ -1217,10 +1210,7 @@ class GroundShading(Component):
         # left/right edges of the view. For mirrored arrays the per-setup
         # middles average to the same point.
         if self._pv_setups:
-            middles = [
-                (setup.n_rows - 1) / 2.0 * setup.distance + setup.offset_x
-                for setup in self._pv_setups
-            ]
+            middles = [(setup.n_rows - 1) / 2.0 * setup.distance + setup.offset_x for setup in self._pv_setups]
             center_x = float(np.mean(middles))
         else:
             center_x = 0.0
@@ -1234,7 +1224,10 @@ class GroundShading(Component):
         # readable ground reference. Drawn behind the shadow projection lines
         # and the qinc-colored segments via zorder.
         ax.axhline(
-            y=0.0, color="black", linewidth=0.8, zorder=0.5,
+            y=0.0,
+            color="black",
+            linewidth=0.8,
+            zorder=0.5,
         )
 
         # --- Ground at y=0, colored by qinc ---------------------------------
@@ -1253,14 +1246,11 @@ class GroundShading(Component):
         # Project each PV row endpoint (px, py) to where the line from the
         # sun through that point meets y=0. In the 2-D cross-section
         # perpendicular to the row axis the ground-x of the shadow is:
-        #   shadow_x = px - py · tan(zenith) · sin(sun_az − axis_az)
+        #   shadow_x = px - py · tan(zenith) · sin(sun_az - axis_az)
         # Drawn as thin dashed gray lines so the qinc/PV layers stay legible.
         sun_zen, sun_az, axis_az = sun_state
         if axis_az is not None and sun_zen < _ZENITH_DAYTIME_LIMIT and pv_rows:
-            sun_x_per_y = float(
-                np.tan(np.radians(sun_zen))
-                * np.sin(np.radians(sun_az - axis_az))
-            )
+            sun_x_per_y = float(np.tan(np.radians(sun_zen)) * np.sin(np.radians(sun_az - axis_az)))
             seen: set[tuple[float, float]] = set()
             for seg in pv_rows:
                 for endpoint in (seg[0], seg[1]):
@@ -1273,8 +1263,12 @@ class GroundShading(Component):
                     seen.add(key)
                     shadow_x = px - py * sun_x_per_y
                     ax.plot(
-                        [rx(px), rx(shadow_x)], [py, 0.0],
-                        color="gray", linewidth=0.6, linestyle="--", alpha=0.45,
+                        [rx(px), rx(shadow_x)],
+                        [py, 0.0],
+                        color="gray",
+                        linewidth=0.6,
+                        linestyle="--",
+                        alpha=0.45,
                         zorder=1.5,
                     )
 
@@ -1283,7 +1277,8 @@ class GroundShading(Component):
             ax.plot(
                 [rx(seg[0][0]), rx(seg[1][0])],
                 [seg[0][1], seg[1][1]],
-                color="black", linewidth=2,
+                color="black",
+                linewidth=2,
             )
 
         # --- Soil mesh cross-section: full ground rectangle + plant block ---
@@ -1303,21 +1298,33 @@ class GroundShading(Component):
 
             soil_left_plot = rx(ground_left)
             soil_width_plot = rx(ground_right) - soil_left_plot
-            ax.add_patch(Rectangle(
-                (soil_left_plot, -mesh.height),
-                soil_width_plot, mesh.height,
-                facecolor="saddlebrown", edgecolor="saddlebrown",
-                alpha=0.18, linewidth=1.0, zorder=0,
-            ))
+            ax.add_patch(
+                Rectangle(
+                    (soil_left_plot, -mesh.height),
+                    soil_width_plot,
+                    mesh.height,
+                    facecolor="saddlebrown",
+                    edgecolor="saddlebrown",
+                    alpha=0.18,
+                    linewidth=1.0,
+                    zorder=0,
+                )
+            )
 
             plant_left_plot = rx(plant_left)
             plant_width_plot = rx(plant_right) - plant_left_plot
-            ax.add_patch(Rectangle(
-                (plant_left_plot, -mesh.plant_height),
-                plant_width_plot, mesh.plant_height,
-                facecolor="forestgreen", edgecolor="darkgreen",
-                alpha=0.35, linewidth=1.2, zorder=1,
-            ))
+            ax.add_patch(
+                Rectangle(
+                    (plant_left_plot, -mesh.plant_height),
+                    plant_width_plot,
+                    mesh.plant_height,
+                    facecolor="forestgreen",
+                    edgecolor="darkgreen",
+                    alpha=0.35,
+                    linewidth=1.2,
+                    zorder=1,
+                )
+            )
 
         # --- Static window: locked at activate so PNG dimensions stay stable
         ax.set_xlim(-self._plot_x_half, +self._plot_x_half)

@@ -150,7 +150,7 @@ class System(lories.System):
 
     def _on_weather_received(self, weather: pd.DataFrame) -> None:
         predictions = self._predict(weather.dropna(axis="columns"))
-        timestamp = predictions.index[0]
+        timestamp = predictions.index[0]  # noqa: F841  (used by commented-out channel-update block below)
 
         # def update_channel(channel: Channel, column: str) -> None:
         #     if column in predictions.columns:

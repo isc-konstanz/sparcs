@@ -292,11 +292,7 @@ class Genuchten(SoilModel):
         # hPa. Conversion: `alpha` is in cm⁻¹ by van Genuchten convention,
         # so 1/alpha is in cm; the leading 0.01 takes cm → m.
         u = se ** (-1.0 / self.m) - 1.0
-        return (
-            (0.01 / (self.n * self.m * self.alpha))
-            * u ** ((1.0 / self.n) - 1.0)
-            * se ** (-(1.0 / self.m) - 1.0)
-        )
+        return (0.01 / (self.n * self.m * self.alpha)) * u ** ((1.0 / self.n) - 1.0) * se ** (-(1.0 / self.m) - 1.0)
 
     def _se_from_theta(self, theta: Any) -> Any:
         return (theta - self.theta_r) / (self.theta_s - self.theta_r)
@@ -306,7 +302,7 @@ class Genuchten(SoilModel):
 
     def _water_column_from_se(self, se: Any) -> Any:
         # Magnitude of the (negative) pressure head in cm of water column.
-        # van Genuchten: |h| = (1/α) · (Se^(-1/m) − 1)^(1/n). The previous
+        # van Genuchten: |h| = (1/α) · (Se^(-1/m) - 1)^(1/n). The previous
         # ``sign(x) * abs(x)`` wrappers were no-ops for physical Se ∈ (0,1)
         # (always ≥ 0) and would have returned garbage for negative inputs;
         # the clip below makes the contract explicit.
@@ -372,7 +368,7 @@ class BrooksCorey(SoilModel):
     theta_r: float
     theta_s: float
     alpha: float
-    n: float          # = λ (pore-size index)
+    n: float  # = λ (pore-size index)
     k_s: float
     bpar: float
 
@@ -388,7 +384,7 @@ class BrooksCorey(SoilModel):
         self.theta_r = theta_r
         self.theta_s = theta_s
         self.alpha = alpha
-        self.n = n                       # pore-size index λ
+        self.n = n  # pore-size index λ
         self.k_s = k_s
         self.bpar = bpar
         # Mualem-Brooks-Corey conductivity exponent: 2/λ + L + 2
@@ -421,7 +417,7 @@ class BrooksCorey(SoilModel):
         # Se is clipped to (0, 1]; above air-entry h_b the model defines
         # K = K_s exactly, which the formula recovers at Se = 1.
         se_eff = np.clip(np.asarray(se, dtype=float), 1.0e-12, 1.0)
-        return self.k_s * se_eff ** self._k_exp
+        return self.k_s * se_eff**self._k_exp
 
     # -- diffusivity helper for the PDE ---------------------------------------
 
@@ -493,10 +489,7 @@ def _canonical_model_name(name: Optional[str]) -> str:
     key = (name or DEFAULT_SOIL_MODEL).strip().lower().replace(" ", "_")
     canonical = _MODEL_ALIASES.get(key)
     if canonical is None:
-        raise ValueError(
-            f"Unknown soil model {name!r}. Available: "
-            f"{sorted(set(_MODEL_ALIASES.values()))}"
-        )
+        raise ValueError(f"Unknown soil model {name!r}. Available: " f"{sorted(set(_MODEL_ALIASES.values()))}")
     return canonical
 
 
@@ -532,7 +525,5 @@ def create_soil_model(model: Optional[str] = None, **params: Any) -> SoilModel:
     kwargs = {k: v for k, v in params.items() if k in accepted}
     missing = [p for p in ("theta_r", "theta_s", "k_s") if p in accepted and p not in kwargs]
     if missing:
-        raise ValueError(
-            f"Soil model {canonical!r} missing required parameter(s): {missing}"
-        )
+        raise ValueError(f"Soil model {canonical!r} missing required parameter(s): {missing}")
     return cls(**kwargs)

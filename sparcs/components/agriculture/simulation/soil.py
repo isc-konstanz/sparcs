@@ -12,58 +12,45 @@ import logging
 import os
 import sys
 import threading
-from dataclasses import dataclass
 from typing import Any, Optional
 
-import gmsh
 import matplotlib
 import matplotlib.pyplot as plt
 import meshio
-from fipy import CellVariable, DiffusionTerm, FaceVariable, TransientTerm
-from fipy.meshes import Gmsh2D
-from fipy.tools import serialComm
 from matplotlib.collections import LineCollection, PolyCollection
 from scipy.interpolate import griddata
 
 import numpy as np
 import pandas as pd
-
-from . import plot_render
-from lories import Component, Constant
+from lories import Constant
 from lories.components.weather import Weather
 from lories.typing import Configurations
-from lories.util import to_timedelta
-from sparcs.components.agriculture.soil import (
-    DEFAULT_SOIL_MODEL,
-    SoilModel,
-    create_soil_model,
-)
-from ._soil import ensure_mesh
+
+from . import plot_render
 
 logging.getLogger("fipy").setLevel(logging.WARNING)
 np.seterr(all="ignore")
 
 # Shared dataclasses, helpers, and the PDE core live in `_soil`. Re-imported
 # here so external code (``from .soil import MeshConfig`` etc.) keeps working.
-from ._soil import (  # noqa: F401
+from ._soil import (  # noqa: E402, F401
     RHO_W,
-    SE_MIN,
     SE_MAX,
-    SolveResult,
+    SE_MIN,
     ClipDiagnostics,
+    FeddesConfig,
     FluxRates,
     MeshConfig,
-    FeddesConfig,
-    PondingConfig,
     PDEConfig,
-    ProbeSpec,
     PlotConfig,
+    PondingConfig,
+    ProbeSpec,
     SoilBase,
     SoilPDECore,
+    SolveResult,
+    create_mesh,
     resolve_probes,
     top_segment_names_from_mesh,
-    create_mesh,
-    ensure_mesh,
 )
 
 
@@ -92,7 +79,7 @@ class SoilSimulation(SoilBase):
     WATER_RUNOFF = Constant(float, "water_runoff", "Rejected Top Influx (Runoff)", "kg/(m^2*h)")
     WATER_DEMAND_UNMET = Constant(float, "water_demand_unmet", "Unmet Evap+Transp Demand", "kg/(m^2*h)")
     # Global mass-balance check. The existing WATER_BOTTOM channel uses
-    # the integral closure formula (inflow − outflow − Δstorage), which
+    # the integral closure formula (inflow - outflow - Δstorage), which
     # is zero by construction; ``WATER_BALANCE_RESIDUAL`` reports the
     # gap against an INDEPENDENT bottom-face drainage estimate from
     # K(Se_bot)·ρ_w. Close to zero (compared to WATER_BOTTOM) → the
@@ -101,7 +88,10 @@ class SoilSimulation(SoilBase):
     # / non-convergence is moving mass the integral routine couldn't
     # account for — flag for investigation.
     WATER_BALANCE_RESIDUAL = Constant(
-        float, "water_balance_residual", "Mass-Balance Residual (integral − direct)", "kg/(m^2*h)",
+        float,
+        "water_balance_residual",
+        "Mass-Balance Residual (integral - direct)",
+        "kg/(m^2*h)",
     )
 
     _mesh_filename: str
@@ -167,7 +157,9 @@ class SoilSimulation(SoilBase):
         self._plot_progress = configs.get_bool("plot_progress", default=True)
         logging.info(
             "%s: plot_progress=%s (configs keys: %s)",
-            self.name, self._plot_progress, sorted(k for k in configs),
+            self.name,
+            self._plot_progress,
+            sorted(k for k in configs),
         )
         if self._plot_progress:
             default_plot_dir = str(configs.dirs.data.joinpath("soil_simulation"))
@@ -185,8 +177,11 @@ class SoilSimulation(SoilBase):
         self._pde = self._build_pde()
         logging.info(
             "%s: soil model = %s (k_s=%.3e m/s, theta_r=%.3f, theta_s=%.3f)",
-            self.name, self._soil_model.__class__.__name__,
-            self._ode_config.k_s, self._ode_config.theta_r, self._ode_config.theta_s,
+            self.name,
+            self._soil_model.__class__.__name__,
+            self._ode_config.k_s,
+            self._ode_config.theta_r,
+            self._ode_config.theta_s,
         )
 
         self._configure_probes(configs)
@@ -211,7 +206,9 @@ class SoilSimulation(SoilBase):
                 elapsed = self._ode_config.cold_start
                 logging.info(
                     "%s: cold start spin-up — %s with weather at %s",
-                    self.name, elapsed, now,
+                    self.name,
+                    elapsed,
+                    now,
                 )
             else:
                 elapsed = now - self._last_simulated_at
@@ -243,7 +240,11 @@ class SoilSimulation(SoilBase):
 
             delta_storage = self._total_water() - storage_before
             diagnostics = self._record_diagnostics(
-                rates, now, delta_storage, elapsed_s, clip_total,
+                rates,
+                now,
+                delta_storage,
+                elapsed_s,
+                clip_total,
             )
             self._save_state(now)
             return diagnostics
@@ -360,13 +361,13 @@ class SoilSimulation(SoilBase):
             if transp > 0.0:
                 seg_transp[name] = transp
 
-        flow_m3s = self.context._irrigation_flow_lpm / 60_000.0   # l/min → m³/s
+        flow_m3s = self.context._irrigation_flow_lpm / 60_000.0  # l/min → m³/s
 
         rain_flux = 0.0
         if elapsed_s > 0 and Weather.PRECIPITATION in et_data.columns:
             precip_mm = et_data[Weather.PRECIPITATION].iloc[-1]
             if pd.notna(precip_mm) and precip_mm > 0:
-                rain_flux = float(precip_mm) / elapsed_s   # mm/s == kg/(m²·s)
+                rain_flux = float(precip_mm) / elapsed_s  # mm/s == kg/(m²·s)
 
         return FluxRates(
             seg_evap=seg_evap,
@@ -399,10 +400,7 @@ class SoilSimulation(SoilBase):
             if plot_interval is None:
                 return
             sim_t = sim_t0 + pd.Timedelta(seconds=t_offset)
-            if (
-                self._last_plot_simtime is None
-                or (sim_t - self._last_plot_simtime) >= plot_interval
-            ):
+            if self._last_plot_simtime is None or (sim_t - self._last_plot_simtime) >= plot_interval:
                 self._render_progress_safe(sim_t)
 
         result = self._pde.walk_window(
@@ -419,12 +417,16 @@ class SoilSimulation(SoilBase):
                 "%s: held state through %.1fs of a %.1fs window (substeps "
                 "unsolvable at dt_min) — mass-balance diagnostics exclude "
                 "the skipped slices.",
-                self.name, result.skipped_s, window_s,
+                self.name,
+                result.skipped_s,
+                window_s,
             )
         if result.retries:
             logging.debug(
                 "%s: adaptive walk completed window=%.1fs with %d retry(s)",
-                self.name, window_s, result.retries,
+                self.name,
+                window_s,
+                result.retries,
             )
         return window_s
 
@@ -463,7 +465,8 @@ class SoilSimulation(SoilBase):
         if self._probes:
             logging.info(
                 "%s: registered %d saturation probe(s)",
-                self.name, len(self._probes),
+                self.name,
+                len(self._probes),
             )
 
     def _register_probe(self, probe: ProbeSpec) -> None:
@@ -608,9 +611,7 @@ class SoilSimulation(SoilBase):
         # first draw — pre-empt that by switching to Agg whenever we won't
         # be popping a window. savefig() / live HTML still work.
         on_main_thread = threading.current_thread() is threading.main_thread()
-        has_display = sys.platform != "linux" or bool(
-            os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
-        )
+        has_display = sys.platform != "linux" or bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
         can_show = self._plot_config.show and on_main_thread and has_display
 
         if self._plot_config.show and not can_show:
@@ -618,19 +619,22 @@ class SoilSimulation(SoilBase):
             logging.warning(
                 "%s: progress plot 'show' disabled — %s. Use 'live = true' and "
                 "open progress.html in a browser for a live view.",
-                self.name, reason,
+                self.name,
+                reason,
             )
             self._plot_config.show = False
 
         if not can_show and matplotlib.get_backend().lower() not in (
-            "agg", "module://matplotlib_inline.backend_inline",
+            "agg",
+            "module://matplotlib_inline.backend_inline",
         ):
             matplotlib.use("Agg", force=True)
 
         if self._plot_config.show:
             plt.ion()
         fig, ax, norm = plot_render.init_rel_sat_figure(
-            self._mesh_config.width, self._mesh_config.height,
+            self._mesh_config.width,
+            self._mesh_config.height,
         )
         self._plot_fig = fig
         self._plot_ax = ax
@@ -640,7 +644,8 @@ class SoilSimulation(SoilBase):
             self._write_progress_html()
             logging.info(
                 "%s: live progress at file://%s/progress.html (refreshes every 2s)",
-                self.name, self._plot_config.dir,
+                self.name,
+                self._plot_config.dir,
             )
 
     def _write_progress_html(self) -> None:
@@ -671,8 +676,12 @@ class SoilSimulation(SoilBase):
         # Render the figure to PNG once, then fan out to all sinks (channel
         # for database persistence, live overwrite, archived per-frame file).
         png_bytes = plot_render.render_rel_sat_png(
-            self._plot_fig, self._plot_ax, self._plot_norm,
-            self._pde.mesh, self._pde.rel_sat.value, sim_t,
+            self._plot_fig,
+            self._plot_ax,
+            self._plot_norm,
+            self._pde.mesh,
+            self._pde.rel_sat.value,
+            sim_t,
         )
 
         if self._plot_config.show:
