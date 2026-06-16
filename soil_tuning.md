@@ -17,7 +17,7 @@ standalone is kept for offline/iterative use.)
 ## Command
 
 ```powershell
-conda activate lories_sparcs_new
+conda activate <env-with-lories-and-sparcs>   # e.g. lories_sparcs_new on the dev box
 cd sparcs
 python soil_tuning.py test_agri_sim --data-dir ./data/test_agri_sim --end 2017-06-01
 ```
@@ -31,7 +31,7 @@ manual process killing needed).
 | Arg | Default | Purpose |
 |---|---|---|
 | `project` (positional) | — | **Display-only** label. The actual project is selected by `--data-dir`. |
-| `--data-dir <path>` | from `sparcs/conf/settings.conf` | Points the loader at the project's `conf/` and re-reads its `settings.conf`. Required whenever `sparcs/conf/settings.conf` doesn't already point at the project you want to tune. |
+| `--data-dir <path>` | from `sparcs/conf/settings.conf` | Re-points the loader at the project's data dir and re-reads its `settings.conf`. The config layout — **flat** (member configs in the data-dir root) or **nested** (under `conf/`) — is auto-detected via `[systems] flat` in that `settings.conf`, exactly as a normal lories run resolves it; no `conf/` subdir is assumed. Required whenever `sparcs/conf/settings.conf` doesn't already point at the project you want to tune. |
 | `--end <ISO ts>` | `now` (UTC) | Anchor the end of the replay window. **Use this if the project's logged data doesn't reach the current wall clock** — otherwise the window is empty and startup fails with `no weather logged in [...]`. |
 | `--port` | `8051` | Dash port. |
 | `--host` | `127.0.0.1` | Bind address (`0.0.0.0` to expose on the LAN). |
@@ -89,8 +89,8 @@ FiPy from scratch (~30 s cold start per run) but then runs fully parallel.
 
 ## Dependencies
 
-On top of `lories` + `sparcs` (both editable-installed in the
-`lories_sparcs_new` env), the UI needs the full Dash + lories-view stack:
+On top of `lories` + `sparcs` (both installed — editable or otherwise — in
+whichever env you run from), the UI needs the full Dash + lories-view stack:
 
 ```powershell
 pip install "dash>=2.16" dash-bootstrap-components plotly `
@@ -104,8 +104,10 @@ pip install "dash>=2.16" dash-bootstrap-components plotly `
 `dash` **interface type never registers**, and `sparcs.Application(settings)`
 dies with `Unknown interface type 'dash'`.
 
-> Use the **`lories_sparcs_new`** env. The older `lories_sparcs` env is
-> incomplete on this machine (no `lories` installed).
+> Use any env where `lories` + `sparcs` are importable. On the dev box that
+> is **`lories_sparcs_new`** — the older `lories_sparcs` env there is
+> incomplete (no `lories` installed). On a Linux host the env is installed
+> normally, so just activate it.
 
 ## Troubleshooting
 

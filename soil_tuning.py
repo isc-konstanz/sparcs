@@ -76,6 +76,7 @@ except ImportError as e:  # pragma: no cover - friendly bail-out
 import sparcs
 from lories.application.settings import Settings
 from lories.components.weather import Weather
+from lories.core.configs.directories import Directories, Directory
 from sparcs.components.agriculture import Irrigation, SoilMoisture
 from sparcs.components.agriculture.simulation import FieldSimulation, SoilSimulation, plot_render
 from sparcs.components.agriculture.simulation._soil import (
@@ -169,11 +170,14 @@ class TuningJob:
 class TuningRunner:
     """Process-based worker pool + job registry. Thread-safe (parent side).
 
-    Each submitted run gets its own ``mp.Process`` (fork-context, so the
-    children inherit the already-imported sparcs / FiPy state and the
-    cached ``et_data`` / ``seg_et`` DataFrames for free). Workers stream
-    progress back through a single ``mp.Queue`` that a background
-    consumer thread drains into the in-memory job registry.
+    Each submitted run gets its own ``mp.Process``. The pool uses the
+    ``spawn`` start method (forced at module import — see the note there),
+    so every child is a fresh interpreter that re-imports sparcs / FiPy
+    from scratch (~30 s cold start) and receives ``et_data`` / ``seg_et``
+    and the other inputs by pickle across the process boundary rather than
+    by copy-on-write. Workers stream progress back through a single
+    ``mp.Queue`` that a background consumer thread drains into the
+    in-memory job registry.
     """
 
     def __init__(
@@ -227,8 +231,8 @@ class TuningRunner:
             self._jobs[job.job_id] = job
 
         # Build the override PDEConfig in the parent so each child can just
-        # consume it; this also means the child never touches ``self`` and
-        # the queue + cancel event are the only objects crossing the fork.
+        # consume it; this also means the child never touches ``self`` —
+        # only the explicit ``args`` below are pickled across the spawn.
         ode = copy.deepcopy(self.base_pde_config)
         for k, v in params.items():
             if hasattr(ode, k):
@@ -462,14 +466,14 @@ def _worker_simulate(
     ``{"type": "started" | "row" | "png" | "done" | "failed" | "cancelled" | "warn",
        "job_id": ..., ...}``.
 
-    Because we use ``fork`` start-method on macOS/Linux, this function
-    inherits the parent's already-imported sparcs / FiPy state and the
-    captured DataFrames (copy-on-write), so cold-start cost is essentially
-    zero. Each child owns its own matplotlib state, so the cross-thread
+    Because the pool uses the ``spawn`` start-method, this runs in a fresh
+    interpreter that re-imports sparcs / FiPy and receives its inputs by
+    pickle (no inherited parent state), so there is a ~30 s cold start per
+    run. Each child owns its own matplotlib state, so the cross-thread
     render lock from the previous incarnation is no longer needed.
     """
-    # Re-silence numpy / FiPy warnings in the child; np.seterr is per-thread
-    # and forked children get a fresh thread.
+    # Re-silence numpy / FiPy warnings in the child; np.seterr is per-process
+    # and a freshly spawned child starts from the library defaults.
     np.seterr(all="ignore")
     _warnings_module.filterwarnings("ignore", category=RuntimeWarning)
 
@@ -1099,16 +1103,25 @@ def main() -> int:
         if not os.path.isdir(data_path):
             log.error("data dir %s does not exist", data_path)
             return 2
+        # Re-point at the requested project and let lories' own flat/nested
+        # resolution take over instead of assuming a ``conf/`` subdir. This
+        # mirrors ``Settings.__init__``: load the project's settings.conf
+        # override (always at the data-dir root), apply its [directories]
+        # block, and only default conf_dir when it was left unset. Whether
+        # member configs live directly in the data dir (flat) or under
+        # ``conf/`` (nested) is then decided by ``[systems] flat`` in that
+        # settings.conf, which ``Application.configure`` honors — so a flat
+        # Linux project and a nested macOS one both resolve correctly.
         settings.dirs.data = data_path
-        settings.dirs.conf = os.path.join(data_path, "conf")
-        # Re-load the project's settings.conf from the new conf dir so the
-        # [systems] / [simulation] / nested member blocks come from the
-        # right project, not from sparcs/conf/settings.conf.
-        proj_settings = os.path.join(settings.dirs.conf, "settings.conf")
-        if os.path.isfile(proj_settings):
-            settings._load_toml(proj_settings)
-            settings["action"] = "start"  # re-pin in case the file overrode it
-        log.info("overrode data_dir=%s conf_dir=%s", data_path, settings.dirs.conf)
+        settings.dirs.conf = None
+        override_path = os.path.join(settings.dirs.data, settings.name)
+        if os.path.isfile(override_path):
+            settings._load_toml(override_path)
+            settings.dirs.update(settings.get_member(Directories.TYPE, defaults={}))
+        if settings.dirs.conf._dir is None:
+            settings.dirs._conf = Directory(os.path.dirname(override_path), default="conf")
+        settings["action"] = "start"  # re-pin in case the override set it
+        log.info("re-pointed data_dir=%s (flat/nested auto-resolved)", data_path)
 
     app = sparcs.Application(settings)
     app.configure(settings, SparcsSystem)
