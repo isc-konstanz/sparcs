@@ -138,6 +138,15 @@ _PARAM_STEP = {
     "dt_min": 0.1,
 }
 
+# Station weather feeds (e.g. an SCC Modbus weather station) measure
+# illuminance and rain intensity instead of the GHI / precipitation the ET +
+# soil chain consumes. When the logged feed lacks real GHI we synthesize it
+# from illuminance. ``GHI[W/m²] ≈ illuminance[klx] · _GHI_PER_KLX`` — daylight
+# luminous efficacy is ~110–125 lm/W, i.e. ~8 W/m² per klx. This is an
+# approximation (daylight-biased, ignores spectral/zenith effects); tune the
+# factor here if you have a site calibration against a real pyranometer.
+_GHI_PER_KLX = 8.0
+
 # --- job state -------------------------------------------------------------
 
 
@@ -708,6 +717,15 @@ def _find_soil_simulation(app) -> tuple[SoilSimulation, FieldSimulation]:
                         f"SoilSimulation {c.id} parent is " f"{type(parent).__name__}, expected FieldSimulation"
                     )
                 return c, parent
+    # Nothing matched — dump what *did* load so we can tell whether the
+    # system/field chain was built at all (wrong data/conf dir, missing
+    # [systems] scan, disabled component, …) vs. a class-identity mismatch.
+    log.error("no SoilSimulation found — loaded component tree:")
+    if not roots:
+        log.error("  (app.components is empty — no system loaded)")
+    for root in roots:
+        for c in _walk_components(root):
+            log.error("  %-28s  %s", type(c).__name__, getattr(c, "id", "?"))
     raise RuntimeError("no SoilSimulation found in this project")
 
 
@@ -721,6 +739,36 @@ def _load_history(
     weather_df = field_sim.weather.data.from_logger(start=start, end=end)
     if weather_df.empty:
         raise RuntimeError(f"no weather logged in [{start} .. {end}]")
+
+    # Derive the chain inputs the station feed doesn't measure directly. The ET
+    # chain hard-requires ``ghi`` (no default exists for it, unlike
+    # clear_sky_index), and the soil rain flux reads ``precipitation``. A
+    # Modbus station logs ``illuminance`` [klx] and ``precipitation_intensity``
+    # [mm/h] instead, so map those across when the real fields are absent or
+    # all-NaN. Both ``Weather.GHI`` and ``Weather.PRECIPITATION`` are ``str``
+    # subclasses equal to their key, so assigning by the constant targets the
+    # same column the chain later reads via ``df[Weather.GHI]``. No-op on a
+    # genuine Brightsky feed where ghi/precipitation are already populated.
+    if "illuminance" in weather_df.columns and (
+        Weather.GHI not in weather_df.columns or weather_df[Weather.GHI].isna().all()
+    ):
+        weather_df[Weather.GHI] = (weather_df["illuminance"].astype(float) * _GHI_PER_KLX).clip(lower=0.0)
+        log.info(
+            "synthesized %s from illuminance (×%.1f W/m² per klx)",
+            Weather.GHI,
+            _GHI_PER_KLX,
+        )
+
+    if "precipitation_intensity" in weather_df.columns and (
+        Weather.PRECIPITATION not in weather_df.columns or weather_df[Weather.PRECIPITATION].isna().all()
+    ):
+        # intensity [mm/h] over each step → depth [mm] for that step; the chain
+        # converts depth to a rain rate by dividing by the elapsed seconds.
+        step_hours = weather_df.index.to_series().diff().dt.total_seconds().div(3600.0).fillna(0.0)
+        weather_df[Weather.PRECIPITATION] = (weather_df["precipitation_intensity"].astype(float) * step_hours).clip(
+            lower=0.0
+        )
+        log.info("synthesized %s from precipitation_intensity (mm/h × step)", Weather.PRECIPITATION)
 
     # Run the ET / shading chain once (publish=False keeps live channels clean).
     et_data, seg_et = field_sim._run_chain(weather_df.copy(), publish=False)
@@ -1060,12 +1108,24 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="SoilSimulation parameter tuning UI")
     parser.add_argument("project", help="sparcs project name (display only)")
     parser.add_argument(
+        "-c",
+        "--conf-dir",
+        default=None,
+        help=(
+            "path to the app config dir holding settings.conf / logging.conf, "
+            "mirroring the daemon's `sparcs -c <dir> start` (e.g. /etc/sparcs). "
+            "This is where [systems] (scan/flat) and [directories] live; pass it "
+            "on FHS installs where the config is split from the data dir."
+        ),
+    )
+    parser.add_argument(
         "--data-dir",
         default=None,
         help=(
             "absolute or relative path to the project's data dir, e.g. "
-            "./data/test_agri_sim_logged. Required when sparcs/conf/settings.conf "
-            "does not already point at the project you want to tune."
+            "./data/test_agri_sim_logged or /var/lib/sparcs. Overrides the "
+            "data_dir resolved from settings.conf; required when the active "
+            "settings.conf does not already point at the project you want to tune."
         ),
     )
     parser.add_argument(
@@ -1098,30 +1158,62 @@ def main() -> int:
     # progress / failures keep landing in the log.
     _install_log_handler()
     settings["action"] = "start"
+
+    if args.conf_dir:
+        conf_path = os.path.abspath(args.conf_dir)
+        if not os.path.isdir(conf_path):
+            log.error("conf dir %s does not exist", conf_path)
+            return 2
+        # Adopt the app config dir the same way the daemon does with
+        # ``sparcs -c <conf_dir> start``: settings.conf there carries the
+        # [systems] (scan/flat) flags and the [directories] block. Without
+        # this, [systems] scan defaults to false and lories tries to load a
+        # single system from the data-dir root — which on an FHS install
+        # (config in /etc/sparcs, systems under /var/lib/sparcs) finds
+        # nothing, so no SoilSimulation is ever built.
+        settings.dirs.conf = conf_path
+        real_settings = os.path.join(conf_path, settings.name)
+        if os.path.isfile(real_settings):
+            settings._load_toml(real_settings)
+            settings.dirs.update(settings.get_member(Directories.TYPE, defaults={}))
+        settings["action"] = "start"  # re-pin in case settings.conf overrode it
+        log.info("using conf_dir=%s (data_dir now %s)", conf_path, settings.dirs.data)
+
     if args.data_dir:
         data_path = os.path.abspath(args.data_dir)
         if not os.path.isdir(data_path):
             log.error("data dir %s does not exist", data_path)
             return 2
-        # Re-point at the requested project and let lories' own flat/nested
-        # resolution take over instead of assuming a ``conf/`` subdir. This
-        # mirrors ``Settings.__init__``: load the project's settings.conf
-        # override (always at the data-dir root), apply its [directories]
-        # block, and only default conf_dir when it was left unset. Whether
-        # member configs live directly in the data dir (flat) or under
-        # ``conf/`` (nested) is then decided by ``[systems] flat`` in that
-        # settings.conf, which ``Application.configure`` honors — so a flat
-        # Linux project and a nested macOS one both resolve correctly.
         settings.dirs.data = data_path
-        settings.dirs.conf = None
-        override_path = os.path.join(settings.dirs.data, settings.name)
-        if os.path.isfile(override_path):
-            settings._load_toml(override_path)
-            settings.dirs.update(settings.get_member(Directories.TYPE, defaults={}))
-        if settings.dirs.conf._dir is None:
-            settings.dirs._conf = Directory(os.path.dirname(override_path), default="conf")
+        if not args.conf_dir:
+            # Single-dir project (no separate conf dir): let lories' own
+            # flat/nested resolution take over instead of assuming a ``conf/``
+            # subdir. Mirrors ``Settings.__init__``: load the project's
+            # settings.conf override (always at the data-dir root), apply its
+            # [directories] block, and only default conf_dir when left unset.
+            # Whether member configs live directly in the data dir (flat) or
+            # under ``conf/`` (nested) is then decided by ``[systems] flat``,
+            # which ``Application.configure`` honors.
+            settings.dirs.conf = None
+            override_path = os.path.join(settings.dirs.data, settings.name)
+            if os.path.isfile(override_path):
+                settings._load_toml(override_path)
+                settings.dirs.update(settings.get_member(Directories.TYPE, defaults={}))
+            if settings.dirs.conf._dir is None:
+                settings.dirs._conf = Directory(os.path.dirname(override_path), default="conf")
         settings["action"] = "start"  # re-pin in case the override set it
-        log.info("re-pointed data_dir=%s (flat/nested auto-resolved)", data_path)
+        log.info("data_dir=%s (conf_dir=%s)", data_path, settings.dirs.conf)
+
+    # Mirror the daemon's systemd ``WorkingDirectory=<data_dir>`` so that
+    # config-relative paths resolve against the data dir rather than wherever
+    # this script happens to be launched from. The soil mesh is the load-
+    # bearing case: ``[mesh] filename = "./soil.msh"`` is read verbatim and
+    # opened relative to cwd, so without this it is looked for next to
+    # soil_tuning.py instead of in the data dir. Spawned workers inherit cwd.
+    data_dir = str(settings.dirs.data)
+    if os.path.isdir(data_dir):
+        os.chdir(data_dir)
+        log.info("working directory set to %s", data_dir)
 
     app = sparcs.Application(settings)
     app.configure(settings, SparcsSystem)
