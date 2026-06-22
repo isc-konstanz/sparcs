@@ -674,7 +674,10 @@ def _sample_probe_row(
         # Key by channel_id (stable config key) rather than probe.name
         # (verbose, collision-prone across probes with similar names).
         row[f"{probe.channel_id}__se"] = se
-        row[f"{probe.channel_id}__tension"] = float(pde.soil_model.psi_from_se(se))
+        # Matric potential is negative (0 at saturation, more negative as it
+        # dries), matching the tension probes; ``psi_from_se`` returns the
+        # magnitude, so flip the sign.
+        row[f"{probe.channel_id}__tension"] = -abs(float(pde.soil_model.psi_from_se(se)))
     return row
 
 
@@ -901,7 +904,9 @@ def _sensor_tension_series(sensor: SoilMoisture, frame: pd.DataFrame) -> Optiona
 
     measured = _first_usable("water_tension")
     if measured is not None:
-        return measured.dropna().rename(f"{sensor.key} ψ (measured)")
+        # Normalise to the negative matric-potential convention regardless of
+        # how the sensor stored its sign.
+        return (-measured.abs()).dropna().rename(f"{sensor.key} ψ (measured)")
 
     content = _first_usable("water_content")
     if content is not None and sensor.model is not None:
@@ -909,7 +914,7 @@ def _sensor_tension_series(sensor: SoilMoisture, frame: pd.DataFrame) -> Optiona
         # expects volumetric θ in cm³/cm³. ``psi_from_theta`` returns a bare
         # ndarray, so re-attach the timestamp index before returning.
         theta = content.to_numpy() / 100.0
-        psi = np.asarray(sensor.model.psi_from_theta(theta), dtype=float)
+        psi = -np.abs(np.asarray(sensor.model.psi_from_theta(theta), dtype=float))
         series = pd.Series(psi, index=content.index)
         return series.dropna().rename(f"{sensor.key} ψ (calc. from θ)")
 
@@ -1154,7 +1159,13 @@ def build_app(
 
         fig.update_layout(
             xaxis_title="time",
-            yaxis_title="soil water tension ψ  [hPa]",
+            yaxis_title="soil water tension ψ  [hPa]  (0 = wet, -10000 hPa = -1000 kPa)",
+            # Default to the sensors' working band (0 .. ~-1000 kPa). With this
+            # soil's very flat retention curve (n≈1.07) the simulated ψ can
+            # plunge orders of magnitude past -1000 kPa on dry excursions, which
+            # would otherwise flatten the whole comparison; those spikes clip
+            # off the top/bottom here. Zoom out (uirevision keeps it) to see them.
+            yaxis=dict(range=[-12000, 300]),
             legend=dict(orientation="h", y=-0.18),
             margin=dict(l=40, r=20, t=20, b=20),
             template="plotly_white",
