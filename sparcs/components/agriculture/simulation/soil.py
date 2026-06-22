@@ -49,6 +49,7 @@ from ._soil import (  # noqa: E402, F401
     SoilPDECore,
     SolveResult,
     create_mesh,
+    ensure_mesh,
     resolve_probes,
     top_segment_names_from_mesh,
 )
@@ -121,6 +122,11 @@ class SoilSimulation(SoilBase):
             configs.get_member("mesh", defaults={}, ensure_exists=True),
             bay_width=getattr(self.context, "bay_width", None),
         )
+        # Generate the .msh now (idempotent — no-op if it already exists) so the
+        # structure plot and the PDE core below both find it. Without this, a
+        # fresh start with ``plot_structure = true`` crashes in ``_plot_mesh``
+        # (``meshio.read`` of a not-yet-created file) and systemd restart-loops.
+        ensure_mesh(self._mesh_config)
         # Retention params come from the (field-inherited) ``[model]`` block;
         # ``[pde]`` carries only the solver / IC / timestep knobs. ``[model]``
         # is the single source of truth — retention is never read from
