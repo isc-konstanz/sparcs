@@ -124,7 +124,10 @@ class FieldSimulation(Component):
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
-        defaults = Component._build_defaults(configs, strict=True)
+        # Propagate a ``[model]`` block (inherited from the field) on down to
+        # the chain children so the soil simulation shares the field-level
+        # retention ground truth. No-op without a ``[model]`` block.
+        defaults = Component._build_defaults(configs, includes=["model"], strict=True)
 
         self._lai_type = configs.get("lai_type", default="grass")
         if self._lai_type not in _LAI_BY_TYPE:

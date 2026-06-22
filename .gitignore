@@ -153,5 +153,8 @@ conf/*
 
 /assets/
 
+# Generated soil meshes (regenerated from the [mesh] config; never tracked)
+*.msh
+
 # MacOS
 .DS_Store

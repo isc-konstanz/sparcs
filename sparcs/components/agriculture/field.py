@@ -39,7 +39,11 @@ class AgriculturalField(Component):
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
-        defaults = Component._build_defaults(configs, strict=True)
+        # ``includes=["model"]`` lets a field-level ``[model]`` block (the
+        # shared van-Genuchten ground truth) cascade as a default into the soil
+        # sensors, the FieldSimulation, and on down to the soil simulation.
+        # No-op when the field has no ``[model]`` block.
+        defaults = Component._build_defaults(configs, includes=["model"], strict=True)
 
         if configs.has_member(Irrigation.TYPE, includes=True):
             irrigation = Irrigation(self, configs.get_member(Irrigation.TYPE, defaults=defaults), self.soil)

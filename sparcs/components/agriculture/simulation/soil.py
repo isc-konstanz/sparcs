@@ -121,7 +121,21 @@ class SoilSimulation(SoilBase):
             configs.get_member("mesh", defaults={}, ensure_exists=True),
             bay_width=getattr(self.context, "bay_width", None),
         )
-        self._ode_config = PDEConfig(configs.get_member("pde", defaults={}))
+        # Retention params come from the (field-inherited) ``[model]`` block;
+        # ``[pde]`` carries only the solver / IC / timestep knobs. ``[model]``
+        # is the single source of truth — retention is never read from
+        # ``[pde]``. If no ``[model]`` is inherited or defined, fall back to the
+        # built-in van Genuchten defaults (and say so) rather than silently
+        # picking up stray retention params left under ``[pde]``.
+        model_block = configs.get_member("model", defaults={})
+        if not any(k in model_block for k in ("theta_r", "theta_s", "alpha", "n", "k_s")):
+            logging.warning(
+                "%s: no [model] retention params found (field-level [model] not "
+                "inherited?). Using built-in van Genuchten defaults; any retention "
+                "params under [pde] are ignored — move them into a [model] block.",
+                self.name,
+            )
+        self._ode_config = PDEConfig(configs.get_member("pde", defaults={}), model_configs=model_block)
 
         # Evapotranspiration's input + output channels live on the
         # Evapotranspiration sibling now; SoilSimulation only owns its own

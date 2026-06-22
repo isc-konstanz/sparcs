@@ -3,22 +3,29 @@ Soil-tuning UI — standalone Dash app for evaluating SoilSimulation parameter
 choices against the last week of real sensor measurements.
 
 Run:
-    python sparcs/soil_tuning.py <ProjectName> [--port 8051] [--host 0.0.0.0]
+    python sparcs/soil_tuning.py <ProjectName> [--start ISO] [--end ISO]
+        [--port 8051] [--host 0.0.0.0]
 
 Activation gate (per SoilSimulation):
 
     [field_simulation.soil_simulation.testing]
     enabled = true
     history_window = "7d"     # how far back to replay
-    max_workers    = 5        # parallel worker threads
+    max_workers    = <auto>   # optional; default = 3/4 of CPU cores on Linux
     poll_interval  = 2.0      # Dash refresh seconds
 
-Each submit spawns a worker that re-instantiates the FiPy soil core with the
+Each submit queues a worker that re-instantiates the FiPy soil core with the
 overridden PDE parameters, seeds it from the simulation-state snapshot at
 ``now - history_window``, replays the cached week's weather + ET + irrigation,
 samples every configured probe between substeps, and streams the resulting
 trace into the Dash graph as the run progresses. Up to ``max_workers``
 runs in parallel; submitting an (n+1)-th evicts the oldest active one.
+
+A persistent ``ProcessPoolExecutor`` pool is created once at startup.  The
+``spawn`` child workers pay the sparcs / FiPy import cost only once (during
+warm-up, before the user submits anything); subsequent submits queue in
+milliseconds rather than the ~30 s cold-start that a per-submit ``mp.Process``
+incurred.
 
 This file is fully self-contained: it imports the existing FiPy core, the
 PDE-config dataclass, and ``FieldSimulation._run_chain`` from sparcs, but
@@ -28,6 +35,7 @@ does not modify any existing module.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import copy
 import logging
 import multiprocessing as mp
@@ -39,18 +47,15 @@ import uuid
 import warnings as _warnings_module
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from queue import Empty
 from typing import Any, Optional
 
-# Forking from a multi-threaded parent silently deadlocks the child on
-# Python 3.12+ (Flask + Dash + our consumer thread hold locks that no
-# longer get released in the child). ``forkserver`` would normally fix
-# this, but its preload step imports matplotlib / scipy / fipy which all
-# spawn helper threads in the forkserver process itself — defeating the
-# whole point. ``spawn`` is the only safe option here: each child gets
-# a fresh Python interpreter and re-imports sparcs / FiPy from scratch
-# (~30 s startup per child), but the runtime steady state is fully
-# parallel across cores.
+# ``spawn`` is the only safe start method here.  ``fork`` silently deadlocks
+# multi-threaded parents (Flask + Dash + consumer thread hold locks that are
+# never released in the child).  ``forkserver`` preloads matplotlib / scipy /
+# fipy in the forkserver process, which spawns helper threads and defeats the
+# whole point.  With a persistent ``ProcessPoolExecutor`` each worker pays the
+# sparcs / FiPy import cost exactly once at pool warm-up (app startup), so the
+# per-submit cold start is gone: submits queue in milliseconds.
 os.environ.setdefault("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES")
 try:
     mp.set_start_method("spawn", force=True)
@@ -157,36 +162,95 @@ class TuningJob:
     label: str
     status: str = "pending"  # pending | running | done | failed | cancelled
     error: Optional[str] = None
-    # ``df_buffer`` is rebuilt in the parent from streamed row dicts so we
-    # never have to pickle a growing DataFrame across the process boundary.
+    # ``rows`` accumulates raw dicts streamed from the worker; the DataFrame
+    # is built on demand in _build_figure (once per poll) rather than
+    # incrementally, avoiding O(n²) reconstruction on the consumer thread.
     rows: list[dict[str, Any]] = field(default_factory=list)
-    df_buffer: pd.DataFrame = field(default_factory=pd.DataFrame)
-    # ``cancel_event`` is an mp.Event so the child can poll
-    # ``cancel_event.is_set()`` between substeps.
+    # ``cancel_event`` slot kept for API compatibility; actual cancellation
+    # goes through the Manager cancel_dict in the warm pool.
     cancel_event: Any = None
     progress: float = 0.0
-    # ``process`` is the mp.Process running the worker for this job.
-    process: Any = None
-    # Latest 2-D Se snapshot rendered as PNG bytes by the worker so the
-    # Dash UI can show the spatial saturation field for the most recently
-    # started run. ``latest_png_ts`` is the simulated timestamp of that
-    # frame (used as a cache-buster for the <img src>).
-    latest_png: Optional[bytes] = None
-    latest_png_ts: Optional[pd.Timestamp] = None
-    submitted_at: pd.Timestamp = field(default_factory=lambda: pd.Timestamp.utcnow())
+    # ``future`` is the concurrent.futures.Future for this job's worker task.
+    future: Any = None
+    submitted_at: pd.Timestamp = field(default_factory=lambda: pd.Timestamp.now(tz="UTC"))
+
+
+# --- worker-process globals (populated by _worker_init) -------------------
+
+_W_MESH_CONFIG: Any = None
+_W_BASE_PDE_CONFIG: Any = None
+_W_PROBES: Any = None
+_W_ET_DATA: Any = None
+_W_SEG_ET: Any = None
+_W_IRRIGATION: Any = None
+_W_INITIAL_BLOB: Any = None
+_W_RENDER_STRIDE: int = 4
+_W_PROGRESS_Q: Any = None  # Manager().Queue()
+_W_PNG_STORE: Any = None  # Manager().dict()  job_id -> (png_bytes, ts)
+_W_CANCEL_DICT: Any = None  # Manager().dict()  job_id -> bool
+
+
+def _worker_init(
+    mesh_config,
+    base_pde_config,
+    probes,
+    et_data,
+    seg_et,
+    irrigation,
+    initial_blob,
+    render_stride,
+    progress_q,
+    png_store,
+    cancel_dict,
+) -> None:
+    """Initialise the per-worker globals.  Called once per worker process by
+    ``ProcessPoolExecutor`` before any task is dispatched to it.  Pays the
+    sparcs / FiPy import cost here so subsequent job submissions start in ms.
+    """
+    global _W_MESH_CONFIG, _W_BASE_PDE_CONFIG, _W_PROBES
+    global _W_ET_DATA, _W_SEG_ET, _W_IRRIGATION, _W_INITIAL_BLOB
+    global _W_RENDER_STRIDE, _W_PROGRESS_Q, _W_PNG_STORE, _W_CANCEL_DICT
+
+    np.seterr(all="ignore")
+    _warnings_module.filterwarnings("ignore", category=RuntimeWarning)
+
+    _W_MESH_CONFIG = mesh_config
+    _W_BASE_PDE_CONFIG = base_pde_config
+    _W_PROBES = probes
+    _W_ET_DATA = et_data
+    _W_SEG_ET = seg_et
+    _W_IRRIGATION = irrigation
+    _W_INITIAL_BLOB = initial_blob
+    _W_RENDER_STRIDE = render_stride
+    _W_PROGRESS_Q = progress_q
+    _W_PNG_STORE = png_store
+    _W_CANCEL_DICT = cancel_dict
+
+
+def _worker_ping() -> bool:
+    """No-op warm-up task.  Submitting max_workers of these causes all pool
+    workers to spawn and run _worker_init (importing sparcs/FiPy) before the
+    user has clicked submit."""
+    return True
 
 
 class TuningRunner:
-    """Process-based worker pool + job registry. Thread-safe (parent side).
+    """Persistent warm worker pool + job registry.  Thread-safe (parent side).
 
-    Each submitted run gets its own ``mp.Process``. The pool uses the
-    ``spawn`` start method (forced at module import — see the note there),
-    so every child is a fresh interpreter that re-imports sparcs / FiPy
-    from scratch (~30 s cold start) and receives ``et_data`` / ``seg_et``
-    and the other inputs by pickle across the process boundary rather than
-    by copy-on-write. Workers stream progress back through a single
-    ``mp.Queue`` that a background consumer thread drains into the
-    in-memory job registry.
+    A ``ProcessPoolExecutor`` (``spawn`` context) is created once in
+    ``__init__``; ``max_workers`` warm-up pings are submitted immediately so
+    every worker pays the sparcs / FiPy import cost at app startup rather than
+    on the first user submit.  Subsequent submits queue in milliseconds.
+
+    Constant per-run inputs (mesh_config, base PDEConfig, probes, et_data,
+    seg_et, irrigation, initial_blob, render_stride) are shipped to each
+    worker exactly once via ``initargs``.  Only the small per-job payload
+    (job_id, label, params) crosses the process boundary per submit.
+
+    Progress messages and PNG frames travel through Manager proxies
+    (manager.Queue / manager.dict) which are picklable into spawn workers.
+    PNG frames bypass the row queue entirely — the worker writes directly
+    into a shared ``png_store`` dict, keeping large blobs off the message path.
     """
 
     def __init__(
@@ -213,10 +277,38 @@ class TuningRunner:
         self.render_stride = render_stride
         self._lock = threading.Lock()
         self._jobs: "OrderedDict[str, TuningJob]" = OrderedDict()
-        # Single queue shared by every worker process. Each message is a
-        # dict tagged with ``type`` (row / png / done / failed / cancelled
-        # / warn) plus the job_id.
-        self._progress_q: mp.Queue = mp.Queue()
+
+        # Manager proxies are picklable into spawn workers; plain mp.Queue /
+        # mp.Event are not (they must be inherited, not pickled).
+        self._manager = mp.Manager()
+        self._progress_q = self._manager.Queue()
+        self._png_store = self._manager.dict()  # job_id -> (png_bytes, ts)
+        self._cancel_dict = self._manager.dict()  # job_id -> bool
+
+        self._executor = concurrent.futures.ProcessPoolExecutor(
+            max_workers=max_workers,
+            mp_context=mp.get_context("spawn"),
+            initializer=_worker_init,
+            initargs=(
+                mesh_config,
+                base_pde_config,
+                probes,
+                et_data,
+                seg_et,
+                irrigation,
+                initial_blob,
+                render_stride,
+                self._progress_q,
+                self._png_store,
+                self._cancel_dict,
+            ),
+        )
+
+        # Warm up all workers now so the first user submit is fast.
+        warm_futs = [self._executor.submit(_worker_ping) for _ in range(max_workers)]
+        concurrent.futures.wait(warm_futs)
+        log.info("warm pool ready (%d workers)", max_workers)
+
         self._shutdown = threading.Event()
         self._consumer = threading.Thread(
             target=self._consume_progress,
@@ -230,109 +322,84 @@ class TuningRunner:
     def submit(self, params: dict[str, float], label: str = "") -> TuningJob:
         with self._lock:
             self._evict_if_full_locked()
-            cancel_event = mp.Event()
             job = TuningJob(
                 job_id=uuid.uuid4().hex[:8],
                 params=dict(params),
                 label=label or self._auto_label(params),
-                cancel_event=cancel_event,
             )
             self._jobs[job.job_id] = job
+            self._cancel_dict[job.job_id] = False
 
-        # Build the override PDEConfig in the parent so each child can just
-        # consume it; this also means the child never touches ``self`` —
-        # only the explicit ``args`` below are pickled across the spawn.
-        ode = copy.deepcopy(self.base_pde_config)
-        for k, v in params.items():
-            if hasattr(ode, k):
-                setattr(ode, k, float(v))
+        future = self._executor.submit(_worker_run_job, job.job_id, job.label, params)
+        job.future = future
 
-        proc = mp.Process(
-            target=_worker_simulate,
-            name=f"tune-{job.job_id}",
-            args=(
-                job.job_id,
-                job.label,
-                self.mesh_config,
-                ode,
-                self.probes,
-                self.et_data,
-                self.seg_et,
-                self.irrigation,
-                self.initial_blob,
-                self.render_stride,
-                self._progress_q,
-                cancel_event,
-            ),
-            daemon=True,
-        )
-        proc.start()
-        job.process = proc
-        log.info("[%s] spawned worker pid=%d (%s)", job.job_id, proc.pid, job.label)
+        def _on_done(fut: concurrent.futures.Future) -> None:
+            if fut.cancelled():
+                return
+            exc = fut.exception()
+            if exc is None:
+                return
+            with self._lock:
+                j = self._jobs.get(job.job_id)
+                if j is None or j.status not in ("pending", "running"):
+                    return
+                j.status = "failed"
+                j.error = (
+                    f"worker raised {type(exc).__name__}: {exc} — "
+                    "if this is BrokenProcessPool the pool is dead; restart the app."
+                )
+            log.error("[%s] future failed: %s", job.job_id, j.error)
+
+        future.add_done_callback(_on_done)
+        log.info("queued job %s (%s)", job.job_id, job.label)
         return job
 
     def cancel(self, job_id: str) -> None:
         with self._lock:
-            job = self._jobs.get(job_id)
-        if job is not None and job.cancel_event is not None:
-            job.cancel_event.set()
+            if job_id in self._cancel_dict:
+                self._cancel_dict[job_id] = True
 
     def cancel_all(self) -> None:
         with self._lock:
-            jobs = list(self._jobs.values())
-        for j in jobs:
-            if j.cancel_event is not None:
-                j.cancel_event.set()
+            for jid in list(self._cancel_dict.keys()):
+                self._cancel_dict[jid] = True
 
     def jobs(self) -> list[TuningJob]:
         with self._lock:
             return list(self._jobs.values())
 
     def latest_render_job(self) -> Optional[TuningJob]:
-        """The job whose 2-D Se panel should be shown — by default the
-        most recently submitted run that has produced at least one frame.
-        Falls back to any job with a frame if the latest hasn't rendered
-        yet."""
+        """The job whose 2-D Se panel should be shown — the most recently
+        submitted run that has an entry in the png-store.  Falls back to any
+        job with a frame if the latest hasn't rendered yet."""
         with self._lock:
             jobs = list(self._jobs.values())
+            png_keys = set(self._png_store.keys())
         candidates = sorted(
-            (j for j in jobs if j.latest_png is not None),
+            (j for j in jobs if j.job_id in png_keys),
             key=lambda j: j.submitted_at,
             reverse=True,
         )
         return candidates[0] if candidates else None
 
     def shutdown(self) -> None:
-        self.cancel_all()
+        # Set all cancel flags so in-flight workers exit cleanly.
+        try:
+            self.cancel_all()
+        except Exception:
+            pass
         self._shutdown.set()
-        with self._lock:
-            procs = [j.process for j in self._jobs.values() if j.process is not None]
-        # Ask nicely, then escalate: terminate -> join -> kill. Without the
-        # join+kill a worker mid-FiPy-solve can outlive the parent and you'd
-        # have to kill it by hand.
-        for p in procs:
-            try:
-                if p.is_alive():
-                    p.terminate()
-            except Exception:
-                pass
-        for p in procs:
-            try:
-                p.join(timeout=3)
-                if p.is_alive():
-                    p.kill()
-                    p.join(timeout=2)
-            except Exception:
-                pass
-        # Let the consumer thread see the shutdown flag and exit, then tear
-        # the queue down so its background feeder thread can't block our exit.
+        try:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
         try:
             self._consumer.join(timeout=2)
         except Exception:
             pass
+        # Tear down the Manager last (proxy objects become invalid after this).
         try:
-            self._progress_q.close()
-            self._progress_q.cancel_join_thread()
+            self._manager.shutdown()
         except Exception:
             pass
 
@@ -343,10 +410,7 @@ class TuningRunner:
         while len(active) >= self.max_workers:
             oldest = active.pop(0)
             log.info("evicting oldest active job %s (%s)", oldest.job_id, oldest.label)
-            if oldest.cancel_event is not None:
-                oldest.cancel_event.set()
-            # mp.Event poll inside the child happens between substeps, so
-            # the worker exits within a sub-second.
+            self._cancel_dict[oldest.job_id] = True
 
     def _auto_label(self, params: dict[str, float]) -> str:
         base = {k: getattr(self.base_pde_config, k) for k in _PARAMS}
@@ -361,58 +425,13 @@ class TuningRunner:
         while not self._shutdown.is_set():
             try:
                 msg = self._progress_q.get(timeout=0.5)
-            except Empty:
-                # Timed out on the queue — good moment to sweep for any
-                # children that exited without pushing a final status.
-                self._reap_exited_workers()
+            except Exception:
+                # Covers both Empty (normal timeout) and proxy errors.
                 continue
-            except (EOFError, OSError):
-                return
             try:
                 self._apply_progress(msg)
             except Exception:
                 log.exception("progress consumer failed on %s", msg)
-
-    def _reap_exited_workers(self) -> None:
-        """Watchdog: any job whose worker process has terminated without
-        sending a ``done`` / ``failed`` / ``cancelled`` message is flagged
-        ``failed`` with the process exit code so the runs table stops
-        showing it as ``running`` indefinitely.
-
-        Common causes for this path are hard exits the worker can't
-        intercept: an OS OOM kill or an unexpected C-level crash. (The
-        scipy direct-LU aborts that originally motivated this watchdog
-        are gone — SoilPDECore now solves with GMRES + ILU.)
-        """
-        with self._lock:
-            jobs = list(self._jobs.values())
-        for job in jobs:
-            if job.status not in ("pending", "running"):
-                continue
-            proc = job.process
-            if proc is None:
-                continue
-            try:
-                # join(0) reaps the zombie if it's already exited; no-op
-                # for still-running children.
-                proc.join(timeout=0)
-            except Exception:
-                pass
-            if proc.exitcode is None:
-                continue
-            with self._lock:
-                # Re-check under the lock — a "done"/"failed" message
-                # could have landed between the snapshot above and now.
-                if job.status not in ("pending", "running"):
-                    continue
-                job.status = "failed"
-                job.error = (
-                    f"worker exited (code={proc.exitcode}) without final "
-                    "status — likely an OOM kill or an unexpected C-level "
-                    "crash. Check kernel.log / Console.app for a crash "
-                    "report."
-                )
-            log.warning("[%s] %s", job.job_id, job.error)
 
     def _apply_progress(self, msg: dict) -> None:
         job_id = msg.get("job_id")
@@ -424,15 +443,12 @@ class TuningRunner:
             if job is None:
                 return
             if mtype == "row":
+                # Only accumulate the raw dict; DataFrame is built on demand
+                # in _build_figure to avoid O(n²) reconstruction here.
                 job.rows.append(msg["row"])
-                # Rebuild on the parent — cheap for ~10^3 rows.
-                job.df_buffer = pd.DataFrame(job.rows).set_index("timestamp")
                 job.progress = float(msg.get("progress", job.progress))
                 if job.status == "pending":
                     job.status = "running"
-            elif mtype == "png":
-                job.latest_png = msg["png"]
-                job.latest_png_ts = msg.get("ts")
             elif mtype == "started":
                 if job.status == "pending":
                     job.status = "running"
@@ -440,13 +456,17 @@ class TuningRunner:
             elif mtype == "done":
                 job.status = "done"
                 job.progress = 1.0
+                # Clean up cancel flag for completed jobs.
+                self._cancel_dict.pop(job_id, None)
                 log.info("[%s] done (%d rows)", job_id, len(job.rows))
             elif mtype == "failed":
                 job.status = "failed"
                 job.error = msg.get("error", "unknown")
+                self._cancel_dict.pop(job_id, None)
                 log.warning("[%s] failed: %s", job_id, job.error)
             elif mtype == "cancelled":
                 job.status = "cancelled"
+                self._cancel_dict.pop(job_id, None)
                 log.info("[%s] cancelled", job_id)
             elif mtype == "warn":
                 log.warning("[%s] %s", job_id, msg.get("msg"))
@@ -455,36 +475,37 @@ class TuningRunner:
 # --- worker (child process) ------------------------------------------------
 
 
-def _worker_simulate(
-    job_id: str,
-    label: str,
-    mesh_config,
-    ode: PDEConfig,
-    probes: list,
-    et_data: pd.DataFrame,
-    seg_et: dict,
-    irrigation: pd.Series,
-    initial_blob: Optional[bytes],
-    render_stride: int,
-    progress_q: Any,  # mp.Queue
-    cancel_event: Any,  # mp.Event
-) -> None:
-    """Run one tuning simulation in its own process.
+def _worker_run_job(job_id: str, label: str, params: dict[str, float]) -> None:
+    """Run one tuning simulation in a pool worker.
 
-    Streams progress back through ``progress_q`` as dict messages:
-    ``{"type": "started" | "row" | "png" | "done" | "failed" | "cancelled" | "warn",
-       "job_id": ..., ...}``.
+    Reads constant inputs from the worker-process globals set by
+    ``_worker_init``.  Streams progress back through the shared Manager queue
+    and writes PNG frames directly into the shared Manager png-store dict.
 
-    Because the pool uses the ``spawn`` start-method, this runs in a fresh
-    interpreter that re-imports sparcs / FiPy and receives its inputs by
-    pickle (no inherited parent state), so there is a ~30 s cold start per
-    run. Each child owns its own matplotlib state, so the cross-thread
-    render lock from the previous incarnation is no longer needed.
+    Messages on the queue: ``{"type": "started" | "row" | "done" | "failed" |
+    "cancelled" | "warn", "job_id": ..., ...}``.  PNG frames are NOT queued;
+    they go to the png-store to keep large blobs off the message path.
     """
-    # Re-silence numpy / FiPy warnings in the child; np.seterr is per-process
-    # and a freshly spawned child starts from the library defaults.
+    # Re-silence numpy / FiPy warnings in the child; np.seterr is per-process.
     np.seterr(all="ignore")
     _warnings_module.filterwarnings("ignore", category=RuntimeWarning)
+
+    mesh_config = _W_MESH_CONFIG
+    initial_blob = _W_INITIAL_BLOB
+    probes = _W_PROBES
+    et_data = _W_ET_DATA
+    seg_et = _W_SEG_ET
+    irrigation = _W_IRRIGATION
+    render_stride = _W_RENDER_STRIDE
+    progress_q = _W_PROGRESS_Q
+    png_store = _W_PNG_STORE
+    cancel_dict = _W_CANCEL_DICT
+
+    # Build the per-job PDEConfig from the worker-global base config.
+    ode = copy.deepcopy(_W_BASE_PDE_CONFIG)
+    for k, v in params.items():
+        if hasattr(ode, k):
+            setattr(ode, k, float(v))
 
     def put(payload: dict) -> None:
         payload["job_id"] = job_id
@@ -492,6 +513,8 @@ def _worker_simulate(
             progress_q.put(payload)
         except Exception:
             pass
+
+    cancel = lambda: cancel_dict.get(job_id, False)  # noqa: E731
 
     put({"type": "started"})
 
@@ -515,12 +538,12 @@ def _worker_simulate(
         render_every = max(1, render_stride)
 
         # Initial sample + frame.
-        row0 = _sample_probe_row(pde, timeline[0], ode, probes)
+        row0 = _sample_probe_row(pde, timeline[0], probes)
         put({"type": "row", "row": row0, "progress": 0.0})
-        _push_render(progress_q, job_id, label, fig, ax, norm, pde, timeline[0])
+        _push_render(png_store, job_id, label, fig, ax, norm, pde, timeline[0])
 
         for i in range(1, len(timeline)):
-            if cancel_event.is_set():
+            if cancel():
                 put({"type": "cancelled"})
                 return
 
@@ -537,7 +560,7 @@ def _worker_simulate(
                 seg_et,
                 irrigation,
             )
-            ok, reason = _walk_substeps(pde, rates, elapsed_s, cancel_event)
+            ok, reason = _walk_substeps(pde, rates, elapsed_s, cancel)
             if not ok:
                 if reason == "cancelled":
                     put({"type": "cancelled"})
@@ -545,7 +568,7 @@ def _worker_simulate(
                     put({"type": "failed", "error": reason})
                 return
 
-            row = _sample_probe_row(pde, t_now, ode, probes)
+            row = _sample_probe_row(pde, t_now, probes)
             put(
                 {
                     "type": "row",
@@ -555,7 +578,7 @@ def _worker_simulate(
             )
 
             if i % render_every == 0 or i == len(timeline) - 1:
-                _push_render(progress_q, job_id, label, fig, ax, norm, pde, t_now)
+                _push_render(png_store, job_id, label, fig, ax, norm, pde, t_now)
 
         put({"type": "done", "n_rows": len(timeline)})
     except Exception as e:
@@ -566,7 +589,7 @@ def _walk_substeps(
     pde: SoilPDECore,
     rates: FluxRates,
     window_s: float,
-    cancel_event: Any,
+    cancel: Any,
 ) -> tuple[bool, Optional[str]]:
     """Strict adaptive-dt walk via :meth:`SoilPDECore.walk_window`.
 
@@ -579,7 +602,7 @@ def _walk_substeps(
         rates=rates,
         window_s=window_s,
         accept_at_dt_min=False,
-        cancel=cancel_event.is_set,
+        cancel=cancel,
     )
     if walk.ok:
         return True, None
@@ -638,20 +661,25 @@ def _build_flux_rates(
 def _sample_probe_row(
     pde: SoilPDECore,
     ts: pd.Timestamp,
-    ode: PDEConfig,
     probes: list,
 ) -> dict[str, Any]:
+    # The PDE solves effective saturation Sₑ; convert it straight to matric
+    # tension ψ [hPa] via this run's own retention curve so a tuning run is
+    # judged in the same quantity the tension probes report. ``pde.soil_model``
+    # was built from this job's (possibly overridden) PDEConfig, so the curve
+    # tracks the swept parameters.
     row: dict[str, Any] = {"timestamp": ts}
-    span = ode.theta_s - ode.theta_r
     for probe in probes:
         se = float(pde.sample(probe))
-        row[f"{probe.name}__se"] = se
-        row[f"{probe.name}__theta"] = ode.theta_r + span * se
+        # Key by channel_id (stable config key) rather than probe.name
+        # (verbose, collision-prone across probes with similar names).
+        row[f"{probe.channel_id}__se"] = se
+        row[f"{probe.channel_id}__tension"] = float(pde.soil_model.psi_from_se(se))
     return row
 
 
 def _push_render(
-    progress_q: Any,
+    png_store: Any,
     job_id: str,
     label: str,
     fig: Any,
@@ -660,6 +688,9 @@ def _push_render(
     pde: SoilPDECore,
     sim_t: pd.Timestamp,
 ) -> None:
+    """Render the current Se field and write it directly to the shared
+    png-store dict.  Bypasses the row queue so large PNG blobs never
+    contend with the progress message stream."""
     try:
         png = plot_render.render_rel_sat_png(
             fig,
@@ -670,14 +701,7 @@ def _push_render(
             sim_t,
             title=label,
         )
-        progress_q.put(
-            {
-                "job_id": job_id,
-                "type": "png",
-                "png": png,
-                "ts": sim_t,
-            }
-        )
+        png_store[job_id] = (png, sim_t)
     except Exception:
         # Render is best-effort; bail silently rather than crash the
         # whole simulation.
@@ -738,26 +762,48 @@ def _load_history(
     """Read everything we need to replay the window, without touching live state."""
     weather_df = field_sim.weather.data.from_logger(start=start, end=end)
     if weather_df.empty:
-        raise RuntimeError(f"no weather logged in [{start} .. {end}]")
+        # Probe the full logged extent (no window) so the operator sees what
+        # range *is* available and can pick a valid --start/--end instead of guessing.
+        hint = ""
+        try:
+            logged = field_sim.weather.data.from_logger()
+            if not logged.empty:
+                hint = (
+                    f" - weather is logged in [{logged.index.min()} .. {logged.index.max()}]"
+                    f" ({len(logged)} rows); choose --start/--end inside that range"
+                )
+            else:
+                hint = (
+                    " - the weather logger holds no rows for this project; this deployment may"
+                    " source weather live (Brightsky) and never persist it"
+                )
+        except Exception:
+            log.exception("could not probe the logged weather range")
+        raise RuntimeError(f"no weather logged in [{start} .. {end}]{hint}")
 
-    # Derive the chain inputs the station feed doesn't measure directly. The ET
-    # chain hard-requires ``ghi`` (no default exists for it, unlike
-    # clear_sky_index), and the soil rain flux reads ``precipitation``. A
-    # Modbus station logs ``illuminance`` [klx] and ``precipitation_intensity``
-    # [mm/h] instead, so map those across when the real fields are absent or
-    # all-NaN. Both ``Weather.GHI`` and ``Weather.PRECIPITATION`` are ``str``
+    # The station feed (a) doesn't measure the GHI / precipitation the chain
+    # needs and (b) has sensor dropouts (NaN gaps). ``validate_meteo_inputs``
+    # rejects GHI with *any* NaN — it then falls back to estimating GHI from
+    # cloud_cover, which this feed lacks, and raises — so we must hand it
+    # gap-free forcing. Interpolate short gaps on the continuous fields,
+    # zero-fill rain (a gap means "no rain measured", not an interpolated
+    # value), then derive GHI from illuminance [klx] and precipitation from
+    # intensity [mm/h]. ``Weather.GHI`` / ``Weather.PRECIPITATION`` are ``str``
     # subclasses equal to their key, so assigning by the constant targets the
-    # same column the chain later reads via ``df[Weather.GHI]``. No-op on a
-    # genuine Brightsky feed where ghi/precipitation are already populated.
+    # same column the chain later reads via ``df[Weather.GHI]``. All of this is
+    # a no-op on a genuine, gap-free Brightsky feed that already carries them.
+    rain_cols = [c for c in ("precipitation_intensity", "precipitation_type") if c in weather_df.columns]
+    fill_cols = [c for c in weather_df.select_dtypes(include="number").columns if c not in rain_cols]
+    if fill_cols:
+        weather_df[fill_cols] = weather_df[fill_cols].interpolate(limit_direction="both")
+    for c in rain_cols:
+        weather_df[c] = weather_df[c].astype(float).fillna(0.0)
+
     if "illuminance" in weather_df.columns and (
         Weather.GHI not in weather_df.columns or weather_df[Weather.GHI].isna().all()
     ):
-        weather_df[Weather.GHI] = (weather_df["illuminance"].astype(float) * _GHI_PER_KLX).clip(lower=0.0)
-        log.info(
-            "synthesized %s from illuminance (×%.1f W/m² per klx)",
-            Weather.GHI,
-            _GHI_PER_KLX,
-        )
+        weather_df[Weather.GHI] = (weather_df["illuminance"].astype(float) * _GHI_PER_KLX).clip(lower=0.0).fillna(0.0)
+        log.info("synthesized %s from illuminance (×%.1f W/m² per klx)", Weather.GHI, _GHI_PER_KLX)
 
     if "precipitation_intensity" in weather_df.columns and (
         Weather.PRECIPITATION not in weather_df.columns or weather_df[Weather.PRECIPITATION].isna().all()
@@ -765,8 +811,8 @@ def _load_history(
         # intensity [mm/h] over each step → depth [mm] for that step; the chain
         # converts depth to a rain rate by dividing by the elapsed seconds.
         step_hours = weather_df.index.to_series().diff().dt.total_seconds().div(3600.0).fillna(0.0)
-        weather_df[Weather.PRECIPITATION] = (weather_df["precipitation_intensity"].astype(float) * step_hours).clip(
-            lower=0.0
+        weather_df[Weather.PRECIPITATION] = (
+            (weather_df["precipitation_intensity"].astype(float) * step_hours).clip(lower=0.0).fillna(0.0)
         )
         log.info("synthesized %s from precipitation_intensity (mm/h × step)", Weather.PRECIPITATION)
 
@@ -815,18 +861,59 @@ def _load_history(
     measurements: list[pd.DataFrame] = []
     field_component = field_sim.context  # AgriculturalField
     for child in _walk_components(field_component):
-        if isinstance(child, SoilMoisture):
-            try:
-                m = child.data.from_logger(start=start, end=end)
-            except Exception:
-                log.exception("read failed for %s", child.id)
-                continue
-            if m.empty:
-                continue
-            m.columns = [f"{child.key}.{c}" for c in m.columns]
-            measurements.append(m)
+        if not isinstance(child, SoilMoisture):
+            continue
+        try:
+            m = child.data.from_logger(start=start, end=end)
+        except Exception:
+            log.exception("read failed for %s", child.id)
+            continue
+        if m.empty:
+            continue
+        # Dedupe first; duplicate timestamps from multi-sensor feeds crash the
+        # downstream pd.concat with misaligned indices.
+        m = m[~m.index.duplicated(keep="last")]
+        tension = _sensor_tension_series(child, m)
+        if tension is not None and not tension.empty:
+            measurements.append(tension.to_frame())
 
     return et_data, seg_et, irrigation, initial_blob, measurements
+
+
+def _sensor_tension_series(sensor: SoilMoisture, frame: pd.DataFrame) -> Optional[pd.Series]:
+    """Collapse one soil sensor's logged frame to a single tension series [hPa].
+
+    The reference axis is soil water tension, so each probe is reduced to one
+    ψ series. A directly measured ``water_tension`` column is preferred; when a
+    probe only reports ``water_content`` [%] it is converted through *that
+    probe's own* retention curve (``sensor.model``) and the series is labelled
+    ``(calc. …)`` so it reads as derived rather than measured. Returns ``None``
+    when neither channel carries usable data.
+    """
+
+    def _first_usable(substr: str) -> Optional[pd.Series]:
+        for col in frame.columns:
+            if substr in str(col).lower():
+                series = frame[col].astype(float)
+                if series.notna().any():
+                    return series
+        return None
+
+    measured = _first_usable("water_tension")
+    if measured is not None:
+        return measured.dropna().rename(f"{sensor.key} ψ (measured)")
+
+    content = _first_usable("water_content")
+    if content is not None and sensor.model is not None:
+        # Sensor water content is logged in % (0–100); the retention curve
+        # expects volumetric θ in cm³/cm³. ``psi_from_theta`` returns a bare
+        # ndarray, so re-attach the timestamp index before returning.
+        theta = content.to_numpy() / 100.0
+        psi = np.asarray(sensor.model.psi_from_theta(theta), dtype=float)
+        series = pd.Series(psi, index=content.index)
+        return series.dropna().rename(f"{sensor.key} ψ (calc. from θ)")
+
+    return None
 
 
 # --- Dash UI ----------------------------------------------------------------
@@ -843,6 +930,18 @@ _PALETTE = [
     "#7f7f7f",
     "#bcbd22",
     "#17becf",
+]
+
+# Distinct grays for the dotted reference sensor traces, so multiple sensors
+# stay distinguishable while still reading as "reference" (gray/dotted) against
+# the colored simulated runs.
+_GRAYS = [
+    "#222222",
+    "#777777",
+    "#aaaaaa",
+    "#4d4d4d",
+    "#909090",
+    "#c4c4c4",
 ]
 
 
@@ -871,7 +970,22 @@ def build_app(
     poll_seconds: float,
 ) -> Dash:
     base = runner.base_pde_config
-    measurement_frame = pd.concat(measurements, axis=1).sort_index() if measurements else pd.DataFrame()
+
+    # Compute the hourly-mean sensor reference frame once here; it is static
+    # for the lifetime of the app.  Dedup per frame already done in
+    # _load_history; guard the concat itself against any remaining misalignment.
+    if measurements:
+        try:
+            raw_frame = pd.concat(measurements, axis=1, join="outer").sort_index()
+        except Exception:
+            log.warning("sensor concat failed — falling back to empty frame", exc_info=True)
+            raw_frame = pd.DataFrame()
+        if not raw_frame.empty and isinstance(raw_frame.index, pd.DatetimeIndex):
+            measurement_frame = raw_frame.resample("1h").mean(numeric_only=True)
+        else:
+            measurement_frame = raw_frame
+    else:
+        measurement_frame = pd.DataFrame()
 
     app = Dash(
         __name__,
@@ -886,14 +1000,16 @@ def build_app(
     @app.server.route("/job-png")
     def _job_png():  # noqa: D401
         job_id = request.args.get("id")
+        png_store = runner._png_store
         if job_id:
-            with runner._lock:
-                job = runner._jobs.get(job_id)
+            entry = png_store.get(job_id)
         else:
-            job = runner.latest_render_job()
-        if job is None or job.latest_png is None:
+            render_job = runner.latest_render_job()
+            entry = png_store.get(render_job.job_id) if render_job is not None else None
+        if entry is None:
             return Response(status=204)
-        return Response(job.latest_png, mimetype="image/png")
+        png_bytes, _ts = entry
+        return Response(png_bytes, mimetype="image/png")
 
     controls = dbc.Card(
         dbc.CardBody(
@@ -980,65 +1096,102 @@ def build_app(
                 return f"Cancelled {trig['job']}."
         return no_update
 
-    @app.callback(
-        Output("trace-graph", "figure"),
-        Output("job-table", "children"),
-        Output("state-panel-img", "src"),
-        Output("state-panel-title", "children"),
-        Output("state-panel-caption", "children"),
-        Input("poll", "n_intervals"),
-    )
-    def refresh(_n):
-        jobs = runner.jobs()
+    def _build_figure(jobs: list) -> go.Figure:
         fig = go.Figure()
 
-        for col in measurement_frame.columns:
-            s = measurement_frame[col].dropna()
-            if s.empty:
-                continue
-            fig.add_trace(
-                go.Scatter(
-                    x=s.index,
-                    y=s.values,
-                    name=f"sensor: {col}",
-                    mode="lines",
-                    line=dict(color="#222", width=2, dash="dot"),
-                    opacity=0.85,
-                )
-            )
-
-        for idx, job in enumerate(jobs):
-            color = _PALETTE[idx % len(_PALETTE)]
-            df = job.df_buffer
-            if df.empty:
-                continue
-            theta_cols = [c for c in df.columns if c.endswith("__theta")]
-            for j, col in enumerate(theta_cols):
+        for s_idx, col in enumerate(measurement_frame.columns):
+            # Per-trace guard: one malformed sensor column must never abort
+            # the whole figure — that's what blanks a freshly opened tab.
+            try:
+                s = measurement_frame[col].dropna()
+                if s.empty:
+                    continue
                 fig.add_trace(
                     go.Scatter(
-                        x=df.index,
-                        y=df[col].values,
-                        name=f"{job.label} · {col[:-7]} [{job.status}]",
+                        x=s.index,
+                        y=s.values,
+                        name=f"sensor: {col}",
                         mode="lines",
-                        line=dict(
-                            color=color,
-                            width=2,
-                            dash="solid" if j == 0 else "dash",
-                        ),
-                        opacity=0.95 if job.status == "running" else 0.55,
+                        line=dict(color=_GRAYS[s_idx % len(_GRAYS)], width=2, dash="dot"),
+                        opacity=0.85,
                     )
                 )
+            except Exception:
+                log.exception("sensor trace %r failed to render", col)
+
+        for idx, job in enumerate(jobs):
+            try:
+                color = _PALETTE[idx % len(_PALETTE)]
+                if not job.rows:
+                    continue
+                # Build the DataFrame on demand (once per poll) from the
+                # accumulated raw row dicts, then downsample to hourly mean
+                # so a 7-day trace is ~168 points rather than thousands.
+                df = pd.DataFrame(job.rows)
+                df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+                df = df.set_index("timestamp").sort_index()
+                df = df.resample("1h").mean(numeric_only=True)
+                if df.empty:
+                    continue
+                tension_cols = [c for c in df.columns if c.endswith("__tension")]
+                for j, col in enumerate(tension_cols):
+                    fig.add_trace(
+                        go.Scatter(
+                            x=df.index,
+                            y=df[col].values,
+                            name=f"{job.label} · {col.rsplit('__', 1)[0]} [{job.status}]",
+                            mode="lines",
+                            line=dict(
+                                color=color,
+                                width=2,
+                                dash="solid" if j == 0 else "dash",
+                            ),
+                            opacity=0.95 if job.status == "running" else 0.55,
+                        )
+                    )
+            except Exception:
+                log.exception("[%s] trace failed to render", getattr(job, "job_id", "?"))
 
         fig.update_layout(
             xaxis_title="time",
-            yaxis_title="volumetric water content θ  [cm³/cm³]",
+            yaxis_title="soil water tension ψ  [hPa]",
             legend=dict(orientation="h", y=-0.18),
             margin=dict(l=40, r=20, t=20, b=20),
             template="plotly_white",
             uirevision="keep",
         )
+        return fig
 
-        table = dbc.Table(
+    def _build_table(jobs: list) -> Any:
+        rows = []
+        for j in jobs:
+            try:
+                rows.append(
+                    html.Tr(
+                        [
+                            html.Td(j.job_id),
+                            html.Td(j.label),
+                            html.Td(
+                                j.status if not j.error else f"failed: {j.error}",
+                                className=("text-danger" if j.status == "failed" else None),
+                            ),
+                            html.Td(f"{j.progress * 100:5.1f}%"),
+                            html.Td(
+                                dbc.Button(
+                                    "cancel",
+                                    id={"role": "cancel", "job": j.job_id},
+                                    size="sm",
+                                    color="secondary",
+                                    outline=True,
+                                    disabled=j.status not in ("pending", "running"),
+                                )
+                            ),
+                        ]
+                    )
+                )
+            except Exception:
+                log.exception("[%s] table row failed to render", getattr(j, "job_id", "?"))
+        return dbc.Table(
             [
                 html.Thead(
                     html.Tr(
@@ -1051,32 +1204,7 @@ def build_app(
                         ]
                     )
                 ),
-                html.Tbody(
-                    [
-                        html.Tr(
-                            [
-                                html.Td(j.job_id),
-                                html.Td(j.label),
-                                html.Td(
-                                    j.status if not j.error else f"failed: {j.error}",
-                                    className=("text-danger" if j.status == "failed" else None),
-                                ),
-                                html.Td(f"{j.progress * 100:5.1f}%"),
-                                html.Td(
-                                    dbc.Button(
-                                        "cancel",
-                                        id={"role": "cancel", "job": j.job_id},
-                                        size="sm",
-                                        color="secondary",
-                                        outline=True,
-                                        disabled=j.status not in ("pending", "running"),
-                                    )
-                                ),
-                            ]
-                        )
-                        for j in jobs
-                    ]
-                ),
+                html.Tbody(rows),
             ],
             hover=True,
             size="sm",
@@ -1084,17 +1212,57 @@ def build_app(
             bordered=False,
         )
 
+    def _build_panel(_n) -> tuple[str, str, str]:
         render_job = runner.latest_render_job()
-        if render_job is None or render_job.latest_png is None:
-            img_src = ""
-            title = "Current Se field — (no frame yet)"
-            caption = ""
-        else:
-            # ?t=<ts> cache-busts the browser between updates.
-            ts_key = render_job.latest_png_ts.isoformat() if render_job.latest_png_ts is not None else str(_n)
-            img_src = f"/job-png?id={render_job.job_id}&t={ts_key}"
-            title = f"Current Se field — {render_job.label}"
-            caption = f"job {render_job.job_id} · sim time {render_job.latest_png_ts} · " f"status {render_job.status}"
+        if render_job is None:
+            return "", "Current Se field — (no frame yet)", ""
+        entry = runner._png_store.get(render_job.job_id)
+        if entry is None:
+            return "", "Current Se field — (no frame yet)", ""
+        _png_bytes, png_ts = entry
+        # ?t=<ts> cache-busts the browser between updates.
+        ts_key = png_ts.isoformat() if png_ts is not None else str(_n)
+        img_src = f"/job-png?id={render_job.job_id}&t={ts_key}"
+        title = f"Current Se field — {render_job.label}"
+        caption = f"job {render_job.job_id} · sim time {png_ts} · " f"status {render_job.status}"
+        return img_src, title, caption
+
+    @app.callback(
+        Output("trace-graph", "figure"),
+        Output("job-table", "children"),
+        Output("state-panel-img", "src"),
+        Output("state-panel-title", "children"),
+        Output("state-panel-caption", "children"),
+        Input("poll", "n_intervals"),
+    )
+    def refresh(_n):
+        # Every output is built from the shared, server-side job registry, so
+        # any tab (new or old) renders the same live state on its next poll.
+        # The callback must NEVER raise: Dash freezes an already-rendered tab
+        # on its last good figure but shows a *blank* graph to a tab that has
+        # not yet received one, so a single exception here is exactly what
+        # makes "the plots are gone in a new tab". Each section is guarded and
+        # an outer guard backstops anything missed.
+        try:
+            jobs = runner.jobs()
+        except Exception:
+            log.exception("refresh: snapshotting jobs failed")
+            jobs = []
+        try:
+            fig = _build_figure(jobs)
+        except Exception:
+            log.exception("refresh: figure build failed")
+            fig = go.Figure().update_layout(template="plotly_white", uirevision="keep")
+        try:
+            table = _build_table(jobs)
+        except Exception:
+            log.exception("refresh: table build failed")
+            table = no_update
+        try:
+            img_src, title, caption = _build_panel(_n)
+        except Exception:
+            log.exception("refresh: state panel build failed")
+            img_src, title, caption = no_update, no_update, no_update
 
         return fig, table, img_src, title, caption
 
@@ -1102,6 +1270,28 @@ def build_app(
 
 
 # --- entry point ------------------------------------------------------------
+
+
+def _default_max_workers() -> int:
+    """Worker-pool size when ``[testing] max_workers`` is unset.
+
+    On Linux (the deployment target) scale to 3/4 of the cores actually
+    available to this process — ``os.sched_getaffinity`` respects any systemd
+    ``CPUAffinity`` / cgroup pinning, unlike ``os.cpu_count()`` — leaving
+    headroom for the Dash parent, the progress-consumer thread, and the OS.
+    On dev platforms (Windows/macOS) every ``spawn`` worker re-imports
+    sparcs/FiPy, so a large pool is costly at startup; keep a modest cap.
+
+    Note: each worker's BLAS can itself spin up threads; with a core-scaled
+    pool consider pinning ``OMP_NUM_THREADS=1`` to avoid oversubscription.
+    """
+    if sys.platform.startswith("linux"):
+        try:
+            cores = len(os.sched_getaffinity(0))
+        except (AttributeError, OSError):
+            cores = os.cpu_count() or 1
+        return max(1, cores * 3 // 4)
+    return min(5, os.cpu_count() or 1)
 
 
 def main() -> int:
@@ -1129,10 +1319,19 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--start",
+        default=None,
+        help=(
+            "ISO timestamp for the start of the history window (e.g. "
+            "'2016-11-01'). When given it takes precedence over the "
+            "[testing] history_window; otherwise start = end - history_window."
+        ),
+    )
+    parser.add_argument(
         "--end",
         default=None,
         help=(
-            "ISO timestamp to anchor the history window's end at (e.g. "
+            "ISO timestamp for the end of the history window (e.g. "
             "'2016-12-01'). Useful when the project's logged data does not "
             "reach the current wall clock. Defaults to 'now'."
         ),
@@ -1237,7 +1436,7 @@ def main() -> int:
             return 2
 
         history = testing_cfg.get("history_window", default="7d")
-        max_workers = int(testing_cfg.get("max_workers", default=5))
+        max_workers = int(testing_cfg.get("max_workers", default=_default_max_workers()))
         poll_seconds = float(testing_cfg.get("poll_interval", default=2.0))
 
         if args.end:
@@ -1246,7 +1445,18 @@ def main() -> int:
                 end = end.tz_localize("UTC")
         else:
             end = pd.Timestamp.now(tz="UTC").floor("min")
-        start = end - pd.Timedelta(history)
+
+        if args.start:
+            start = pd.Timestamp(args.start)
+            if start.tz is None:
+                start = start.tz_localize("UTC")
+        else:
+            # No explicit start: fall back to the configured window before end.
+            start = end - pd.Timedelta(history)
+
+        if start >= end:
+            log.error("start %s is not before end %s", start, end)
+            return 2
         log.info("history window %s .. %s", start, end)
 
         et_data, seg_et, irrigation, initial_blob, measurements = _load_history(

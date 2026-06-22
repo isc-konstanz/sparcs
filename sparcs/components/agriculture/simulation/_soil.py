@@ -435,23 +435,32 @@ class PondingConfig:
 
 @dataclass
 class PDEConfig:
-    def __init__(self, configs: Configurations):
-        # Retention/conductivity model selector. ``"van_genuchten"`` (alias
-        # ``"vg"``) is the historical default; ``"brooks_corey"`` (``"bc"``)
-        # is also available. Extra model-specific parameters (e.g. Mualem
-        # ``bpar``) are read from the same block and filtered by the
-        # ``create_soil_model`` factory against the chosen class's signature.
-        self.model: str = str(configs.get("model", default=DEFAULT_SOIL_MODEL))
-        self.theta_r: float = configs.get("theta_r", default=0.05)
-        self.theta_s: float = configs.get("theta_s", default=0.43)
-        self.alpha: float = configs.get("alpha", default=0.08)
-        self.n: float = configs.get("n", default=1.6)
-        self.k_s: float = configs.get("k_s", default=1.0e-4)
+    def __init__(self, configs: Configurations, model_configs: Optional[Configurations] = None):
+        # Retention/conductivity model. The hydraulic params (and an optional
+        # ``type`` selector — ``"van_genuchten"`` / ``"brooks_corey"``) come
+        # from a dedicated ``[model]`` block — the single source of truth shared
+        # with the soil sensors and cascaded to the simulation via the field-
+        # level placeholder. Components always pass ``model_configs``, so the
+        # retention params come from ``[model]`` and never from the solver
+        # ``[pde]`` block. The ``configs`` fallback applies only to direct
+        # construction with ``model_configs=None`` (unit tests / tools that
+        # build a PDEConfig from one flat block). Extra model-specific params
+        # (e.g. Mualem ``bpar``) are filtered by ``create_soil_model`` against
+        # the chosen class's signature.
+        m = model_configs if model_configs is not None else configs
+        # ``[model]`` blocks use ``type`` as the selector (matching
+        # SoilMoisture); legacy ``[pde]`` blocks used ``model``.
+        self.model: str = str(m.get("type", default=m.get("model", default=DEFAULT_SOIL_MODEL)))
+        self.theta_r: float = m.get("theta_r", default=0.05)
+        self.theta_s: float = m.get("theta_s", default=0.43)
+        self.alpha: float = m.get("alpha", default=0.08)
+        self.n: float = m.get("n", default=1.6)
+        self.k_s: float = m.get("k_s", default=1.0e-4)
         # Mualem pore-interaction exponent (L in Mualem 1976, ``BPar`` in
         # HYDRUS-1D). Class defaults differ (0.5 for VG, 2.0 for BC); we
         # only forward this when the user sets it explicitly so each
         # model keeps its own canonical default.
-        self.bpar: Optional[float] = float(configs.get("bpar")) if "bpar" in configs else None
+        self.bpar: Optional[float] = float(m.get("bpar")) if "bpar" in m else None
         # PDE timestep as a lories freq string ("50s", "1min", "5min").
         # ``dt`` is the *target* substep size; the wall-clock walk in
         # ``SoilSimulation.advance`` can halve it when the Picard sweep
@@ -520,7 +529,13 @@ class PDEConfig:
         return create_soil_model(self.model, **kwargs)
 
 
-@dataclass
+# ``eq=False`` → identity equality. The default dataclass ``__eq__`` compares
+# the ``np.ndarray`` fields element-wise and returns an array; for area probes
+# (multi-cell ``cell_indices``) any ``==`` / ``in`` / dedup over probes then
+# raises numpy's ambiguous-truth ``ValueError``. Probes are resolved once and
+# only ever iterated, so identity equality is the right semantic — and it also
+# restores hashability.
+@dataclass(eq=False)
 class ProbeSpec:
     """Resolved sampling recipe for one probe (point or area).
 

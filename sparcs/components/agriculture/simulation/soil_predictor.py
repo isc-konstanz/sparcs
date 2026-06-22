@@ -132,13 +132,22 @@ class SoilPredictor(SoilBase):
         # Pull soil_simulation's loaded config block (file + parent overrides
         # already merged) so we can read its [pde] params (model selector +
         # hydraulic parameters) and its [probes] block for probe definitions.
+        # Retention params come from the field-level ``[model]`` block (the
+        # shared ground truth), inherited by the FieldSimulation context. The
+        # solver/timestep knobs come from the soil_simulation ``[pde]`` block.
+        # Both PDEConfig calls fall back to ``[pde]`` for the retention params
+        # when no ``[model]`` is configured (older configs).
+        model_block = self.context.configs.get_member("model", defaults={}, ensure_exists=True)
         soil_block = self.context.configs.get_member(SoilSimulation.TYPE, defaults={}, ensure_exists=True)
-        soil_pde = PDEConfig(soil_block.get_member("pde", defaults={}, ensure_exists=True))
+        soil_pde = PDEConfig(
+            soil_block.get_member("pde", defaults={}, ensure_exists=True),
+            model_configs=model_block,
+        )
 
         # Predictor's own [pde] block overrides the live solver's, so users
         # can pick a coarser dt to keep prediction cost in check on the edge.
         if configs.has_member("pde"):
-            self._ode_config = PDEConfig(configs.get_member("pde"))
+            self._ode_config = PDEConfig(configs.get_member("pde"), model_configs=model_block)
         else:
             self._ode_config = soil_pde
 
