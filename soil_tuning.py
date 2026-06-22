@@ -1160,12 +1160,6 @@ def build_app(
         fig.update_layout(
             xaxis_title="time",
             yaxis_title="soil water tension ψ  [hPa]  (0 = wet, -10000 hPa = -1000 kPa)",
-            # Default to the sensors' working band (0 .. ~-1000 kPa). With this
-            # soil's very flat retention curve (n≈1.07) the simulated ψ can
-            # plunge orders of magnitude past -1000 kPa on dry excursions, which
-            # would otherwise flatten the whole comparison; those spikes clip
-            # off the top/bottom here. Zoom out (uirevision keeps it) to see them.
-            yaxis=dict(range=[-12000, 300]),
             legend=dict(orientation="h", y=-0.18),
             margin=dict(l=40, r=20, t=20, b=20),
             template="plotly_white",
