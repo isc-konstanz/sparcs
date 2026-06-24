@@ -3,20 +3,9 @@
 sparcs.components.agriculture.simulation.plot_render
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Reusable matplotlib helpers for rendering a saturation field on the soil
-PDE cross-section as a PNG. Shared by :class:`SoilSimulation` (live
-progress plot, fans the PNG to file sinks + a logger channel) and
-:class:`SoilPredictor` (per-snapshot prediction plots emitted on the
-``predict_plot`` bytes channel).
-
-The module also owns a small "safe backend" negotiation: matplotlib's
-default backend on macOS is ``macosx`` which can only build figures
-from the main thread, so the moment a listener / callback worker tries
-to render — which is exactly what both callers do — ``plt.subplots``
-raises ``RuntimeError: Cannot create a GUI FigureManager outside the
-main thread``. ``init_rel_sat_figure`` switches to ``Agg`` on first use
-when the caller isn't on the main thread (or the host is headless).
-Callers do not need to repeat the dance.
+Matplotlib helpers for rendering soil saturation fields as PNG.
+Shared by SoilSimulation and SoilPredictor. Switches to Agg automatically
+when running off the main thread or on a headless host.
 """
 
 from __future__ import annotations
@@ -66,22 +55,12 @@ def init_rel_sat_figure(
     width_m: float,
     height_m: float,
 ) -> Tuple[Any, Any, Normalize]:
-    """Build a fig/ax/norm triple sized for a ``width_m × height_m`` soil
-    cross-section, with the shared smoothstep saturation colorbar attached.
-
-    Forces Agg on first call if running off the main thread or on a
-    headless host, so pyplot doesn't raise from a listener callback.
-    """
+    """Build a fig/ax/norm triple for a ``width_m × height_m`` soil cross-section with saturation colorbar."""
     _ensure_safe_backend()
     fig, ax = plt.subplots(
         figsize=plot_style.compute_fig_size(width_m, height_m),
         dpi=plot_style.DPI,
     )
-    # Smoothstep norm stretches the mid-saturation range visually so
-    # typical operating values (Se ≈ 0.3–0.7) get most of the colorbar's
-    # contrast, while near-dry / near-saturated bands are compressed.
-    # Colorbar tick labels stay in physical Se units because
-    # ``SmoothstepNorm.inverse`` is the analytic inverse.
     norm = plot_style.saturation_norm(vmin=0.0, vmax=1.0)
     sm = plt.cm.ScalarMappable(cmap=plot_style.COLORMAP, norm=norm)
     sm.set_array([])
@@ -105,12 +84,7 @@ def render_rel_sat_png(
     *,
     title: str = "Relative saturation",
 ) -> bytes:
-    """Render ``rel_sat_values`` (one value per FiPy cell) on ``mesh`` into
-    ``fig``/``ax`` and return PNG bytes.
-
-    Mutates the passed-in axes (clear + redraw) so the same fig/ax can
-    be reused across many calls without leaking artists.
-    """
+    """Render ``rel_sat_values`` (one value per FiPy cell) onto ``fig``/``ax`` and return PNG bytes."""
     x, y = mesh.cellCenters
     xi = np.linspace(np.min(x), np.max(x), 100)
     yi = np.linspace(np.min(y), np.max(y), 100)
@@ -122,10 +96,6 @@ def render_rel_sat_png(
     )
 
     ax.clear()
-    # Contour levels stay linear in Se (the iso-saturation lines are
-    # physically meaningful at evenly spaced Se values); the colour
-    # mapping is reshaped by ``norm`` so the same 15 bands give finer
-    # mid-range gradient and coarser endpoint gradient.
     ax.contourf(xi, yi, zi, levels=15, cmap=plot_style.COLORMAP, norm=norm)
     ax.contour(xi, yi, zi, levels=15, linewidths=0.5, colors="k")
     plot_style.apply_axes_style(ax)

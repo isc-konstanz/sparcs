@@ -11,9 +11,7 @@ tension).
 It is intentionally **separate** from the running sparcs app: it never
 touches live state and never calls `Application.main()` — only
 `configure()` + `activate()` run, then it serves its own Dash UI. Kept
-standalone for offline tuning of a project that isn't running live. (A
-component-page integration into the main sparcs UI was discussed; the
-standalone is kept for offline/iterative use.)
+standalone for offline, iterative tuning of a project that isn't running live.
 
 ## Command
 
@@ -103,11 +101,9 @@ pip install "dash>=2.16" dash-bootstrap-components plotly `
 ```
 
 `flask-bcrypt`, `flask-login`, and `dash-auth` are required by
-`lories.application.view` (the login/auth pages). Without them,
-`lories.application.__init__` silently swallows the `ModuleNotFoundError`
-(its `view` import is wrapped in `try/except ModuleNotFoundError`), the
-`dash` **interface type never registers**, and `sparcs.Application(settings)`
-dies with `Unknown interface type 'dash'`.
+`lories.application.view`; without them the `dash` **interface type never
+registers** and startup dies with `Unknown interface type 'dash'` (see
+Troubleshooting for why the import error is silent).
 
 > Use any env where `lories` + `sparcs` are importable. On the dev box that
 > is **`lories_sparcs_new`** — the older `lories_sparcs` env there is

@@ -1,36 +1,5 @@
-"""
-Soil-tuning UI — standalone Dash app for evaluating SoilSimulation parameter
-choices against the last week of real sensor measurements.
-
-Run:
-    python sparcs/soil_tuning.py <ProjectName> [--start ISO] [--end ISO]
-        [--port 8051] [--host 0.0.0.0]
-
-Activation gate (per SoilSimulation):
-
-    [field_simulation.soil_simulation.testing]
-    enabled = true
-    history_window = "7d"     # how far back to replay
-    max_workers    = <auto>   # optional; default = 3/4 of CPU cores on Linux
-    poll_interval  = 2.0      # Dash refresh seconds
-
-Each submit queues a worker that re-instantiates the FiPy soil core with the
-overridden PDE parameters, seeds it from the simulation-state snapshot at
-``now - history_window``, replays the cached week's weather + ET + irrigation,
-samples every configured probe between substeps, and streams the resulting
-trace into the Dash graph as the run progresses. Up to ``max_workers``
-runs in parallel; submitting an (n+1)-th evicts the oldest active one.
-
-A persistent ``ProcessPoolExecutor`` pool is created once at startup.  The
-``spawn`` child workers pay the sparcs / FiPy import cost only once (during
-warm-up, before the user submits anything); subsequent submits queue in
-milliseconds rather than the ~30 s cold-start that a per-submit ``mp.Process``
-incurred.
-
-This file is fully self-contained: it imports the existing FiPy core, the
-PDE-config dataclass, and ``FieldSimulation._run_chain`` from sparcs, but
-does not modify any existing module.
-"""
+"""Standalone Dash app for tuning SoilSimulation PDE parameters against logged
+sensor data. Usage, CLI args, and the [testing] activation gate: see soil_tuning.md."""
 
 from __future__ import annotations
 
@@ -44,18 +13,13 @@ import signal
 import sys
 import threading
 import uuid
-import warnings as _warnings_module
+import warnings
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-# ``spawn`` is the only safe start method here.  ``fork`` silently deadlocks
-# multi-threaded parents (Flask + Dash + consumer thread hold locks that are
-# never released in the child).  ``forkserver`` preloads matplotlib / scipy /
-# fipy in the forkserver process, which spawns helper threads and defeats the
-# whole point.  With a persistent ``ProcessPoolExecutor`` each worker pays the
-# sparcs / FiPy import cost exactly once at pool warm-up (app startup), so the
-# per-submit cold start is gone: submits queue in milliseconds.
+# spawn is the only safe start method: fork deadlocks the threaded parent (Flask
+# + Dash + consumer thread all hold locks that are never released in the child).
 os.environ.setdefault("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES")
 try:
     mp.set_start_method("spawn", force=True)
@@ -118,41 +82,18 @@ def _install_log_handler() -> None:
 
 _install_log_handler()
 
-# Same noise-suppression the live SoilSimulation applies: the van Genuchten
-# retention curve and Mualem conductivity both raise ``invalid value
-# encountered in power`` for Se outside (0, 1), which the clipper handles
-# downstream. ``np.seterr`` covers the dtype path; ``warnings.filterwarnings``
-# covers the explicit ``warnings.warn(..., RuntimeWarning)`` path FiPy uses.
-import warnings as _warnings
-
+# Silence the van Genuchten / Mualem "invalid value in power" warnings for Se
+# outside (0, 1); the clipper handles those values downstream.
 np.seterr(all="ignore")
-_warnings.filterwarnings("ignore", category=RuntimeWarning)
+warnings.filterwarnings("ignore", category=RuntimeWarning)
 logging.getLogger("fipy").setLevel(logging.WARNING)
 
-# PDE knobs exposed in the UI. Anything writable on PDEConfig works the same
-# way — just extend this tuple.
+# PDE knobs exposed in the UI; extend with any writable PDEConfig attribute.
 _PARAMS: tuple[str, ...] = ("theta_r", "theta_s", "alpha", "n", "k_s", "dt", "dt_min")
 
-_PARAM_STEP = {
-    "theta_r": 0.005,
-    "theta_s": 0.005,
-    "alpha": 0.001,
-    "n": 0.01,
-    "k_s": 1.0e-5,
-    "dt": 1.0,
-    "dt_min": 0.1,
-}
-
-# Station weather feeds (e.g. an SCC Modbus weather station) measure
-# illuminance and rain intensity instead of the GHI / precipitation the ET +
-# soil chain consumes. When the logged feed lacks real GHI we synthesize it
-# from illuminance. ``GHI[W/m²] ≈ illuminance[klx] · _GHI_PER_KLX`` — daylight
-# luminous efficacy is ~110–125 lm/W, i.e. ~8 W/m² per klx. This is an
-# approximation (daylight-biased, ignores spectral/zenith effects); tune the
-# factor here if you have a site calibration against a real pyranometer.
+# GHI[W/m²] ≈ illuminance[klx] × _GHI_PER_KLX, used to synthesize GHI when a
+# station feed lacks it. Daylight approximation; recalibrate against a pyranometer.
 _GHI_PER_KLX = 8.0
-
-# --- job state -------------------------------------------------------------
 
 
 @dataclass
@@ -162,21 +103,14 @@ class TuningJob:
     label: str
     status: str = "pending"  # pending | running | done | failed | cancelled
     error: Optional[str] = None
-    # ``rows`` accumulates raw dicts streamed from the worker; the DataFrame
-    # is built on demand in _build_figure (once per poll) rather than
-    # incrementally, avoiding O(n²) reconstruction on the consumer thread.
+    # DataFrame built on demand in _build_figure (not incrementally) to avoid O(n²).
     rows: list[dict[str, Any]] = field(default_factory=list)
-    # ``cancel_event`` slot kept for API compatibility; actual cancellation
-    # goes through the Manager cancel_dict in the warm pool.
-    cancel_event: Any = None
     progress: float = 0.0
-    # ``future`` is the concurrent.futures.Future for this job's worker task.
     future: Any = None
     submitted_at: pd.Timestamp = field(default_factory=lambda: pd.Timestamp.now(tz="UTC"))
 
 
-# --- worker-process globals (populated by _worker_init) -------------------
-
+# Per-worker globals, populated once by _worker_init.
 _W_MESH_CONFIG: Any = None
 _W_BASE_PDE_CONFIG: Any = None
 _W_PROBES: Any = None
@@ -203,16 +137,13 @@ def _worker_init(
     png_store,
     cancel_dict,
 ) -> None:
-    """Initialise the per-worker globals.  Called once per worker process by
-    ``ProcessPoolExecutor`` before any task is dispatched to it.  Pays the
-    sparcs / FiPy import cost here so subsequent job submissions start in ms.
-    """
+    """Populate the per-worker globals once, before any task is dispatched."""
     global _W_MESH_CONFIG, _W_BASE_PDE_CONFIG, _W_PROBES
     global _W_ET_DATA, _W_SEG_ET, _W_IRRIGATION, _W_INITIAL_BLOB
     global _W_RENDER_STRIDE, _W_PROGRESS_Q, _W_PNG_STORE, _W_CANCEL_DICT
 
     np.seterr(all="ignore")
-    _warnings_module.filterwarnings("ignore", category=RuntimeWarning)
+    warnings.filterwarnings("ignore", category=RuntimeWarning)
 
     _W_MESH_CONFIG = mesh_config
     _W_BASE_PDE_CONFIG = base_pde_config
@@ -228,30 +159,12 @@ def _worker_init(
 
 
 def _worker_ping() -> bool:
-    """No-op warm-up task.  Submitting max_workers of these causes all pool
-    workers to spawn and run _worker_init (importing sparcs/FiPy) before the
-    user has clicked submit."""
+    """No-op warm-up task: forces every pool worker to spawn and run _worker_init."""
     return True
 
 
 class TuningRunner:
-    """Persistent warm worker pool + job registry.  Thread-safe (parent side).
-
-    A ``ProcessPoolExecutor`` (``spawn`` context) is created once in
-    ``__init__``; ``max_workers`` warm-up pings are submitted immediately so
-    every worker pays the sparcs / FiPy import cost at app startup rather than
-    on the first user submit.  Subsequent submits queue in milliseconds.
-
-    Constant per-run inputs (mesh_config, base PDEConfig, probes, et_data,
-    seg_et, irrigation, initial_blob, render_stride) are shipped to each
-    worker exactly once via ``initargs``.  Only the small per-job payload
-    (job_id, label, params) crosses the process boundary per submit.
-
-    Progress messages and PNG frames travel through Manager proxies
-    (manager.Queue / manager.dict) which are picklable into spawn workers.
-    PNG frames bypass the row queue entirely — the worker writes directly
-    into a shared ``png_store`` dict, keeping large blobs off the message path.
-    """
+    """Persistent warm ProcessPoolExecutor + thread-safe job registry."""
 
     def __init__(
         self,
@@ -278,8 +191,7 @@ class TuningRunner:
         self._lock = threading.Lock()
         self._jobs: "OrderedDict[str, TuningJob]" = OrderedDict()
 
-        # Manager proxies are picklable into spawn workers; plain mp.Queue /
-        # mp.Event are not (they must be inherited, not pickled).
+        # Manager proxies are picklable into spawn workers; plain mp.Queue/Event are not.
         self._manager = mp.Manager()
         self._progress_q = self._manager.Queue()
         self._png_store = self._manager.dict()  # job_id -> (png_bytes, ts)
@@ -304,7 +216,6 @@ class TuningRunner:
             ),
         )
 
-        # Warm up all workers now so the first user submit is fast.
         warm_futs = [self._executor.submit(_worker_ping) for _ in range(max_workers)]
         concurrent.futures.wait(warm_futs)
         log.info("warm pool ready (%d workers)", max_workers)
@@ -316,8 +227,6 @@ class TuningRunner:
             name="tuning-progress",
         )
         self._consumer.start()
-
-    # --- public API ---
 
     def submit(self, params: dict[str, float], label: str = "") -> TuningJob:
         with self._lock:
@@ -369,9 +278,7 @@ class TuningRunner:
             return list(self._jobs.values())
 
     def latest_render_job(self) -> Optional[TuningJob]:
-        """The job whose 2-D Se panel should be shown — the most recently
-        submitted run that has an entry in the png-store.  Falls back to any
-        job with a frame if the latest hasn't rendered yet."""
+        """Most recently submitted run that has a frame in the png-store, else None."""
         with self._lock:
             jobs = list(self._jobs.values())
             png_keys = set(self._png_store.keys())
@@ -383,7 +290,6 @@ class TuningRunner:
         return candidates[0] if candidates else None
 
     def shutdown(self) -> None:
-        # Set all cancel flags so in-flight workers exit cleanly.
         try:
             self.cancel_all()
         except Exception:
@@ -397,13 +303,11 @@ class TuningRunner:
             self._consumer.join(timeout=2)
         except Exception:
             pass
-        # Tear down the Manager last (proxy objects become invalid after this).
+        # Tear down the Manager last — proxy objects become invalid afterwards.
         try:
             self._manager.shutdown()
         except Exception:
             pass
-
-    # --- internals ---
 
     def _evict_if_full_locked(self) -> None:
         active = [j for j in self._jobs.values() if j.status in ("pending", "running")]
@@ -417,11 +321,8 @@ class TuningRunner:
         changed = [f"{k}={v:g}" for k, v in params.items() if v != base.get(k)]
         return ", ".join(changed) or "baseline"
 
-    # --- consumer (parent-side) ---
-
     def _consume_progress(self) -> None:
-        """Drain the cross-process queue into the in-memory job dict.
-        Runs on a daemon thread for the lifetime of the parent process."""
+        """Drain the cross-process progress queue into the in-memory job dict."""
         while not self._shutdown.is_set():
             try:
                 msg = self._progress_q.get(timeout=0.5)
@@ -443,8 +344,6 @@ class TuningRunner:
             if job is None:
                 return
             if mtype == "row":
-                # Only accumulate the raw dict; DataFrame is built on demand
-                # in _build_figure to avoid O(n²) reconstruction here.
                 job.rows.append(msg["row"])
                 job.progress = float(msg.get("progress", job.progress))
                 if job.status == "pending":
@@ -456,7 +355,6 @@ class TuningRunner:
             elif mtype == "done":
                 job.status = "done"
                 job.progress = 1.0
-                # Clean up cancel flag for completed jobs.
                 self._cancel_dict.pop(job_id, None)
                 log.info("[%s] done (%d rows)", job_id, len(job.rows))
             elif mtype == "failed":
@@ -472,23 +370,12 @@ class TuningRunner:
                 log.warning("[%s] %s", job_id, msg.get("msg"))
 
 
-# --- worker (child process) ------------------------------------------------
-
-
 def _worker_run_job(job_id: str, label: str, params: dict[str, float]) -> None:
-    """Run one tuning simulation in a pool worker.
-
-    Reads constant inputs from the worker-process globals set by
-    ``_worker_init``.  Streams progress back through the shared Manager queue
-    and writes PNG frames directly into the shared Manager png-store dict.
-
-    Messages on the queue: ``{"type": "started" | "row" | "done" | "failed" |
-    "cancelled" | "warn", "job_id": ..., ...}``.  PNG frames are NOT queued;
-    they go to the png-store to keep large blobs off the message path.
-    """
-    # Re-silence numpy / FiPy warnings in the child; np.seterr is per-process.
+    """Run one tuning simulation in a pool worker: stream progress rows via the
+    Manager queue, write PNG frames directly into the shared png-store."""
+    # np.seterr / filterwarnings are per-process — re-apply in the spawned child.
     np.seterr(all="ignore")
-    _warnings_module.filterwarnings("ignore", category=RuntimeWarning)
+    warnings.filterwarnings("ignore", category=RuntimeWarning)
 
     mesh_config = _W_MESH_CONFIG
     initial_blob = _W_INITIAL_BLOB
@@ -501,7 +388,6 @@ def _worker_run_job(job_id: str, label: str, params: dict[str, float]) -> None:
     png_store = _W_PNG_STORE
     cancel_dict = _W_CANCEL_DICT
 
-    # Build the per-job PDEConfig from the worker-global base config.
     ode = copy.deepcopy(_W_BASE_PDE_CONFIG)
     for k, v in params.items():
         if hasattr(ode, k):
@@ -537,7 +423,6 @@ def _worker_run_job(job_id: str, label: str, params: dict[str, float]) -> None:
         )
         render_every = max(1, render_stride)
 
-        # Initial sample + frame.
         row0 = _sample_probe_row(pde, timeline[0], probes)
         put({"type": "row", "row": row0, "progress": 0.0})
         _push_render(png_store, job_id, label, fig, ax, norm, pde, timeline[0])
@@ -591,13 +476,9 @@ def _walk_substeps(
     window_s: float,
     cancel: Any,
 ) -> tuple[bool, Optional[str]]:
-    """Strict adaptive-dt walk via :meth:`SoilPDECore.walk_window`.
-
-    Returns (ok, reason). ``reason='cancelled'`` if the cancel flag
-    fired; otherwise on failure ``reason`` describes why the substep
-    gave up at dt_min. Unlike the live solver (which accepts a finite
-    under-converged state at dt_min), a tuning run fails hard — the
-    point of the sweep is to learn that a parameter set is unstable."""
+    """Strict adaptive-dt walk via SoilPDECore.walk_window. Returns (ok, reason).
+    Fails hard at dt_min (accept_at_dt_min=False) — unlike the live solver — so
+    the sweep surfaces unstable parameter sets instead of accepting them."""
     walk = pde.walk_window(
         rates=rates,
         window_s=window_s,
@@ -641,9 +522,8 @@ def _build_flux_rates(
     flow_m3s = flow_lpm / 60_000.0
 
     rain_flux = 0.0
-    # ``Weather.PRECIPITATION`` is a ``Constant``; we renamed et_data
-    # columns to ``constant.id`` strings in the parent so this lookup
-    # survives a spawn-context pickle round-trip.
+    # et_data columns were renamed to Constant.id strings in the parent so this
+    # lookup survives the spawn-context pickle round-trip.
     precip_col = Weather.PRECIPITATION.id
     if precip_col in et_data.columns and elapsed_s > 0:
         precip = et_data.at[ts, precip_col]
@@ -663,20 +543,14 @@ def _sample_probe_row(
     ts: pd.Timestamp,
     probes: list,
 ) -> dict[str, Any]:
-    # The PDE solves effective saturation Sₑ; convert it straight to matric
-    # tension ψ [hPa] via this run's own retention curve so a tuning run is
-    # judged in the same quantity the tension probes report. ``pde.soil_model``
-    # was built from this job's (possibly overridden) PDEConfig, so the curve
-    # tracks the swept parameters.
+    # Convert Se → matric tension ψ via this run's own (possibly overridden)
+    # retention curve, so the run is judged in the probes' quantity.
     row: dict[str, Any] = {"timestamp": ts}
     for probe in probes:
         se = float(pde.sample(probe))
-        # Key by channel_id (stable config key) rather than probe.name
-        # (verbose, collision-prone across probes with similar names).
+        # Key by channel_id (stable) rather than the collision-prone probe.name.
         row[f"{probe.channel_id}__se"] = se
-        # Matric potential is negative (0 at saturation, more negative as it
-        # dries), matching the tension probes; ``psi_from_se`` returns the
-        # magnitude, so flip the sign.
+        # ψ is negative (0 at saturation); psi_from_se returns magnitude, so flip.
         row[f"{probe.channel_id}__tension"] = -abs(float(pde.soil_model.psi_from_se(se)))
     return row
 
@@ -691,9 +565,8 @@ def _push_render(
     pde: SoilPDECore,
     sim_t: pd.Timestamp,
 ) -> None:
-    """Render the current Se field and write it directly to the shared
-    png-store dict.  Bypasses the row queue so large PNG blobs never
-    contend with the progress message stream."""
+    """Render the current Se field straight into the shared png-store (off the
+    row queue, so large PNG blobs don't contend with the progress stream)."""
     try:
         png = plot_render.render_rel_sat_png(
             fig,
@@ -706,12 +579,8 @@ def _push_render(
         )
         png_store[job_id] = (png, sim_t)
     except Exception:
-        # Render is best-effort; bail silently rather than crash the
-        # whole simulation.
+        # Render is best-effort; never crash the simulation over a frame.
         pass
-
-
-# --- project bootstrap ------------------------------------------------------
 
 
 def _walk_components(root) -> list:
@@ -744,9 +613,8 @@ def _find_soil_simulation(app) -> tuple[SoilSimulation, FieldSimulation]:
                         f"SoilSimulation {c.id} parent is " f"{type(parent).__name__}, expected FieldSimulation"
                     )
                 return c, parent
-    # Nothing matched — dump what *did* load so we can tell whether the
-    # system/field chain was built at all (wrong data/conf dir, missing
-    # [systems] scan, disabled component, …) vs. a class-identity mismatch.
+    # Nothing matched — dump the loaded tree to tell a missing/misconfigured
+    # chain from a class-identity mismatch.
     log.error("no SoilSimulation found — loaded component tree:")
     if not roots:
         log.error("  (app.components is empty — no system loaded)")
@@ -765,8 +633,7 @@ def _load_history(
     """Read everything we need to replay the window, without touching live state."""
     weather_df = field_sim.weather.data.from_logger(start=start, end=end)
     if weather_df.empty:
-        # Probe the full logged extent (no window) so the operator sees what
-        # range *is* available and can pick a valid --start/--end instead of guessing.
+        # Probe the full logged extent so the operator can pick a valid window.
         hint = ""
         try:
             logged = field_sim.weather.data.from_logger()
@@ -784,17 +651,10 @@ def _load_history(
             log.exception("could not probe the logged weather range")
         raise RuntimeError(f"no weather logged in [{start} .. {end}]{hint}")
 
-    # The station feed (a) doesn't measure the GHI / precipitation the chain
-    # needs and (b) has sensor dropouts (NaN gaps). ``validate_meteo_inputs``
-    # rejects GHI with *any* NaN — it then falls back to estimating GHI from
-    # cloud_cover, which this feed lacks, and raises — so we must hand it
-    # gap-free forcing. Interpolate short gaps on the continuous fields,
-    # zero-fill rain (a gap means "no rain measured", not an interpolated
-    # value), then derive GHI from illuminance [klx] and precipitation from
-    # intensity [mm/h]. ``Weather.GHI`` / ``Weather.PRECIPITATION`` are ``str``
-    # subclasses equal to their key, so assigning by the constant targets the
-    # same column the chain later reads via ``df[Weather.GHI]``. All of this is
-    # a no-op on a genuine, gap-free Brightsky feed that already carries them.
+    # validate_meteo_inputs rejects GHI with any NaN, so hand the chain gap-free
+    # forcing: interpolate continuous fields, zero-fill rain (a gap = no rain, not
+    # an interpolated value), then derive GHI/precip below. No-op on a genuine
+    # gap-free Brightsky feed that already carries them.
     rain_cols = [c for c in ("precipitation_intensity", "precipitation_type") if c in weather_df.columns]
     fill_cols = [c for c in weather_df.select_dtypes(include="number").columns if c not in rain_cols]
     if fill_cols:
@@ -811,8 +671,7 @@ def _load_history(
     if "precipitation_intensity" in weather_df.columns and (
         Weather.PRECIPITATION not in weather_df.columns or weather_df[Weather.PRECIPITATION].isna().all()
     ):
-        # intensity [mm/h] over each step → depth [mm] for that step; the chain
-        # converts depth to a rain rate by dividing by the elapsed seconds.
+        # intensity [mm/h] × step → depth [mm]; the chain divides depth by elapsed s.
         step_hours = weather_df.index.to_series().diff().dt.total_seconds().div(3600.0).fillna(0.0)
         weather_df[Weather.PRECIPITATION] = (
             (weather_df["precipitation_intensity"].astype(float) * step_hours).clip(lower=0.0).fillna(0.0)
@@ -822,12 +681,8 @@ def _load_history(
     # Run the ET / shading chain once (publish=False keeps live channels clean).
     et_data, seg_et = field_sim._run_chain(weather_df.copy(), publish=False)
 
-    # Strip ``Constant`` column labels (Weather.PRECIPITATION, …) down to
-    # their string ``id``s. ``Constant`` is a class-level singleton whose
-    # ``__new__`` raises when invoked with default args during pickle
-    # reconstruction — fine under ``fork`` (no pickling), fatal under
-    # ``spawn``. The worker only needs the precipitation column and only
-    # accesses it by string id below.
+    # Strip Constant column labels to their string ids: Constant.__new__ raises
+    # during the spawn pickle round-trip (fine under fork, fatal under spawn).
     et_data.columns = [getattr(c, "id", str(c)) for c in et_data.columns]
 
     irrigation = pd.Series(dtype=float)
@@ -845,10 +700,7 @@ def _load_history(
 
     initial_blob: Optional[bytes] = None
     try:
-        # ``DataAccess.from_logger(channels=, start=, end=)`` is the
-        # right entry point — calling ``Channel.from_logger()``
-        # directly takes no args and just returns a logger-backed
-        # Channel view.
+        # Use DataAccess.from_logger (Channel.from_logger takes no args).
         state_df = soil_sim.data.from_logger(
             channels=[soil_sim.data[SoilSimulation.SIMULATION_STATE]],
             start=start - pd.Timedelta("1d"),
@@ -873,8 +725,7 @@ def _load_history(
             continue
         if m.empty:
             continue
-        # Dedupe first; duplicate timestamps from multi-sensor feeds crash the
-        # downstream pd.concat with misaligned indices.
+        # Dedupe: duplicate timestamps from multi-sensor feeds crash the downstream concat.
         m = m[~m.index.duplicated(keep="last")]
         tension = _sensor_tension_series(child, m)
         if tension is not None and not tension.empty:
@@ -884,15 +735,11 @@ def _load_history(
 
 
 def _sensor_tension_series(sensor: SoilMoisture, frame: pd.DataFrame) -> Optional[pd.Series]:
-    """Collapse one soil sensor's logged frame to a single tension series [hPa].
+    """Collapse one sensor's logged frame to a single tension series ψ [hPa].
 
-    The reference axis is soil water tension, so each probe is reduced to one
-    ψ series. A directly measured ``water_tension`` column is preferred; when a
-    probe only reports ``water_content`` [%] it is converted through *that
-    probe's own* retention curve (``sensor.model``) and the series is labelled
-    ``(calc. …)`` so it reads as derived rather than measured. Returns ``None``
-    when neither channel carries usable data.
-    """
+    Prefers a measured ``water_tension`` column; else converts ``water_content``
+    [%] through the probe's own retention curve (labelled ``(calc. …)``).
+    Returns None when neither channel carries usable data."""
 
     def _first_usable(substr: str) -> Optional[pd.Series]:
         for col in frame.columns:
@@ -904,24 +751,19 @@ def _sensor_tension_series(sensor: SoilMoisture, frame: pd.DataFrame) -> Optiona
 
     measured = _first_usable("water_tension")
     if measured is not None:
-        # Normalise to the negative matric-potential convention regardless of
-        # how the sensor stored its sign.
+        # Normalise to the negative matric-potential convention.
         return (-measured.abs()).dropna().rename(f"{sensor.key} ψ (measured)")
 
     content = _first_usable("water_content")
     if content is not None and sensor.model is not None:
-        # Sensor water content is logged in % (0–100); the retention curve
-        # expects volumetric θ in cm³/cm³. ``psi_from_theta`` returns a bare
-        # ndarray, so re-attach the timestamp index before returning.
+        # content is % (0–100); the curve expects θ [cm³/cm³]. psi_from_theta
+        # returns a bare ndarray, so re-attach the index.
         theta = content.to_numpy() / 100.0
         psi = -np.abs(np.asarray(sensor.model.psi_from_theta(theta), dtype=float))
         series = pd.Series(psi, index=content.index)
         return series.dropna().rename(f"{sensor.key} ψ (calc. from θ)")
 
     return None
-
-
-# --- Dash UI ----------------------------------------------------------------
 
 
 _PALETTE = [
@@ -937,9 +779,7 @@ _PALETTE = [
     "#17becf",
 ]
 
-# Distinct grays for the dotted reference sensor traces, so multiple sensors
-# stay distinguishable while still reading as "reference" (gray/dotted) against
-# the colored simulated runs.
+# Distinct grays for the dotted reference sensor traces (vs. the colored runs).
 _GRAYS = [
     "#222222",
     "#777777",
@@ -958,7 +798,9 @@ def _param_input(name: str, default: float):
                 id=f"in-{name}",
                 type="number",
                 value=float(default),
-                step=_PARAM_STEP.get(name, 0.001),
+                # step="any": a numeric step makes the browser reject values that
+                # aren't a multiple of it, silently dropping e.g. k_s=1e-6.
+                step="any",
                 debounce=True,
                 size="sm",
             ),
@@ -976,9 +818,7 @@ def build_app(
 ) -> Dash:
     base = runner.base_pde_config
 
-    # Compute the hourly-mean sensor reference frame once here; it is static
-    # for the lifetime of the app.  Dedup per frame already done in
-    # _load_history; guard the concat itself against any remaining misalignment.
+    # Hourly-mean sensor reference frame, computed once (static for the app's life).
     if measurements:
         try:
             raw_frame = pd.concat(measurements, axis=1, join="outer").sort_index()
@@ -998,8 +838,7 @@ def build_app(
         title="SoilSimulation tuning",
     )
 
-    # Serve the latest 2-D Se PNG for the most-recently started run via a
-    # tiny Flask route. ``?t=...`` is the cache-buster the layout appends.
+    # Serve the latest Se PNG via a tiny Flask route (?t=... is the cache-buster).
     from flask import Response, request
 
     @app.server.route("/job-png")
@@ -1105,8 +944,7 @@ def build_app(
         fig = go.Figure()
 
         for s_idx, col in enumerate(measurement_frame.columns):
-            # Per-trace guard: one malformed sensor column must never abort
-            # the whole figure — that's what blanks a freshly opened tab.
+            # Per-trace guard: one bad column must not blank the whole figure.
             try:
                 s = measurement_frame[col].dropna()
                 if s.empty:
@@ -1129,9 +967,7 @@ def build_app(
                 color = _PALETTE[idx % len(_PALETTE)]
                 if not job.rows:
                     continue
-                # Build the DataFrame on demand (once per poll) from the
-                # accumulated raw row dicts, then downsample to hourly mean
-                # so a 7-day trace is ~168 points rather than thousands.
+                # Build the DataFrame on demand, then downsample to hourly mean.
                 df = pd.DataFrame(job.rows)
                 df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
                 df = df.set_index("timestamp").sort_index()
@@ -1241,13 +1077,8 @@ def build_app(
         Input("poll", "n_intervals"),
     )
     def refresh(_n):
-        # Every output is built from the shared, server-side job registry, so
-        # any tab (new or old) renders the same live state on its next poll.
-        # The callback must NEVER raise: Dash freezes an already-rendered tab
-        # on its last good figure but shows a *blank* graph to a tab that has
-        # not yet received one, so a single exception here is exactly what
-        # makes "the plots are gone in a new tab". Each section is guarded and
-        # an outer guard backstops anything missed.
+        # This callback must NEVER raise: a tab that hasn't received a figure yet
+        # shows a blank graph on any exception. Each section below is guarded.
         try:
             jobs = runner.jobs()
         except Exception:
@@ -1274,22 +1105,11 @@ def build_app(
     return app
 
 
-# --- entry point ------------------------------------------------------------
-
-
 def _default_max_workers() -> int:
-    """Worker-pool size when ``[testing] max_workers`` is unset.
-
-    On Linux (the deployment target) scale to 3/4 of the cores actually
-    available to this process — ``os.sched_getaffinity`` respects any systemd
-    ``CPUAffinity`` / cgroup pinning, unlike ``os.cpu_count()`` — leaving
-    headroom for the Dash parent, the progress-consumer thread, and the OS.
-    On dev platforms (Windows/macOS) every ``spawn`` worker re-imports
-    sparcs/FiPy, so a large pool is costly at startup; keep a modest cap.
-
-    Note: each worker's BLAS can itself spin up threads; with a core-scaled
-    pool consider pinning ``OMP_NUM_THREADS=1`` to avoid oversubscription.
-    """
+    """Worker-pool size when [testing] max_workers is unset. On Linux scale to
+    3/4 of available cores (sched_getaffinity respects cgroup/CPUAffinity pinning,
+    unlike cpu_count); on dev platforms keep a modest cap since each spawn worker
+    re-imports sparcs/FiPy."""
     if sys.platform.startswith("linux"):
         try:
             cores = len(os.sched_getaffinity(0))
@@ -1306,40 +1126,22 @@ def main() -> int:
         "-c",
         "--conf-dir",
         default=None,
-        help=(
-            "path to the app config dir holding settings.conf / logging.conf, "
-            "mirroring the daemon's `sparcs -c <dir> start` (e.g. /etc/sparcs). "
-            "This is where [systems] (scan/flat) and [directories] live; pass it "
-            "on FHS installs where the config is split from the data dir."
-        ),
+        help="app config dir with settings.conf/logging.conf ([systems], [directories]); for split FHS installs",
     )
     parser.add_argument(
         "--data-dir",
         default=None,
-        help=(
-            "absolute or relative path to the project's data dir, e.g. "
-            "./data/test_agri_sim_logged or /var/lib/sparcs. Overrides the "
-            "data_dir resolved from settings.conf; required when the active "
-            "settings.conf does not already point at the project you want to tune."
-        ),
+        help="project data dir; overrides the data_dir resolved from settings.conf",
     )
     parser.add_argument(
         "--start",
         default=None,
-        help=(
-            "ISO timestamp for the start of the history window (e.g. "
-            "'2016-11-01'). When given it takes precedence over the "
-            "[testing] history_window; otherwise start = end - history_window."
-        ),
+        help="ISO start of the replay window; takes precedence over [testing] history_window",
     )
     parser.add_argument(
         "--end",
         default=None,
-        help=(
-            "ISO timestamp for the end of the history window (e.g. "
-            "'2016-12-01'). Useful when the project's logged data does not "
-            "reach the current wall clock. Defaults to 'now'."
-        ),
+        help="ISO end of the replay window (default: now)",
     )
     parser.add_argument("--port", type=int, default=8051)
     parser.add_argument("--host", default="127.0.0.1")
@@ -1352,14 +1154,10 @@ def main() -> int:
     )
 
     log.info("loading project %s", args.project)
-    # Build the app manually so we can pin action="start" (and optionally
-    # override data_dir) without going through the CLI argparse machinery.
-    # We never call .main() / .run(), so the main loop and the lories Dash
-    # interface stay dormant — only configure() + activate() run.
+    # Build the app manually (pin action="start", optionally override data_dir)
+    # without the CLI machinery: only configure() + activate() run, never main().
     settings = Settings(args.project)
-    # Settings._load_logging() may have called fileConfig with
-    # disable_existing_loggers=True; re-attach our handler so worker
-    # progress / failures keep landing in the log.
+    # Settings._load_logging() may have wiped handlers (fileConfig); re-attach ours.
     _install_log_handler()
     settings["action"] = "start"
 
@@ -1368,13 +1166,9 @@ def main() -> int:
         if not os.path.isdir(conf_path):
             log.error("conf dir %s does not exist", conf_path)
             return 2
-        # Adopt the app config dir the same way the daemon does with
-        # ``sparcs -c <conf_dir> start``: settings.conf there carries the
-        # [systems] (scan/flat) flags and the [directories] block. Without
-        # this, [systems] scan defaults to false and lories tries to load a
-        # single system from the data-dir root — which on an FHS install
-        # (config in /etc/sparcs, systems under /var/lib/sparcs) finds
-        # nothing, so no SoilSimulation is ever built.
+        # Adopt the app config dir like `sparcs -c <conf_dir> start`: its
+        # settings.conf carries [systems] and [directories]. Without it, system
+        # scan defaults off and no SoilSimulation is built on an FHS install.
         settings.dirs.conf = conf_path
         real_settings = os.path.join(conf_path, settings.name)
         if os.path.isfile(real_settings):
@@ -1390,14 +1184,9 @@ def main() -> int:
             return 2
         settings.dirs.data = data_path
         if not args.conf_dir:
-            # Single-dir project (no separate conf dir): let lories' own
-            # flat/nested resolution take over instead of assuming a ``conf/``
-            # subdir. Mirrors ``Settings.__init__``: load the project's
-            # settings.conf override (always at the data-dir root), apply its
-            # [directories] block, and only default conf_dir when left unset.
-            # Whether member configs live directly in the data dir (flat) or
-            # under ``conf/`` (nested) is then decided by ``[systems] flat``,
-            # which ``Application.configure`` honors.
+            # Single-dir project: let lories' own flat/nested resolution take over
+            # instead of assuming a conf/ subdir. Mirrors Settings.__init__ — load
+            # the data-dir settings.conf override and apply its [directories].
             settings.dirs.conf = None
             override_path = os.path.join(settings.dirs.data, settings.name)
             if os.path.isfile(override_path):
@@ -1408,12 +1197,9 @@ def main() -> int:
         settings["action"] = "start"  # re-pin in case the override set it
         log.info("data_dir=%s (conf_dir=%s)", data_path, settings.dirs.conf)
 
-    # Mirror the daemon's systemd ``WorkingDirectory=<data_dir>`` so that
-    # config-relative paths resolve against the data dir rather than wherever
-    # this script happens to be launched from. The soil mesh is the load-
-    # bearing case: ``[mesh] filename = "./soil.msh"`` is read verbatim and
-    # opened relative to cwd, so without this it is looked for next to
-    # soil_tuning.py instead of in the data dir. Spawned workers inherit cwd.
+    # Mirror the daemon's WorkingDirectory=<data_dir> so config-relative paths
+    # resolve against the data dir. Load-bearing for [mesh] filename = "./soil.msh",
+    # opened relative to cwd. Spawned workers inherit cwd.
     data_dir = str(settings.dirs.data)
     if os.path.isdir(data_dir):
         os.chdir(data_dir)
@@ -1500,8 +1286,7 @@ def main() -> int:
         cleaned = threading.Event()
 
         def _cleanup_and_exit(*_args) -> None:
-            # Idempotent: bound to SIGINT/SIGTERM and the server ``finally``,
-            # which can both fire. First caller does the teardown.
+            # Idempotent: bound to SIGINT/SIGTERM and the server finally; both can fire.
             if not cleaned.is_set():
                 cleaned.set()
                 log.info("shutting down sims and sparcs")
@@ -1513,9 +1298,8 @@ def main() -> int:
                     app.deactivate()  # disconnects sparcs connectors
                 except Exception:
                     log.exception("deactivate failed")
-            # Hard-exit: sparcs' connector threads (Postgres / CSV / weather)
-            # are not all daemons and would otherwise keep the interpreter
-            # alive, forcing a manual kill. Everything is already torn down.
+            # Hard-exit: sparcs' connector threads aren't all daemons and would
+            # otherwise keep the interpreter alive. Everything is torn down already.
             os._exit(0)
 
         for _sig in ("SIGINT", "SIGTERM", "SIGBREAK"):

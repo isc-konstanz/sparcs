@@ -3,24 +3,8 @@
 sparcs.components.agriculture.simulation.plot_style
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Shared dashboard-progress-plot style for the field-simulation chain.
-
-The two PNG-emitting components in this package — ``SoilSimulation`` and
-``GroundShading`` — render different scenes (a contour cross-section vs.
-a row-and-shadow geometry view) but live next to each other in the
-sparcs Dash UI. This module pins down the look-and-feel both share so
-they read as siblings in the dashboard:
-
-* fixed PNG width with ``aspect="equal"`` so 1 m on x = 1 m on y inside
-  each plot, with the figure height derived from the y-data extent.
-* identical inch margins via :data:`MARGIN`, locked with
-  ``fig.subplots_adjust(...)`` so the axes box sits in the same place
-  across both PNGs.
-* the same font/grid/colorbar treatment (``plasma`` ramp, 0.3-alpha
-  grid, bracketed unit labels, ``%Y-%m-%d %H:%M`` titles).
-
-Each renderer still owns its own data → axes mapping; this module is
-the visual contract, not a renderer.
+Shared visual contract for progress-plot PNGs (SoilSimulation, GroundShading):
+fixed width, equal-aspect axes, shared margins, plasma colormap, and timestamp titles.
 """
 
 from __future__ import annotations
@@ -32,20 +16,13 @@ from matplotlib.colors import Normalize
 import numpy as np
 import pandas as pd
 
-# ---------------------------------------------------------------------------
 # Style constants
-# ---------------------------------------------------------------------------
 
-# 8 inches × 120 DPI = 960 px wide. Dashboard cards use ``maxWidth: 100%``,
-# so this is an upper bound — the browser scales down as needed and the
-# PNG aspect (locked by `aspect="equal"`) is what stays stable.
-FIG_WIDTH_IN: float = 8.0
+FIG_WIDTH_IN: float = 8.0  # inches; 960 px at DPI=120
 DPI: int = 120
 
-# Inch margins around the axes. Fixed values (rather than ``tight_layout``)
-# so the axes box sits at the same figure-relative position in every
-# render — both renderers' PNGs end up framed identically.
-# ``right`` reserves room for the colorbar.
+# Fixed inch margins so axes sit at the same position across all renders;
+# ``right`` reserves space for the colorbar.
 MARGIN = {
     "left": 0.9,
     "right": 1.2,
@@ -53,12 +30,8 @@ MARGIN = {
     "top": 0.45,
 }
 
-# Inner usable axes width in inches, after subtracting left/right margins.
 AXES_WIDTH_IN: float = FIG_WIDTH_IN - MARGIN["left"] - MARGIN["right"]
-
-# Vertical inches consumed by title + xlabel (title at top, x-tick labels
-# and xlabel at bottom). Used when deriving figure height from data.
-VERTICAL_CHROME_IN: float = MARGIN["top"] + MARGIN["bottom"]
+VERTICAL_CHROME_IN: float = MARGIN["top"] + MARGIN["bottom"]  # title + xlabel inches
 
 GRID_ALPHA: float = 0.3
 COLORMAP: str = "plasma"
@@ -67,24 +40,14 @@ CBAR_SHRINK: float = 0.8
 AXIS_LABEL_X: str = "x [m]"
 AXIS_LABEL_Y: str = "y [m]"
 
-# Human-friendly timestamp shown in the plot title. Drops ISO seconds and
-# timezone — at the dashboard refresh cadence (1 h default) these are noise.
 TIMESTAMP_FORMAT: str = "%Y-%m-%d %H:%M"
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 
 def compute_fig_size(x_extent: float, y_extent: float) -> tuple[float, float]:
-    """Figure ``(width_in, height_in)`` for the shared layout.
-
-    Width is fixed at :data:`FIG_WIDTH_IN`. Height is derived from the
-    data's ``y_extent / x_extent`` aspect ratio so that, with
-    ``aspect="equal"`` and the shared :data:`MARGIN`, the axes box
-    exactly fits the data without distortion.
-    """
+    """Figure ``(width_in, height_in)`` preserving the data aspect ratio with fixed width."""
     if x_extent <= 0:
         x_extent = 1.0
     if y_extent <= 0:
@@ -94,11 +57,7 @@ def compute_fig_size(x_extent: float, y_extent: float) -> tuple[float, float]:
 
 
 def apply_subplots_adjust(fig) -> None:
-    """Lock the axes box at the shared inch margins.
-
-    Translates the inch-margin dict into the figure-relative
-    ``left/right/bottom/top`` ``subplots_adjust`` accepts.
-    """
+    """Convert inch margins to figure-relative fractions and call ``subplots_adjust``."""
     w, h = fig.get_size_inches()
     fig.subplots_adjust(
         left=MARGIN["left"] / w,
@@ -125,20 +84,9 @@ def format_progress_title(label: str, ts: pd.Timestamp, suffix: Optional[str] = 
 
 
 class SmoothstepNorm(Normalize):
-    """Stretch the middle of ``[vmin, vmax]``, compress the extremes.
+    """Smoothstep colormap norm ``f(x) = 3x² - 2x³``: stretches mid-range, compresses extremes.
 
-    Applies the smoothstep transform ``f(x) = 3x² - 2x³`` to values
-    normalised into ``[0, 1]`` before they reach the colormap. The
-    forward derivative is zero at the endpoints and peaks at 1.5 in
-    the middle — visually, small differences around Se ≈ 0.5 produce
-    bigger colour swings than the same differences at Se ≈ 0 or
-    Se ≈ 1. Useful for soil-moisture plots where the operating
-    regime sits in the middle band and saturation extremes are rare
-    but still worth a sentinel colour.
-
-    The inverse uses the closed-form smoothstep inverse
-    ``g(y) = 0.5 - sin(arcsin(1 - 2y) / 3)`` so the colorbar tick
-    labels stay in physical Se units.
+    Inverse ``g(y) = 0.5 - sin(arcsin(1 - 2y) / 3)`` keeps colorbar ticks in physical Se units.
     """
 
     def __call__(self, value, clip=None):
@@ -158,12 +106,5 @@ class SmoothstepNorm(Normalize):
 
 
 def saturation_norm(vmin: float = 0.0, vmax: float = 1.0) -> Normalize:
-    """The shared :class:`SmoothstepNorm` for soil-saturation plots.
-
-    Wrapped as a function so callers (currently
-    ``SoilSimulation._render_progress``) can pin the range explicitly
-    without touching the class API. Returning a fresh instance per
-    call keeps matplotlib's internal ``Normalize`` state isolated
-    between figures.
-    """
+    """Return a fresh :class:`SmoothstepNorm` for soil-saturation plots."""
     return SmoothstepNorm(vmin=vmin, vmax=vmax)

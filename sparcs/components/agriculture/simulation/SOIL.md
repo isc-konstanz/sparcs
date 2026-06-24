@@ -58,19 +58,11 @@ Symbols:
 | `dh/dSe` | slope of the retention curve | m / Se |
 | `source` | volumetric sources and sinks (rain, evap, transp, irr.) | 1/s |
 
-The three terms on the right have clear physical meanings:
-
-1. **Diffusion term.** Matric suction (capillary forces) drives water
-   from wet cells toward dry cells. The effective coefficient
-   `D(Se) = K(Se) · |dh/dSe|` follows from applying the chain rule to
-   the standard mixed form `∂θ/∂t = ∇·[K ∇(h + z)]`.
-2. **Gravity term.** `∂K/∂y` is the divergence of the gravity flux
-   `K · ẑ`. It is the only reason water moves downward in a uniformly
-   wet soil.
-3. **Source term.** A per-cell water-content rate (1/s) that absorbs
-   all boundary fluxes (rain, evaporation, drip irrigation, root
-   uptake). Using a volumetric source for the top boundary is a
-   deliberate choice — discussed in §5.
+The diffusion coefficient `D(Se) = K(Se) · |dh/dSe|` follows from
+applying the chain rule to the standard mixed form
+`∂θ/∂t = ∇·[K ∇(h + z)]`. The gravity term `∂K/∂y` drives downward
+flow in uniformly wet soil. The source term absorbs all boundary
+fluxes as a per-cell water-content rate (1/s) — see §5.
 
 The implementation in `SoilPDECore._build_eq` assembles the equation
 with FiPy:
@@ -106,8 +98,7 @@ The pore-interaction exponent `L` (Mualem's parameter) defaults to
 Selected by `model = "brooks_corey"` (or `"bc"`). Uses a Brooks–Corey
 retention curve with the Mualem–BC conductivity expression and a
 configurable pore-size index `λ`. Provided as an alternative for soils
-where the BC form fits the measured curve better; defaults follow the
-common parameter ranges.
+where the BC form fits the measured curve better.
 
 ### 3.3 Inverse and derivatives
 
@@ -171,30 +162,26 @@ reproduces the classical *free-drainage* bottom BC used in HYDRUS-1D.
 
 ### 5.2 Lateral edges: no flux
 
-The left and right boundaries of the domain are left unconstrained,
-which makes FiPy apply a zero-gradient (homogeneous Neumann)
-condition there. Physically this corresponds to the **centre-line of
-the adjacent PV row pair** on each side: assuming the field is a
-periodic array of identical rows, the centre-line is a plane of
-symmetry across which no net water flows.
+The left and right boundaries are unconstrained (zero-gradient Neumann),
+corresponding to the **centre-line of the adjacent PV row pair**: in a
+periodic array, the centre-line is a plane of symmetry with no net
+lateral flow.
 
 ### 5.3 Top: fluxes injected as volumetric sources
 
 All top boundary fluxes — rain, soil evaporation, drip irrigation,
 root transpiration — are converted to a per-cell water-content rate
-(1/s) and added to the `source` cell variable, instead of being applied
-as Neumann face fluxes. The conversion balances a face flux density
-`q [kg/(m²·s)]` against the volume of the cells touching that segment:
+(1/s) and added to the `source` cell variable. The conversion balances
+a face flux density `q [kg/(m²·s)]` against the volume of the cells
+touching that segment:
 
 ```
 θ_rate_cell  =  (q · face_length) / (ρ_w · cell_volume)
 ```
 
 This is numerically more stable than a face-flux Neumann condition
-near saturation extremes — a face flux that wants to push a near-
-saturated cell past `Se = 1` would diverge the Picard loop within one
-step, whereas the source-term path can be clipped per cell and the
-excess accounted for as runoff (see §5.4 and §7).
+near saturation extremes: excess can be clipped per cell and logged as
+runoff (see §5.5), rather than diverging the Picard loop.
 
 ### 5.4 Source assembly per substep
 
@@ -203,7 +190,7 @@ record:
 
 - **Rain**, on open-sky top segments only (the plant zone is shaded by
   the PV roof). Optionally routed through a per-segment surface
-  ponding bucket (§5.4).
+  ponding bucket (§5.5).
 - **Evaporation**, per top segment, using the per-segment shading
   factor that `Evapotranspiration` already computed upstream.
 - **Drip irrigation**, distributed volumetrically over the cells
@@ -220,7 +207,7 @@ first adds to the bucket; what infiltrates each substep is the smaller
 of the bucket content and the cells' headroom toward `SE_MAX`; any
 bucket content above `h_max_mm` overflows as runoff. With ponding off
 (default), rain hits the cells directly and the saturation clipper
-(§7) records anything the soil cannot absorb as runoff.
+(§5.6) records anything the soil cannot absorb as runoff.
 
 ### 5.6 Mass-balance "clipper" diagnostics
 
@@ -251,20 +238,18 @@ Components:
   configurable pF thresholds `P0 < P1 < P2 < P3`. Below `P1` (anaerobic,
   optional) and above `P3` (wilting) uptake is zero; between `P1` and
   `P2` uptake is unstressed (`α = 1`); between `P2` and `P3` it ramps
-  linearly down to zero. The pF thresholds are translated into
-  saturation thresholds at build time against the configured retention
-  curve so the runtime path is a cheap piecewise-linear interpolation.
+  linearly to zero. The pF thresholds are translated into saturation
+  thresholds at build time against the configured retention curve so
+  the runtime path is a cheap piecewise-linear interpolation.
 - **Root density `β̂(z)`** is normalised so that `Σ β̂_i · V_i = 1`.
   Three shapes are available via `[pde.feddes].root_distribution`:
-  uniform (the historical default), linear (max at the surface, zero at
-  the bottom of the plant block), and exponential (decay length
-  configurable).
-- **Compensation `ω_c`** controls how much demand redistribution
-  occurs across stressed cells. With `ω_c = 1` (default) uptake is
-  uncompensated: realised uptake equals `T_pot · ω` and drops with
-  stress. With `ω_c < 1`, demand is redistributed to non-stressed
-  cells until `ω` falls below `ω_c`, after which uptake decreases
-  proportionally.
+  uniform, linear (max at surface, zero at bottom of plant block), and
+  exponential (decay length configurable).
+- **Compensation `ω_c`** controls demand redistribution across stressed
+  cells. With `ω_c = 1` (default) uptake is uncompensated: realised
+  uptake equals `T_pot · ω` and drops with stress. With `ω_c < 1`,
+  demand is redistributed to non-stressed cells until `ω` falls below
+  `ω_c`, after which uptake decreases proportionally.
 
 Feddes is **off by default** (`enabled = false`) — switch it on
 explicitly per site once the retention curve has been calibrated.
@@ -276,20 +261,12 @@ explicitly per site once the retention curve has been calibrated.
 ### 7.1 Spatial discretisation
 
 FiPy's finite-volume method on the unstructured Gmsh triangular mesh.
-Numerical mass conservation is exact at the finite-volume level by
-construction; what varies is how well the linearised problem matches
-the nonlinear one.
-
 Cell-centred conductivity is interpolated to faces with the
-**arithmetic** average — FiPy's default for `CellVariable`
-coefficients in a `DiffusionTerm`. The same face-interpolated `K`
-drives the gravity term. Arithmetic averaging is the convention in
-HYDRUS-1D as well, but it can over-conduct across sharp wetting
-fronts where `K` jumps by orders of magnitude between adjacent cells
-(harmonic averaging would be more conservative there). For typical
-soil parameter ranges this is a known limitation rather than a
-defect; a switch to `harmonicFaceValue` would be a one-line change if
-front sharpness ever becomes an issue.
+**arithmetic** average — FiPy's default for `CellVariable` coefficients
+in a `DiffusionTerm`. Arithmetic averaging matches HYDRUS-1D but can
+over-conduct across sharp wetting fronts where `K` jumps by orders of
+magnitude between adjacent cells; a switch to `harmonicFaceValue` would
+address that if needed.
 
 ### 7.2 Time stepping and the Picard loop
 
@@ -301,19 +278,16 @@ configured substep `dt` is solved iteratively. The inner loop in
    reassembles `K` and `dh/dSe` from the current iterate.
 2. Convergence is judged on a **physical criterion**:
    `max|Δθ_per_sweep| = max|(θ_s-θ_r)·ΔSe| ≤ tol_th`, with
-   `tol_th = 1e-3` by default. This matches HYDRUS-1D's `TolTh`
-   tolerance.
+   `tol_th = 1e-3` (matching HYDRUS-1D's `TolTh` tolerance).
 3. Up to `MAX_SWEEPS = 25` iterations per substep; if the loop fails
    to converge it returns a `SolveResult(residual, converged=False, sweeps)`.
 
 The linear systems are solved with **GMRES + ILU**
 (`LinearGMRESSolver(tolerance=1e-8, iterations=1000, precon="default")`,
-built once per `SoilPDECore`) — never FiPy's direct-LU default. scipy's
-LU **C-aborts (uncatchable SIGSEGV)** on the near-singular matrices
-that high-rain cumulative saturation produces; GMRES reports the same
-condition as graceful non-convergence, which the adaptive walk handles
-by rollback. This was established empirically with the parameter-sweep
-tool (`sparcs/soil_tuning.py`) replaying a real high-rain week.
+built once per `SoilPDECore`). scipy's direct LU **C-aborts
+(uncatchable SIGSEGV)** on the near-singular matrices that high-rain
+cumulative saturation produces; GMRES reports the same condition as
+graceful non-convergence, which the adaptive walk handles by rollback.
 
 Three hardening layers wrap the sweep loop:
 
@@ -323,9 +297,8 @@ Three hardening layers wrap the sweep loop:
   and is likewise never committed (`updateOld` skipped) — NaN can
   never reach the `SIMULATION_STATE` blob;
 - a finite field is **safety-clipped** to `[SE_MIN, SE_MAX]` before
-  `updateOld()` (HYDRUS-style post-solve clip), so both the current and
-  the old state stay inside the physical band even when a sweep
-  overshoots.
+  `updateOld()`, so both the current and the old state stay inside the
+  physical band even when a sweep overshoots.
 
 ### 7.3 Adaptive wall-clock walk
 
@@ -341,29 +314,25 @@ by `SoilSimulation._walk` (live), `SoilPredictor._integrate_horizon`
 - At `sub_dt = dt_min` (default 1 s) the modes diverge
   (`accept_at_dt_min`):
   - **Accept mode** (live + predictor): an under-converged but *finite*
-    state is accepted with a warning so the walk keeps pace with the
-    wall clock; a non-finite / raised substep is rolled back and
-    **skipped** (state held, no source applied, seconds accumulated in
+    state is accepted with a warning; a non-finite / raised substep is
+    rolled back and **skipped** (state held, seconds accumulated in
     `WalkResult.skipped_s`).
-  - **Strict mode** (tuning): any failure at `dt_min` rolls back and
-    aborts the walk with `WalkResult(ok=False, reason=...)` — a sweep
-    run *wants* to learn that a parameter set is unstable.
-
-This is structurally what HYDRUS-1D's `TIME.FOR` does, just simpler.
+  - **Strict mode** (tuning): any failure at `dt_min` aborts the walk
+    with `WalkResult(ok=False, reason=...)` so unstable parameter sets
+    are detected.
 
 ### 7.4 Initial condition
 
 Two paths in `PDEConfig`:
 
-- **Uniform.** Every cell starts at `ic_se` (default 0.35). Followed by
-  a 3-hour "cold-start" run with the current weather as a static
-  forcing, so the flat IC has time to relax to something
-  weather-consistent before live data flows in.
+- **Uniform.** Every cell starts at `ic_se` (default 0.35), followed
+  by a 3-hour cold-start run with static forcing to relax to a
+  weather-consistent state.
 - **Hydrostatic equilibrium.** When `ic_water_table_depth` (metres) is
-  set, `_hydrostatic_ic_array` builds an Se(z) profile that satisfies
-  zero net flux at `t = 0`: saturated at and below the water table,
-  decreasing upward with `|h(z)| = max(0, z above WT)`. Cold-start
-  auto-zeroes for this case because the IC is already balanced.
+  set, `_hydrostatic_ic_array` builds an Se(z) profile satisfying zero
+  net flux at `t = 0`: saturated at and below the water table,
+  decreasing upward with `|h(z)| = max(0, z above WT)`. Cold-start is
+  skipped for this case.
 
 ---
 
@@ -385,9 +354,8 @@ normalised by the relevant face length:
 The residual channel is the global consistency check: if the integral
 estimate diverges meaningfully from the direct boundary-flux estimate,
 something (lateral exchange, non-convergence, source clipping) is
-moving mass the integral routine could not attribute. Close to zero
-means the solver is conserving mass and both estimators agree on the
-physics.
+moving mass outside what the integral routine can attribute. Close to
+zero means both estimators agree and the solver is conserving mass.
 
 ---
 
@@ -396,10 +364,9 @@ physics.
 `SoilPDECore.save_state_blob` / `load_state_blob` round-trip the
 solver state — current and "old" saturation arrays, plus the
 per-segment surface-ponding buckets — through a single `bytes`
-channel (`SIMULATION_STATE`). The mesh itself is reconstructed from
+channel (`SIMULATION_STATE`). The mesh is reconstructed from
 `soil.msh` on startup. This is the warm-start path across process
-restarts. Older blobs that predate ponding are loaded with empty
-buckets — no migration is needed.
+restarts.
 
 ---
 
@@ -443,12 +410,7 @@ Two components consume it:
   mass-balance accounting, the cold-start spin-up, and the wall-clock
   walk.
 - `SoilPredictor` — forecast roll-outs over the planning horizon
-  for the irrigation strategy. Uses the same PDE core; the rollout
-  loop mirrors the live walk.
-
-The split means every physics fix (free drainage, Feddes, ponding,
-hydrostatic IC) lands once in `_soil.py` and applies to both solvers
-automatically.
+  for the irrigation strategy. Uses the same PDE core.
 
 ---
 
@@ -515,21 +477,16 @@ h_max_mm = 5.0
 
 ## 14. Current limitations
 
-Two known gaps remain, deliberately not closed yet:
+Two known gaps remain:
 
 1. **Hysteresis** between drying and wetting retention branches
    (Lenhard & Parker, 1992). Can shift the retention curve by 20–40 %
-   under daily wet/dry cycling — relevant for drip irrigation under
-   PV. Out of scope until a validation target is available.
-2. **Heat / vapour coupling.** The PDE is isothermal; soil
-   temperature is consumed by `Evapotranspiration` upstream but does
-   not feed back into `K(h, T)` or vapour conductivity. Acceptable
-   for sub-daily liquid-water modelling in temperate conditions;
-   insufficient for freeze/thaw or hot, dry near-surface evaporation.
-
-A 1-D regression harness against HYDRUS-1D output (Celia infiltration,
-Vauclin drainage, Haverkamp wetting front) is the recommended way to
-verify each new feature; it has not been built yet.
+   under daily wet/dry cycling — relevant for drip irrigation under PV.
+2. **Heat / vapour coupling.** The PDE is isothermal; soil temperature
+   is consumed by `Evapotranspiration` upstream but does not feed back
+   into `K(h, T)` or vapour conductivity. Acceptable for sub-daily
+   liquid-water modelling in temperate conditions; insufficient for
+   freeze/thaw or hot, dry near-surface evaporation.
 
 ---
 

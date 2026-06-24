@@ -18,7 +18,6 @@ import matplotlib
 import matplotlib.pyplot as plt
 import meshio
 from matplotlib.collections import LineCollection, PolyCollection
-from scipy.interpolate import griddata
 
 import numpy as np
 import pandas as pd
@@ -31,8 +30,6 @@ from . import plot_render
 logging.getLogger("fipy").setLevel(logging.WARNING)
 np.seterr(all="ignore")
 
-# Shared dataclasses, helpers, and the PDE core live in `_soil`. Re-imported
-# here so external code (``from .soil import MeshConfig`` etc.) keeps working.
 from ._soil import (  # noqa: E402, F401
     RHO_W,
     SE_MAX,
@@ -62,32 +59,15 @@ class SoilSimulation(SoilBase):
     SIMULATION_STATE = Constant(bytes, "simulation_state", "Soil Simulation State", "-")
     SOIL_PROGRESS_IMAGE = Constant(bytes, "soil_progress_image", "Soil Simulation Progress Image", "png")
 
-    # Diagnostic flux densities reported per callback. Internal flux
-    # math runs in kg/(m^2*s); these channels publish in kg/(m^2*h) so
-    # typical 1e-4 mass-flux values display readably (~0.36) in the UI
-    # and stay consistent with the EVAPOTRANSPIRATION channel.
+    # Internal math in kg/(m²·s); channels publish in kg/(m²·h).
     WATER_TOP_IN = Constant(float, "water_top_in", "Top Water Input (Irrigation)", "kg/(m^2*h)")
     WATER_TOP_OUT = Constant(float, "water_top_out", "Top Water Output (Evaporation)", "kg/(m^2*h)")
     WATER_BOTTOM = Constant(float, "water_bottom", "Bottom Water Output (Drainage)", "kg/(m^2*h)")
     WATER_TRANSP = Constant(float, "water_transpiration", "Plant Transpiration", "kg/(m^2*h)")
-    # Mass that the per-step ``[SE_MIN, SE_MAX]`` clipper had to throw
-    # away. WATER_RUNOFF is rain / irrigation that couldn't infiltrate
-    # (top cells already at/near SE_MAX); WATER_DEMAND_UNMET is
-    # evaporation / transpiration that couldn't be satisfied (plant
-    # cells or surface segments already at/near SE_MIN). Both reported
-    # as area-normalised rates so they're directly comparable to the
-    # WATER_TOP_* channels.
+    # Per-step clipper residuals, area-normalised [kg/(m²·h)].
     WATER_RUNOFF = Constant(float, "water_runoff", "Rejected Top Influx (Runoff)", "kg/(m^2*h)")
     WATER_DEMAND_UNMET = Constant(float, "water_demand_unmet", "Unmet Evap+Transp Demand", "kg/(m^2*h)")
-    # Global mass-balance check. The existing WATER_BOTTOM channel uses
-    # the integral closure formula (inflow - outflow - Δstorage), which
-    # is zero by construction; ``WATER_BALANCE_RESIDUAL`` reports the
-    # gap against an INDEPENDENT bottom-face drainage estimate from
-    # K(Se_bot)·ρ_w. Close to zero (compared to WATER_BOTTOM) → the
-    # solver is conserving mass and the integral diagnostic agrees with
-    # the boundary physics. A large value means lateral / source clipping
-    # / non-convergence is moving mass the integral routine couldn't
-    # account for — flag for investigation.
+    # Gap between integral closure and independent bottom-face drainage estimate; non-zero flags solver drift.
     WATER_BALANCE_RESIDUAL = Constant(
         float,
         "water_balance_residual",
@@ -95,11 +75,6 @@ class SoilSimulation(SoilBase):
         "kg/(m^2*h)",
     )
 
-    _mesh_filename: str
-
-    # FiPy mesh, Richards-equation assembly, segment index, integration
-    # primitives, and diagnostic math all live on :class:`SoilBase` /
-    # :class:`SoilPDECore` (shared with :class:`SoilPredictor`).
     _plot_config: Optional[PlotConfig] = None
 
     _last_simulated_at: Optional[pd.Timestamp] = None
@@ -111,8 +86,6 @@ class SoilSimulation(SoilBase):
     _plot_ax: Any = None
     _last_plot_simtime: Optional[pd.Timestamp] = None
 
-    # User-defined relative-saturation probes (points + areas). Each entry
-    # has its own ``probe_<name>`` channel sampled once per advance().
     _probes: list[ProbeSpec]
 
     def configure(self, configs: Configurations) -> None:
@@ -122,17 +95,8 @@ class SoilSimulation(SoilBase):
             configs.get_member("mesh", defaults={}, ensure_exists=True),
             bay_width=getattr(self.context, "bay_width", None),
         )
-        # Generate the .msh now (idempotent — no-op if it already exists) so the
-        # structure plot and the PDE core below both find it. Without this, a
-        # fresh start with ``plot_structure = true`` crashes in ``_plot_mesh``
-        # (``meshio.read`` of a not-yet-created file) and systemd restart-loops.
         ensure_mesh(self._mesh_config)
-        # Retention params come from the (field-inherited) ``[model]`` block;
-        # ``[pde]`` carries only the solver / IC / timestep knobs. ``[model]``
-        # is the single source of truth — retention is never read from
-        # ``[pde]``. If no ``[model]`` is inherited or defined, fall back to the
-        # built-in van Genuchten defaults (and say so) rather than silently
-        # picking up stray retention params left under ``[pde]``.
+        # Retention params from [model]; [pde] carries only solver/IC/timestep knobs.
         model_block = configs.get_member("model", defaults={})
         if not any(k in model_block for k in ("theta_r", "theta_s", "alpha", "n", "k_s")):
             logging.warning(
@@ -142,10 +106,6 @@ class SoilSimulation(SoilBase):
                 self.name,
             )
         self._ode_config = PDEConfig(configs.get_member("pde", defaults={}), model_configs=model_block)
-
-        # Evapotranspiration's input + output channels live on the
-        # Evapotranspiration sibling now; SoilSimulation only owns its own
-        # state + diagnostic flux channels and subscribes to the sibling.
 
         self.data.add(SoilSimulation.SIMULATION_STATE, aggregate="last", logger={"enabled": True})
         for c in (
@@ -159,12 +119,6 @@ class SoilSimulation(SoilBase):
         ):
             self.data.add(c, aggregate="mean", logger={"enabled": True})
 
-        # (mesh ensure + PDECore built together by SoilBase._build_pde below)
-
-        # `plot_structure`: dump a static mesh.png next to the progress plots
-        # (or into <data_dir>/soil_simulation if no [plot] block is configured).
-        # NEVER opens a GUI window — _plot_mesh used to call a blocking
-        # plt.show() that froze startup on threaded / headless setups.
         if configs.get_bool("plot_structure", default=False):
             structure_dir = configs.get(
                 "plot.dir",
@@ -173,7 +127,6 @@ class SoilSimulation(SoilBase):
             os.makedirs(structure_dir, exist_ok=True)
             self._plot_mesh(os.path.join(structure_dir, "mesh.png"))
 
-        # TODO: Fix not working
         self._plot_progress = configs.get_bool("plot_progress", default=True)
         logging.info(
             "%s: plot_progress=%s (configs keys: %s)",
@@ -218,10 +171,7 @@ class SoilSimulation(SoilBase):
 
         self._simulating = True
         try:
-            # Cold start (no logger restore): spin up with current weather
-            # to reach an approximate steady state instead of using the
-            # static IC from `_constrain_eq`. Duration comes from
-            # ``[pde].cold_start`` (default 3h).
+            # Cold start: spin up with current weather to approximate steady state.
             if self._last_simulated_at is None:
                 elapsed = self._ode_config.cold_start
                 logging.info(
@@ -252,9 +202,7 @@ class SoilSimulation(SoilBase):
                 plot_interval=interval,
             )
 
-            # Final unconditional render — without this the throttle can
-            # swallow the last dt-step (e.g. 1h spin-up with interval="1h"
-            # leaves the saved file frozen at sim_t0+dt).
+            # Final unconditional render so the throttle doesn't swallow the last dt-step.
             if self._plot_progress:
                 self._render_progress_safe(now)
 
@@ -276,22 +224,13 @@ class SoilSimulation(SoilBase):
         et_data: pd.DataFrame,
         seg_et: dict[str, pd.DataFrame],
     ) -> pd.DataFrame:
-        """
-        Step the soil PDE through ``et_data`` deterministically (offline mode).
+        """Step the soil PDE through ``et_data`` deterministically (offline mode).
 
-        ``seg_et`` carries the same time index as ``et_data`` (one DataFrame
-        per segment, columns ``et``/``evap``/``transp``); each timestep is
-        sliced out and handed to ``advance``.
-
-        Returns a DataFrame indexed by timestamp with the four diagnostic
-        flux-density channels keyed by channel id.
+        Returns a DataFrame indexed by timestamp with diagnostic flux-density channels.
         """
         if et_data.empty:
             return pd.DataFrame()
 
-        # Anchor the simulation clock to the first input timestamp so the
-        # initial advance integrates t[0] -> t[1] with t[1]'s weather instead
-        # of doing a fictional 1h cold-start spin-up.
         if self._last_simulated_at is None:
             self._last_simulated_at = et_data.index[0]
 
@@ -317,23 +256,16 @@ class SoilSimulation(SoilBase):
         return float(self._segment_face_len.get(name, 0.0))
 
     def get_probes(self) -> list[ProbeSpec]:
-        """Resolved probe sampling recipes (point + area). Public so the
-        ``SoilPredictor`` sibling can borrow them without re-parsing the
-        config — both share the same physical mesh, so cell indices and
-        weights are valid for either solver.
+        """Resolved probe sampling recipes (point + area).
 
-        Implemented as a method (not a ``@property``) so lories' configurator
-        ``__str__`` reflection skips it: ``ProbeSpec`` carries ``np.ndarray``
-        fields and lories' ``get_members`` dedupes by ``not in
-        members.values()`` which trips numpy's ambiguous-truth check.
+        Method (not ``@property``) to avoid numpy ambiguous-truth in lories' ``get_members`` reflection.
         """
         return list(self._probes)
 
     def get_rel_sat_snapshot(self) -> np.ndarray:
-        """Copy of the live saturation field. Used by ``SoilPredictor`` as
-        the initial condition for forecast roll-outs; copying avoids the
-        predictor accidentally mutating the live solver state. Method form
-        rather than ``@property`` for the same reason as :meth:`get_probes`.
+        """Copy of the live saturation field for ``SoilPredictor`` forecast roll-outs.
+
+        Method (not ``@property``) for the same reason as :meth:`get_probes`.
         """
         return self._pde.snapshot()
 
@@ -354,22 +286,10 @@ class SoilSimulation(SoilBase):
         seg_et: dict[str, pd.DataFrame],
         elapsed_s: float,
     ) -> FluxRates:
-        """
-        Per-zone mass fluxes that are constant over a callback's elapsed
-        window. Evap and transp are read straight from the per-segment ET
-        decomposition that ``Evapotranspiration.evaluate`` produced — the
-        Beer-Lambert split was already applied there using the segment's
-        local LAI. Negative ET (radiative cooling case) is clipped to zero
-        so we never inject water through the boundaries by accident.
+        """Per-zone mass fluxes [kg/(m²·s)] constant over the callback window.
 
-        ``rain_flux`` is ``precip_mm / elapsed_s``: dividing by the catch-up
-        window means the per-step ``rain_flux · dt`` integrated over the
-        ``n_steps`` substeps lands at exactly ``precip_mm`` of total mass
-        regardless of how long the window is (mass-conservative).
-        Caveat: during the 3 h cold-start spin-up we spread the *latest*
-        precip bucket over those 3 simulated hours — the total mass is
-        right but the temporal placement is fictional. Mass-correct,
-        timing-approximate.
+        Negative ET (radiative cooling) is clipped to zero.
+        ``rain_flux = precip_mm / elapsed_s`` distributes precipitation mass-conservatively over substeps.
         """
         seg_evap: dict[str, float] = {}
         seg_transp: dict[str, float] = {}
@@ -405,15 +325,9 @@ class SoilSimulation(SoilBase):
         sim_t0: pd.Timestamp,
         plot_interval: Optional[pd.Timedelta],
     ) -> float:
-        """HYDRUS-style adaptive-dt wall-clock walk.
+        """Adaptive-dt walk over ``window_s``.
 
-        Thin wrapper around :meth:`SoilPDECore.walk_window` (accept mode:
-        an under-converged but finite state at ``dt_min`` is accepted, a
-        non-finite / raised substep is rolled back and skipped). Plot-frame
-        throttling is keyed off the in-walk simulation timestamp via the
-        ``on_step`` hook so live `progress.png` keeps refreshing across
-        the retry loop. Returns the actual elapsed seconds covered, which
-        is always ``window_s``.
+        Under-converged substeps at ``dt_min`` are accepted; non-finite ones are skipped.
         """
 
         def on_step(t_offset: float) -> None:
@@ -458,10 +372,7 @@ class SoilSimulation(SoilBase):
         elapsed_s: float,
         clip: ClipDiagnostics,
     ) -> dict[str, float]:
-        """Write the seven per-callback flux-density channels in kg/(m²·h).
-        Delegates the math to :meth:`SoilBase._compute_diagnostics` so the
-        predictor reports directly comparable numbers, then publishes each
-        value on its channel and samples the probes."""
+        """Write the seven per-callback flux-density channels [kg/(m²·h)] and sample probes."""
         diagnostics = self._compute_diagnostics(rates, delta_storage, elapsed_s, clip)
         for key, value in diagnostics.items():
             self.data[key].set(now, value)
@@ -469,11 +380,7 @@ class SoilSimulation(SoilBase):
         return {self.data[key].id: value for key, value in diagnostics.items()}
 
     def _configure_probes(self, configs: Configurations) -> None:
-        """Resolve probe specs from the ``[probes]`` block via the shared
-        :func:`resolve_probes` helper, then register one ``<key>`` float
-        channel per probe so values can be logged like any other diagnostic.
-        ``SoilPredictor`` calls the same helper to keep its own predict
-        channels lined up against the same physical points / areas."""
+        """Resolve probe specs from ``[probes]`` and register one float channel per probe."""
         self._probes = []
         if not configs.has_member("probes"):
             return
@@ -490,11 +397,6 @@ class SoilSimulation(SoilBase):
             )
 
     def _register_probe(self, probe: ProbeSpec) -> None:
-        # ``probe.name`` is the fallback display label. A user-provided
-        # ``[data.channels.<key>] name = "..."`` block overrides it via the
-        # standard channel-config merge in ``DataAccess.add``. The section
-        # key IS the channel id (no prefix) so the override block can use
-        # the same name the user typed in ``[probes.*.<key>]``.
         self.data.add(
             probe.channel_id,
             type=float,
@@ -523,8 +425,6 @@ class SoilSimulation(SoilBase):
         physical_tags = mesh.field_data
         physical_tags = sorted(physical_tags.keys(), key=lambda x: physical_tags[x][0])
 
-        # Assuming 'physical' refers to a specific key in cell_data_dict
-        # Check for physical tags in lines
         for cell_block in mesh.cells:
             tags = mesh.cell_data_dict["gmsh:physical"][cell_block.type]
             if cell_block.type == "line":
@@ -537,18 +437,11 @@ class SoilSimulation(SoilBase):
                     triangles.append([points[i] for i in tri])
                     triangles_colors.append(tag - 1)
 
-        # -----------------------------
-        # Extract triangles and physical tags
-        # -----------------------------
-
         lines = np.array(lines)
         line_colors = np.array(line_colors)
         triangles = np.array(triangles)
         triangles_colors = np.array(triangles_colors)
 
-        # -----------------------------
-        # Plot
-        # -----------------------------
         fig, ax = plt.subplots(figsize=(8, 3), dpi=200)
         tab20 = plt.get_cmap("tab20")
 
@@ -577,41 +470,9 @@ class SoilSimulation(SoilBase):
         ax.set_title("Soil Mesh")
         fig.tight_layout()
         if save_path:
-            # Force the Agg-style headless save path so we don't depend on a
-            # display being available — mesh dumps run during configure(),
-            # well before the matplotlib GUI loop is up.
             fig.savefig(save_path, dpi=200)
             logging.info("%s: wrote mesh structure to %s", self.name, save_path)
         plt.close(fig)
-
-    def _plot_mesh_2(self):
-        mesh = self._pde.mesh
-        xi = np.linspace(min(mesh.cellCenters[0]), max(mesh.cellCenters[0]), 100)
-        yi = np.linspace(min(mesh.cellCenters[1]), max(mesh.cellCenters[1]), 100)
-
-        #
-        # mapping the unstructured grid to a structured
-        #
-        x, y = mesh.cellCenters
-        zi = griddata((x, y), self._pde.rel_sat.value, (xi[None, :], yi[:, None]), method="cubic")
-
-        jet = plt.get_cmap("jet")
-        # using matplotlib for plotting
-        #
-        # clar plot
-        plt.clf()
-        plt.contour(xi, yi, zi, 15, linewidths=1.0, colors="k")
-        plt.contourf(xi, yi, zi, 15, cmap=jet)
-        plt.colorbar()
-
-        # value max and min
-        plt.clim(0, 1)
-
-        plt.grid()
-        plt.title("Relative Saturation")
-        plt.xlabel("x")
-        plt.ylabel("y")
-        plt.pause(0.01)
 
     def _render_progress_safe(self, sim_t: pd.Timestamp) -> None:
         """Render at sim_t with error containment — a single render failure
@@ -625,11 +486,6 @@ class SoilSimulation(SoilBase):
             self._plot_progress = False
 
     def _init_progress_figure(self) -> None:
-        # show=True needs a GUI loop, which needs the main thread + a real
-        # display. On headless edge devices ($DISPLAY/$WAYLAND_DISPLAY unset
-        # on Linux) matplotlib defaults to a GUI backend that crashes on
-        # first draw — pre-empt that by switching to Agg whenever we won't
-        # be popping a window. savefig() / live HTML still work.
         on_main_thread = threading.current_thread() is threading.main_thread()
         has_display = sys.platform != "linux" or bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
         can_show = self._plot_config.show and on_main_thread and has_display
@@ -693,8 +549,6 @@ class SoilSimulation(SoilBase):
         if self._plot_fig is None:
             self._init_progress_figure()
 
-        # Render the figure to PNG once, then fan out to all sinks (channel
-        # for database persistence, live overwrite, archived per-frame file).
         png_bytes = plot_render.render_rel_sat_png(
             self._plot_fig,
             self._plot_ax,
@@ -713,8 +567,6 @@ class SoilSimulation(SoilBase):
 
         self.data[SoilSimulation.SOIL_PROGRESS_IMAGE].set(sim_t, png_bytes)
 
-        # Atomic-ish overwrite via tmp + replace so the browser never grabs a
-        # half-written PNG.
         if self._plot_config.live:
             target = os.path.join(self._plot_config.dir, "progress.png")
             tmp = target + ".tmp"
@@ -726,8 +578,3 @@ class SoilSimulation(SoilBase):
             fname = sim_t.strftime("%Y%m%dT%H%M%S") + ".png"
             with open(os.path.join(self._plot_config.dir, fname), "wb") as f:
                 f.write(png_bytes)
-
-    # PDE assembly, segment indexing, the Picard solve, and the adaptive-dt
-    # wall-clock walk are owned by :class:`SoilPDECore` (``self._pde``);
-    # :meth:`_walk` above only adds plot throttling and logging on top of
-    # ``self._pde.walk_window``.

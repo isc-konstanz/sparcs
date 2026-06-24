@@ -21,14 +21,8 @@ from lories.components.weather import Weather
 class SegmentProperties:
     """Per-segment vegetation + radiation state for one ET evaluation.
 
-    Carries the vegetation properties Penman-Monteith needs locally
-    (``lai``, ``plant_height``, ``ndvi``, ``roughness``) and the radiation
-    scaling that turns bulk GHI into the segment's local incoming shortwave
-    (``shade_factor`` ∈ [0, 1]; 0 = full PV shade, 1 = open sky).
-
-    ``face_length`` is the segment's top-boundary face length [m] in the soil
-    mesh, kept here so the ET component can publish face-length-weighted
-    means on its bulk channels without reaching back into the mesh.
+    ``shade_factor`` ∈ [0, 1] scales bulk GHI to local incoming shortwave (0 = full PV shade).
+    ``face_length`` [m] is the segment's top-boundary face length for face-length-weighted bulk means.
     """
 
     name: str
@@ -44,11 +38,6 @@ class SegmentProperties:
 class Evapotranspiration(Component):
     TYPE: str = "evapotranspiration"
 
-    # Penman-Monteith no longer needs any pre-computed inputs from the
-    # DataFrame: ``temp_ground`` is now derived per-segment inside the
-    # evaluation loop from ``T_air`` and the segment's shade-scaled GHI
-    # (see ``TEMP_GROUND_LIFT``). Vegetation state flows in via
-    # ``SegmentProperties``.
     REQUIRED_INPUT_KEYS: tuple[str, ...] = ()
 
     REQUIRED_WEATHER_CHANNELS = [
@@ -59,7 +48,6 @@ class Evapotranspiration(Component):
         Weather.CLEAR_SKY_INDEX,
     ]
 
-    # Output channels
     SVP = Constant(float, "sat_vapor_pressure", "Saturation Vapor Pressure", "kPa")
     GVP = Constant(float, "ground_vapor_pressure", "Vapor Pressure on the Ground Surface", "kPa")
     VAP_HEAT = Constant(float, "vaporization_heat", "Latent Heat of Vaporization", "J/kg")
@@ -92,23 +80,13 @@ class Evapotranspiration(Component):
         for c in self.CHANNELS:
             self.data.add(c, aggregate="mean", logger={"enabled": False})
 
-        # Per-segment ET channels live on FieldSimulation (the parent owns
-        # the soil mesh, so segment-named channels are wired in one place).
-        # ``evaluate`` writes into them via ``self.context.set_segment_values``.
-
-    # Beer-Lambert canopy extinction. Shared with the soil PDE, but lives
-    # here because the evap/transp split is part of the ET model.
+    # Beer-Lambert canopy extinction coefficient [-].
     BEER_K: float = 0.6
 
-    # Internal computation runs in kg/(m²·s) (what the soil PDE consumes
-    # via ``seg_et``). Channels publish in kg/(m²·h) so the displayed
-    # values aren't 0.0e+00 in the UI and read in a familiar hourly rate.
+    # Internal computation in kg/(m²·s); channels publish in kg/(m²·h).
     _KG_PER_S_TO_KG_PER_H: float = 3600.0
 
-    # Algebraic surface heating: T_gnd = T_air + LIFT · GHI · shade_factor.
-    # 0.012 K/(W/m²) lands an open-sky segment ~12 K above air at noon
-    # clear-sky (GHI≈1000) and a fully-shaded segment at T_air. Refine
-    # once a real surface energy balance couples to the soil PDE.
+    # T_gnd = T_air + LIFT · GHI · shade_factor [K/(W/m²)].
     TEMP_GROUND_LIFT: float = 0.012
 
     def evaluate(
@@ -118,39 +96,10 @@ class Evapotranspiration(Component):
         *,
         publish: bool = True,
     ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
-        """
-        Compute Penman-Monteith evapotranspiration for each soil-mesh top
-        segment and return both the bulk-augmented frame and the per-segment
-        decomposition.
+        """Compute Penman-Monteith ET per segment; return augmented weather frame and per-segment decomposition.
 
-        Parameters
-        ----------
-        df : pd.DataFrame
-            Weather frame. Must include the ``REQUIRED_WEATHER_CHANNELS``
-            columns. Per-segment ground temperature is derived from
-            ``Weather.TEMP_AIR`` and the shade-scaled GHI inside the loop.
-        segments : Iterable[SegmentProperties]
-            One entry per segment that should evaporate. The list also
-            drives the face-length-weighted means published on the bulk
-            output channels — pass a single representative segment when
-            no soil mesh is wired.
-
-        Returns
-        -------
-        (df, seg_et) : (pd.DataFrame, dict[str, pd.DataFrame])
-            ``df`` is augmented in place with the eleven bulk output
-            columns (face-length-weighted across segments for the
-            segment-dependent terms; weather-only terms are direct).
-            ``seg_et`` maps each segment name to a DataFrame indexed by
-            ``df.index`` with columns ``("et", "evap", "transp")`` in
-            kg/(m²·s); ``evap = et · exp(-k·LAI)`` and
-            ``transp = et · (1 - exp(-k·LAI))``.
-
-        Raises
-        ------
-        ValueError
-            If required weather/ground columns are missing or no segments
-            are provided.
+        Returns ``(df, seg_et)`` where ``seg_et`` maps segment name to a DataFrame with columns
+        ``("et", "evap", "transp")`` [kg/(m²·s)].
         """
         seg_list = list(segments)
         if not seg_list:
@@ -206,10 +155,7 @@ class Evapotranspiration(Component):
                 surface_resistance=surf_res,
                 aerodynamic_resistance=air_res,
             )
-            # Beer-Lambert evap/transp split. Only canopy segments transpire;
-            # bare-soil segments dump all their ET to the surface boundary
-            # (``evap = et``). Without this gate, every bare strip would
-            # silently feed water through the plant-cell sink in the soil PDE.
+            # Beer-Lambert evap/transp split; bare-soil segments have evap_frac=1 (no transpiration).
             if seg.is_canopy:
                 evap_frac = float(np.exp(-self.BEER_K * float(seg.lai)))
             else:
@@ -231,9 +177,6 @@ class Evapotranspiration(Component):
                 Evapotranspiration.EVAPOTRANSPIRATION: et,
             }
 
-        # Bulk channel publishing: weather-only terms direct, segment-dependent
-        # terms as face-length-weighted means (or simple mean when no face
-        # lengths are supplied — single-segment fallback case).
         df[Evapotranspiration.SVP] = svp
         df[Evapotranspiration.GVP] = gvp
         df[Evapotranspiration.VAP_HEAT] = vh
@@ -256,12 +199,6 @@ class Evapotranspiration(Component):
             stacked = pd.concat([seg_terms[s.name][c] for s in seg_list], axis=1)
             df[c] = stacked.to_numpy().dot(weights)
 
-        # Publish the latest row to each bulk output channel so subscribers
-        # (SoilSimulation, UI widgets, loggers) see live values. The
-        # bulk EVAPOTRANSPIRATION channel is published in kg/(m²·h) — the
-        # internal DataFrame stays in kg/(m²·s) for SoilSimulation.
-        # ``publish=False`` (forecast / dry-run) skips every channel
-        # write so the live dashboard isn't polluted with future values.
         if publish:
             ts = df.index[-1]
             for c in self.CHANNELS:
@@ -270,20 +207,12 @@ class Evapotranspiration(Component):
                     value *= self._KG_PER_S_TO_KG_PER_H
                 self.data[c].set(ts, value)
 
-            # Bulk ground temperature: face-length-weighted mean of per-segment
-            # T_gnd derived above. The channel is owned by FieldSimulation
-            # (parent); write through ``self.context`` so dashboards see the
-            # physics-derived value instead of the placeholder.
             temp_gnd_stack = pd.concat([seg_temp_gnd[s.name] for s in seg_list], axis=1)
             temp_gnd_bulk_last = float(temp_gnd_stack.to_numpy().dot(weights)[-1])
             ctx_data = getattr(self.context, "data", None)
             if ctx_data is not None and "temp_ground" in ctx_data:
                 ctx_data["temp_ground"].set(ts, temp_gnd_bulk_last)
 
-            # Per-segment ET and ground temperature — written into the parent
-            # FieldSimulation's bundled channels. Skipped on the single
-            # ``_bulk`` fallback (no soil mesh wired) since the parent
-            # registers no segment channels in that case.
             field = self.context
             if field.top_segment_names:
                 et_mapping = {
@@ -301,32 +230,13 @@ class Evapotranspiration(Component):
         temperature: pd.Series,
         only_pos: bool = True,
     ) -> pd.Series:
+        """Saturation vapor pressure [kPa] from air temperature [°C].
+
+        ``only_pos=False`` blends positive/negative parameterizations to avoid discontinuity at 0 °C.
         """
-        Compute saturation vapor pressure [kPa] from air temperature.
-
-        Parameters
-        ----------
-        temperature : pd.Series
-            Air temperature [°C].
-        only_pos : bool, default=True
-            If True, use the positive-temperature parameterization only.
-            If False, blend positive and negative parameterizations smoothly.
-
-        Returns
-        -------
-        pd.Series
-            Saturation vapor pressure [kPa].
-
-        Notes
-        -----
-        - Uses empirical constants for vapor pressure over water/ice.
-        - The blended branch avoids a hard discontinuity around 0 °C.
-        """
-
-        # --- Empirical constant ---
-        SVP_AT_0C = 0.61078  # Saturation vapor pressure at 0 °C [kPa]
-        B_POS, C_POS = 17.270, 237.3  # Positive-temperature constants [-], [°C]
-        B_NEG, C_NEG = 21.875, 265.5  # Negative-temperature constants [-], [°C]
+        SVP_AT_0C = 0.61078  # [kPa] at 0 °C
+        B_POS, C_POS = 17.270, 237.3  # positive-temperature constants [-], [°C]
+        B_NEG, C_NEG = 21.875, 265.5  # negative-temperature constants [-], [°C]
         ATAN_WIDTH = 10.0
         ATAN_TRANSITION_SHARPNESS = 6.313  # = np.tan(0.9 * np.pi / 2) * 2
 
@@ -346,25 +256,7 @@ class Evapotranspiration(Component):
         hum_rel: pd.Series,
         svp: pd.Series,
     ) -> pd.Series:
-        """
-        Compute vapor pressure near the ground surface [kPa].
-
-        Parameters
-        ----------
-        hum_rel : pd.Series
-            Relative humidity [%].
-        svp : pd.Series
-            Saturation vapor pressure [kPa].
-
-        Returns
-        -------
-        pd.Series
-            Ground-level vapor pressure [kPa].
-
-        Notes
-        -----
-        - Uses the standard relation: e = RH/100 * es.
-        """
+        """Ground-level vapor pressure [kPa]: e = RH/100 · SVP."""
 
         return hum_rel / 100 * svp
 
@@ -373,35 +265,12 @@ class Evapotranspiration(Component):
     def _vaporization_heat(
         temperature: pd.Series,
     ) -> pd.Series:
-        """
-        Latent vaporization heat [J/kg]
-
-        Parameters
-        ----------
-        temperature : pd.Series
-            Air temperature [°C]
-
-        Returns
-        -------
-        pd.Series
-            Latent heat of vaporization [J/kg]
-
-        Notes
-        -----
-        - Linear approximation of temperature dependence.
-        - Commonly used in hydrology and evapotranspiration models.
-        - Valid for typical atmospheric temperature ranges.
-        """
-
-        # --- Empirical constant ---
+        """Latent heat of vaporization [J/kg]; linear in temperature [°C]."""
         LATENT_HEAT_AT_0C = 2501.0  # [kJ/kg]
-        TEMPERATURE_COEFFICIENT = 2.36  # [kJ/(kg °C)]
+        TEMPERATURE_COEFFICIENT = 2.36  # [kJ/(kg·°C)]
 
-        # --- Linear temperature dependence ---
         lambda_kj = LATENT_HEAT_AT_0C - TEMPERATURE_COEFFICIENT * temperature
-
-        # --- Unit conversion (kJ/kg → J/kg) ---
-        lambda_j = lambda_kj * 1000.0
+        lambda_j = lambda_kj * 1000.0  # kJ/kg → J/kg
 
         return lambda_j
 
@@ -412,37 +281,10 @@ class Evapotranspiration(Component):
         svp: pd.Series,
         vh: pd.Series,
     ) -> pd.Series:
-        """
-        Slope of the saturation vapor pressure curve [kPa/K]
-        using the Clausius-Clapeyron relation.
-
-        Parameters
-        ----------
-        temperature : pd.Series
-            Air temperature [°C]
-        svp : pd.Series
-            Saturation vapor pressure [kPa]
-        vh : pd.Series
-            Latent heat of vaporization [J/kg]
-
-        Returns
-        -------
-        pd.Series
-            Slope of saturation vapor pressure curve [kPa/K]
-
-        Notes
-        -----
-        - Based on the Clausius-Clapeyron equation.
-        - Gas constant for water vapor is assumed constant.
-        """
-
-        # --- Physical constant ---
+        """Slope of the saturation vapor pressure curve [kPa/K] via Clausius-Clapeyron."""
         GAS_CONSTANT_WATER_VAPOR = 461.0  # [J kg⁻¹ K⁻¹]
 
-        # --- Unit conversion ---
         temperature_k = _celsius_to_kelvin(temperature)
-
-        # --- Clausius–Clapeyron slope ---
         delta = (vh * svp) / (GAS_CONSTANT_WATER_VAPOR * temperature_k**2)
 
         return delta
@@ -457,59 +299,24 @@ class Evapotranspiration(Component):
         ndvi: pd.Series,
         csi: pd.Series,
     ) -> pd.Series:
+        """Net irradiance [W/m²]: shortwave (GHI, albedo) minus longwave (Stefan-Boltzmann).
+
+        Atmospheric emissivity: Brutsaert (1975). Surface emissivity: NDVI-adjusted. Cloud correction: empirical.
         """
-        Net irradiance (Rn) [W/m^2] as the balance of shortwave and longwave radiation.
-
-        Parameters
-        ----------
-        ghi : pd.Series
-            Global Horizontal Irradiance [W/m^2]
-        gvp : pd.Series
-            Actual vapor pressure [kPa] (required for Brutsaert equation)
-        temp_air : pd.Series
-            Air temperature [°C]
-        temp_gnd : pd.Series
-            Ground/surface temperature [°C]
-        ndvi : pd.Series
-            Normalized Difference Vegetation Index [-]
-        csi : pd.Series
-            Clear Sky Index [-]
-
-        Returns
-        -------
-        pd.Series
-            Net irradiance [W/m^2]
-
-        Notes
-        -----
-        - Longwave radiation is computed using the Stefan-Boltzmann law.
-        - Atmospheric emissivity follows Brutsaert (1975).
-        - Cloud correction is an empirical parameterization (Idso/Monteith-type).
-        - Surface emissivity is adjusted using NDVI as a vegetation proxy.
-        """
-
-        # --- Empirical constant ---
-        STEFAN_BOLTZMANN = 5.67e-8  # [W m^-2 K^-4]
+        STEFAN_BOLTZMANN = 5.67e-8  # [W m⁻² K⁻⁴]
         SURFACE_EMISSIVITY_BASE = 0.9585
         NDVI_EMISSIVITY_FACTOR = 0.0357
-        CLOUD_TYPE_FACTOR = 0.22  # empirical (e.g. stratocumulus)
+        CLOUD_TYPE_FACTOR = 0.22  # empirical
         ALBEDO = 0.2  # typical for grass
 
-        # --- Unit conversions ---
         temp_air_k = _celsius_to_kelvin(temp_air)
         temp_gnd_k = _celsius_to_kelvin(temp_gnd)
 
-        # --- Atmospheric emissivity (Brutsaert, 1975) ---
-        epsilon_atm = 1.24 * (gvp * 10 / temp_air_k) ** (1 / 7)
-
-        # --- Surface emissivity (NDVI-adjusted) ---
+        epsilon_atm = 1.24 * (gvp * 10 / temp_air_k) ** (1 / 7)  # Brutsaert (1975)
         epsilon_surface = SURFACE_EMISSIVITY_BASE + NDVI_EMISSIVITY_FACTOR * ndvi
-        epsilon_surface = epsilon_surface.clip(upper=1.0)  # physically bounded
-
-        # --- Cloud correction (empirical) ---
+        epsilon_surface = epsilon_surface.clip(upper=1.0)
         epsilon_atm_cloud = epsilon_atm * (1 + CLOUD_TYPE_FACTOR * csi**2)
 
-        # --- Radiation components ---
         shortwave_net = ghi * (1 - ALBEDO)
         longwave_in = epsilon_atm_cloud * STEFAN_BOLTZMANN * temp_air_k**4
         longwave_out = epsilon_surface * STEFAN_BOLTZMANN * temp_gnd_k**4
@@ -526,45 +333,16 @@ class Evapotranspiration(Component):
         plant_height: pd.Series,
         measure_height: float,
     ) -> pd.Series:
-        """
-        Aerodynamic resistance [s/m] using a logarithmic wind profile
-        based on Monin-Obukhov similarity theory (neutral conditions).
-
-        Parameters
-        ----------
-        wind_speed : pd.Series
-            Wind speed at measurement height [km/h]
-        roughness : pd.Series
-            Dimensionless roughness scaling factor [-]
-        plant_height : pd.Series
-            Vegetation height [m]
-        measure_height : float
-            Height of wind measurement [m]
-
-        Returns
-        -------
-        pd.Series
-            Aerodynamic resistance [s/m]
-
-        Notes
-        -----
-        - Assumes neutral atmospheric stability.
-        - Based on logarithmic wind profile.
-        """
-
-        # --- Empirical constant ---
+        """Aerodynamic resistance [s/m] via log wind profile (neutral stability, Monin-Obukhov)."""
         VON_KARMAN = 0.41  # [-]
 
-        # --- Surface geometry ---
         displacement_height = (2.0 / 3.0) * plant_height  # [m]
         roughness_momentum = roughness * plant_height  # [m]
         roughness_heat = 0.1 * roughness_momentum  # [m]
 
-        # --- Effective measurement height ---
         z_eff = measure_height - displacement_height
-        z_eff = z_eff.clip(lower=1e-6)  # avoid log(0) / division issues
+        z_eff = z_eff.clip(lower=1e-6)
 
-        # --- Log wind profile (neutral) ---
         ra = (
             np.log(z_eff / roughness_momentum)
             * np.log(z_eff / roughness_heat)
@@ -579,33 +357,10 @@ class Evapotranspiration(Component):
         lai: pd.Series,
         net_irradiance: pd.Series,
     ) -> pd.Series:
-        """
-        Estimate soil heat flux (G) [W/m^2] from net irradiance using an
-        exponential attenuation with vegetation (LAI).
-
-        Parameters
-        ----------
-        lai : pd.Series
-            Leaf Area Index [-]
-        net_irradiance : pd.Series
-            Net irradiance [W/m^2]
-
-        Returns
-        -------
-        pd.Series
-            Soil heat flux [W/m^2]
-
-        Notes
-        -----
-        - Based on Choudhury-type parameterization (FAO context).
-        - Negative Rn (nighttime) will produce negative soil heat flux.
-        """
-
-        # --- Empirical constant ---
+        """Soil heat flux [W/m²] from net irradiance via Beer-Lambert LAI attenuation (Choudhury-type)."""
         ATTENUATION_COEFF = 0.5
         FRACTION_BARE_SOIL = 0.4
 
-        # --- Soil heat flux ---
         g = FRACTION_BARE_SOIL * np.exp(-ATTENUATION_COEFF * lai) * net_irradiance
 
         return g
@@ -615,32 +370,10 @@ class Evapotranspiration(Component):
     def _resistance_surface(
         lai: pd.Series,
     ) -> pd.Series:
-        """
-        Compute bulk surface resistance [s/m] from Leaf Area Index.
-
-        Parameters
-        ----------
-        lai : pd.Series
-            Leaf Area Index [-]
-
-        Returns
-        -------
-        pd.Series
-            Surface resistance [s/m]
-
-        Notes
-        -----
-        - Based on FAO formulation for well-watered vegetation.
-        - Assumes uniform stomatal resistance.
-        """
-
-        # --- Empirical constant ---
+        """Bulk surface resistance [s/m] from LAI (FAO stomatal resistance formula)."""
         STOMATAL_RESISTANCE = 100.0  # [s/m] per leaf
 
-        # --- Avoid division by zero ---
         lai_safe = lai.clip(lower=1e-6)
-
-        # --- Surface resistance ---
         rs = STOMATAL_RESISTANCE / lai_safe
 
         return rs
@@ -652,27 +385,7 @@ class Evapotranspiration(Component):
         net_irradiance: pd.Series,
         soil_heat_flow: pd.Series,
     ) -> pd.Series:
-        """
-        Radiation term of Penman-Monteith.
-
-        Parameters
-        ----------
-        svp_slope : pd.Series
-            Slope of saturation vapor pressure curve [kPa/K].
-        net_irradiance : pd.Series
-            Net irradiance [W/m^2].
-        soil_heat_flow : pd.Series
-            Soil heat flow [W/m^2].
-
-        Returns
-        -------
-        pd.Series
-            Radiation term [(kPa*W)/(K*m^2)].
-
-        Notes
-        -----
-        - Represents the radiative energy available for latent heat flux.
-        """
+        """Radiation term of Penman-Monteith [(kPa·W)/(K·m²)]: svp_slope · (Rn - G)."""
 
         return svp_slope * (net_irradiance - soil_heat_flow)
 
@@ -683,31 +396,9 @@ class Evapotranspiration(Component):
         gvp: pd.Series,
         aerodynamic_resistance: pd.Series,
     ) -> pd.Series:
-        """
-        Aaerodynamic term of Penman-Monteith.
-
-        Parameters
-        ----------
-        svp : pd.Series
-            Saturation vapor pressure [kPa].
-        gvp : pd.Series
-            Ground-level vapor pressure [kPa].
-        aerodynamic_resistance : pd.Series
-            Aerodynamic resistance [s/m].
-
-        Returns
-        -------
-        pd.Series
-            Aerodynamic term [(kPa*J)/(m^2*K*s)].
-
-        Notes
-        -----
-        - Uses bulk air properties with constant heat capacity and density.
-        """
-
-        # --- Empirical constant ---
-        HEAT_CAPACITY_AIR = 1010.0  # Heat capacity of air [J/(kg*K)]
-        AIR_DENSITY = 1.2  # Air density [kg/m^3]
+        """Aerodynamic term of Penman-Monteith [(kPa·J)/(m²·K·s)]: ρ·Cp·(SVP-GVP)/ra."""
+        HEAT_CAPACITY_AIR = 1010.0  # [J/(kg·K)]
+        AIR_DENSITY = 1.2  # [kg/m³]
 
         return AIR_DENSITY * HEAT_CAPACITY_AIR * (svp - gvp) / aerodynamic_resistance
 
@@ -721,47 +412,12 @@ class Evapotranspiration(Component):
         surface_resistance: pd.Series,
         aerodynamic_resistance: pd.Series,
     ) -> pd.Series:
-        """
-        Evapotranspiration (ET) using the Penman-Monteith equation
-
-        Parameters
-        ----------
-        radiation_term : pd.Series
-            Radiation component of Penman-Monteith [(kPa·W)/(K·m²)]
-        aerodynamic_term : pd.Series
-            Aerodynamic component [(kPa·J)/(K·m²·s)]
-        vaporization_heat : pd.Series
-            Latent heat of vaporization [J/kg]
-        svp_slope : pd.Series
-            Slope of saturation vapor pressure [kPa/K]
-        surface_resistance : pd.Series
-            Surface (stomatal) resistance [s/m]
-        aerodynamic_resistance : pd.Series
-            Aerodynamic resistance [s/m]
-
-        Returns
-        -------
-        pd.Series
-            Evapotranspiration [kg/m²/s ≈ mm/s]
-
-        Notes
-        -----
-        - Psychrometric constant is assumed 0.067 kPa/K.
-        - Follows FAO-56 Penman-Monteith formulation.
-        - Numerator and denominator units are consistent with SI.
-        """
-
-        # --- Physical constant ---
+        """FAO-56 Penman-Monteith evapotranspiration [kg/(m²·s)]."""
         PSYCHROMETRIC_CONSTANT = 0.067  # [kPa/K]
 
-        # --- Denominator ---
         resistance_factor = 1.0 + surface_resistance / aerodynamic_resistance
         denominator = vaporization_heat * (svp_slope + PSYCHROMETRIC_CONSTANT * resistance_factor)
-
-        # --- Numerator ---
-        numerator = radiation_term + aerodynamic_term  # note: sum, not product
-
-        # --- Penman-Monteith evapotranspiration ---
+        numerator = radiation_term + aerodynamic_term
         et = numerator / denominator
 
         return et

@@ -4,20 +4,10 @@ sparcs.components.agriculture.simulation.soil_predictor
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Forecast-driven horizon predictor. Integrates the Richards-equation soil
-PDE over the available weather forecast **with no irrigation applied** and
-publishes the predicted relative saturation at every probe defined on
-the live ``SoilSimulation``. The live solver is never touched: the
-predictor owns its own FiPy mesh, equation, and ``CellVariable``s.
-
-Optionally archives the full saturation field at ``save_freq`` cadence
-across the horizon on bytes channels ``predict_state`` (npz blob) and
-``predict_plot`` (PNG, rendered via :mod:`plot_render`).
-
-The expensive compute step is isolated in :meth:`SoilPredictor._solve`
-so a future server-attached backend (sparcs running on an edge device,
-predictions offloaded to a server) can replace just that one method
-with an HTTP / RPC call without touching forecast retrieval, chain
-replay, or channel publishing.
+PDE over the available weather forecast with no irrigation applied and
+publishes the predicted relative saturation at every configured probe.
+Optionally archives saturation-field snapshots at ``save_freq`` cadence
+as npz blobs (``predict_state``) and PNGs (``predict_plot``).
 """
 
 from __future__ import annotations
@@ -31,11 +21,6 @@ import pandas as pd
 from lories.components.weather import Weather
 from lories.typing import Configurations
 from lories.util import to_timedelta
-
-# FiPy mesh, Richards-equation assembly, segment index, and the pure
-# integration primitives (apply_source, solve, sample, total_water, state
-# I/O) live on the shared :class:`SoilPDECore` so SoilPredictor and
-# SoilSimulation never drift apart.
 from sparcs.components.agriculture.simulation.soil import (
     PDEConfig,
     ProbeSpec,
@@ -50,10 +35,6 @@ from ._soil import FluxRates, MeshConfig, SoilBase
 _DEFAULT_HORIZON: str = "24h"
 _DEFAULT_SAVE_FREQ: str = "1h"
 
-# Diagnostic flux Constants the predictor mirrors from the live solver so
-# the predict-side channels carry identical names / units (and the UI can
-# match them side-by-side under different component cards). Order is the
-# emission order — same as :class:`SoilSimulation.configure`.
 _DIAGNOSTIC_CONSTANTS = (
     SoilSimulation.WATER_TOP_IN,
     SoilSimulation.WATER_TOP_OUT,
@@ -71,9 +52,6 @@ class SoilPredictor(SoilBase):
     TYPE: str = "soil_predictor"
     INCLUDES = ["pde"]
 
-    # Matches the lories Weather convention so SQL connectors that
-    # special-case ``timestamp_creation`` (composite PK promotion in
-    # ``connectors/sql/schema.py``) work unchanged.
     _TIMESTAMP_CREATION_KEY: str = "timestamp_creation"
     _STATE_CHANNEL_KEY: str = "predict_state"
     _PLOT_CHANNEL_KEY: str = "predict_plot"
@@ -87,34 +65,20 @@ class SoilPredictor(SoilBase):
     _ode_config: PDEConfig
     _pde: SoilPDECore
 
-    # Lazy-init render scaffolding (only built when ``save_plot`` is on and
-    # the first snapshot needs rendering).
     _plot_fig: Any = None
     _plot_ax: Any = None
     _plot_norm: Any = None
 
-    # probe.channel_id → predict-channel id.
     _channel_keys: dict[str, str]
 
     _probes: list[ProbeSpec]
 
-    # Dedup gate keyed on ``(now, forecast_creation)`` so a fresh DWD
-    # forecast at the same simulated ``now`` still flows through (that's
-    # the whole point of stamping rows with ``timestamp_creation``), while
-    # duplicate listener re-fires for an identical pair no-op out.
+    # Dedup gate: skip if (now, forecast_creation) was already published.
     _last_predicted_key: Optional[tuple[pd.Timestamp, pd.Timestamp]] = None
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
 
-        # Predictor and soil_simulation are siblings; lories sorts components
-        # alphabetically before configuring, so soil_simulation may not yet
-        # be configured when we run. Read everything we need from the
-        # *parent* (FieldSimulation) and from the loaded ``[soil_simulation]``
-        # config block instead of from the live SoilSimulation instance —
-        # that instance only has its attributes populated *after* configure.
-        # The instance is still required at predict-time for the live IC, but
-        # by then the activate phase is past and it's safe.
         mesh_config = getattr(self.context, "mesh_config", None)
         if mesh_config is None:
             raise ValueError(
@@ -129,14 +93,6 @@ class SoilPredictor(SoilBase):
         self._save_state = configs.get_bool("save_state", default=False)
         self._save_plot = configs.get_bool("save_plot", default=False)
 
-        # Pull soil_simulation's loaded config block (file + parent overrides
-        # already merged) so we can read its [pde] params (model selector +
-        # hydraulic parameters) and its [probes] block for probe definitions.
-        # Retention params come from the field-level ``[model]`` block (the
-        # shared ground truth), inherited by the FieldSimulation context. The
-        # solver/timestep knobs come from the soil_simulation ``[pde]`` block.
-        # Both PDEConfig calls fall back to ``[pde]`` for the retention params
-        # when no ``[model]`` is configured (older configs).
         model_block = self.context.configs.get_member("model", defaults={}, ensure_exists=True)
         soil_block = self.context.configs.get_member(SoilSimulation.TYPE, defaults={}, ensure_exists=True)
         soil_pde = PDEConfig(
@@ -144,25 +100,13 @@ class SoilPredictor(SoilBase):
             model_configs=model_block,
         )
 
-        # Predictor's own [pde] block overrides the live solver's, so users
-        # can pick a coarser dt to keep prediction cost in check on the edge.
         if configs.has_member("pde"):
             self._ode_config = PDEConfig(configs.get_member("pde"), model_configs=model_block)
         else:
             self._ode_config = soil_pde
 
-        # Independent FiPy state via SoilPDECore — same .msh file, different
-        # in-memory mesh / variables / equation. Predictor mutates its own
-        # rel_sat freely without touching the live solver. ``_build_pde``
-        # (inherited from SoilBase) also ensures the .msh file exists, so
-        # the predictor can configure before ``soil_simulation`` does.
         self._pde = self._build_pde()
 
-        # Resolve probe specs from the *config block* (not the live soil
-        # instance, which may not be configured yet — see comment above).
-        # Same parser, same .msh file → identical cell indices and weights
-        # as the live solver's probe channels, so predictions line up
-        # directly with current readings.
         probes_cfg = soil_block.get_member("probes", defaults={}, ensure_exists=True)
         self._probes = resolve_probes(
             probes_cfg,
@@ -171,13 +115,6 @@ class SoilPredictor(SoilBase):
             log_name=self.name,
         )
 
-        # Composite-PK partner for every row this predictor emits. Mirrors
-        # ``WeatherForecast``'s ``timestamp_creation`` (see
-        # ``lories.components.weather.dwd.provider``) so the SQL schema
-        # layer promotes ``(timestamp, timestamp_creation)`` to the table's
-        # primary key and multiple forecasts addressing the same target
-        # timestamp coexist as distinct rows. Registered before the
-        # per-probe loop so it's present even when there are no probes.
         self.data.add(
             key=self._TIMESTAMP_CREATION_KEY,
             name="Predictor Creation Timestamp",
@@ -190,10 +127,6 @@ class SoilPredictor(SoilBase):
             },
         )
 
-        # Channel layout: one ``predict_<probe_id>`` float channel per probe,
-        # holding a scalar predicted rel_sat per row. ``predict()`` emits N
-        # rows (one per forecast step) in a single ``set`` call per channel;
-        # the target timestamps live on the row index.
         self._channel_keys = {}
         for probe in self._probes:
             key = f"predict_{probe.channel_id}"
@@ -208,9 +141,6 @@ class SoilPredictor(SoilBase):
             )
 
         if self._save_state:
-            # Saturation-field snapshots sampled at ``save_freq`` across the
-            # horizon (plus the final forecast row). Same set-with-Series
-            # idiom as the probe channels — each row is one binary blob.
             self.data.add(
                 self._STATE_CHANNEL_KEY,
                 type=bytes,
@@ -220,9 +150,6 @@ class SoilPredictor(SoilBase):
             )
 
         if self._save_plot:
-            # PNG of the saturation field at every save tick, rendered with
-            # the same colorbar / styling as the live solver's progress.png
-            # via the shared :mod:`plot_render` helpers.
             self.data.add(
                 self._PLOT_CHANNEL_KEY,
                 type=bytes,
@@ -232,9 +159,6 @@ class SoilPredictor(SoilBase):
                 logger={"enabled": True},
             )
 
-        # Per-forecast-interval flux-density diagnostics, mirroring the live
-        # solver's 7 channels. Each forecast row contributes one value;
-        # ``_publish_results`` emits the full horizon as a Series.
         for c in _DIAGNOSTIC_CONSTANTS:
             self.data.add(c, aggregate="last", logger={"enabled": True})
 
@@ -246,25 +170,14 @@ class SoilPredictor(SoilBase):
                 self.name,
             )
 
-    # =========================================================================
     # Public driver
-    # =========================================================================
 
     def predict(self, now: pd.Timestamp, forecast_creation: Optional[pd.Timestamp]) -> None:
-        """One prediction tick. Silently skips when no forecast is available
-        or the live soil solver hasn't produced a state yet — predictions
-        are best-effort and must not break the live callback chain.
+        """One prediction tick; silently skips if no forecast or no live soil state yet.
 
-        ``forecast_creation`` is the DWD forecast's ``timestamp_creation``
-        (read by ``FieldSimulation._forecast_callback``) and becomes the
-        composite-PK partner stamped onto every emitted row. When the
-        upstream hasn't populated it yet (cold start, non-DWD weather
-        source, network hiccup), we fall back to ``now`` so the predictor
-        still emits instead of going dark — the PK invariant (a non-null
-        Timestamp on every row) is preserved; the only thing lost is the
-        join-back trace to the exact upstream forecast issue time. A
-        debug log records each fallback so the cause is visible if the
-        situation turns out to be persistent rather than transient.
+        ``forecast_creation`` is the composite-PK partner (forecast issue time) stamped
+        on every emitted row. Falls back to ``now`` when unavailable so the channel
+        always emits a non-null value.
         """
         if forecast_creation is None:
             logging.debug(
@@ -276,14 +189,8 @@ class SoilPredictor(SoilBase):
             )
             forecast_creation = now
 
-        # Dedup on the (target, creation) pair. A genuine new forecast at
-        # the same ``now`` must flow through (this is the entire reason
-        # for the timestamp_creation column); only an exact re-fire of the
-        # same listener event no-ops out.
         key = (now, forecast_creation)
         if self._last_predicted_key == key:
-            # Duplicate listener re-fires (forecast trigger spins on
-            # future-dated channel.timestamp) hit this every time, so DEBUG.
             logging.debug(
                 "%s: predict skipped — already published for (now=%s, creation=%s).",
                 self.name,
@@ -308,13 +215,6 @@ class SoilPredictor(SoilBase):
             logging.info("%s: predict skipped — no soil_simulation sibling.", self.name)
             return
 
-        # Skip until the live solver has actually produced a state — predicting
-        # off the static IC during the cold-start spin-up wastes compute and
-        # publishes trajectories that don't match the field. SoilSimulation
-        # sets ``_last_simulated_at`` from ``_save_state`` after each successful
-        # advance, so this gate clears exactly when the first real callback
-        # has committed a saturation field. DEBUG because cold-start refires
-        # this gate many times before the first soil advance lands.
         if getattr(soil, "_last_simulated_at", None) is None:
             logging.debug(
                 "%s: predict skipped — live solver has no state yet " "(cold-start still running) at %s.",
@@ -343,11 +243,6 @@ class SoilPredictor(SoilBase):
             logging.exception("%s: integration failed; skipping tick.", self.name)
             return
 
-        # Wrap _publish_results: any exception here propagates up to
-        # lories' Listener.__call__, whose ``finally: return self`` (see
-        # listener.py:85) SWALLOWS the exception completely — no
-        # traceback, no "Failed notifying listener" warning. Without
-        # this try/except a converter / set_frame failure is invisible.
         try:
             self._publish_results(
                 trajectories,
@@ -375,9 +270,7 @@ class SoilPredictor(SoilBase):
             forecast_creation,
         )
 
-    # =========================================================================
-    # Backend split-point — replace this method with a remote call to offload
-    # =========================================================================
+    # PDE backend
 
     def _solve(
         self,
@@ -390,45 +283,18 @@ class SoilPredictor(SoilBase):
         dict[pd.Timestamp, np.ndarray],
         dict[str, list[float]],
     ]:
-        """Local PDE backend.
+        """Load IC into the predictor PDE and integrate over the forecast horizon.
 
-        A future server-attached deployment can swap this method for an
-        RPC: the inputs (initial saturation field + ET-augmented forecast +
-        per-segment ET decomposition) and the outputs (probe + diagnostic
-        trajectories + optional state snapshots) are already a
-        self-contained, pickle-friendly payload.
-
-        Returns ``(timestamps, trajectories, snapshots, diagnostics)``.
-        ``timestamps`` is the time axis from ``_integrate_horizon`` (the
-        forecast row index); ``trajectories[probe_id]`` is the matching
-        list of probe rel_sat values; ``snapshots`` maps save-tick
-        timestamps to raw saturation-field arrays (empty when neither
-        ``save_state`` nor ``save_plot`` is on); ``diagnostics[key]`` is
-        the per-interval kg/(m²·h) flux density (one entry per forecast
-        interval, ``NaN`` at the IC row where there is no interval to
-        diagnose yet).
+        Returns ``(timestamps, trajectories, snapshots, diagnostics)``; see
+        ``_integrate_horizon`` for field descriptions.
         """
         self._pde.set_state(ic_rel_sat)
         return self._integrate_horizon(et_data, seg_et)
 
-    # =========================================================================
     # Forecast retrieval
-    # =========================================================================
 
     def _fetch_forecast(self, now: pd.Timestamp) -> Optional[pd.DataFrame]:
-        """Read the in-memory forecast cache and slice to ``[now, now+horizon]``.
-
-        We deliberately bypass ``forecast.get()`` because it has a latent
-        lories bug: the schedule-floor branch builds a pandas freq string
-        with ``f"{self.interval}T"`` and ``self.interval`` is the
-        unresolved Parameter descriptor (no ``__get__``, never converted
-        to int), which raises ``ValueError: Invalid frequency format`` the
-        moment the in-memory cache doesn't fully cover the range. Reading
-        ``forecast.data.to_frame()`` directly skips that branch — we lose
-        the logger gap-fill, but the forecast sub-component refreshes on
-        its own schedule so the cache covers anything we need at predict
-        time.
-        """
+        """Read the in-memory forecast cache via ``data.to_frame()`` and slice to ``[now, now+horizon]``."""
         weather = getattr(self.context, "weather", None)
         forecast_sub = getattr(weather, "forecast", None)
         if forecast_sub is None or not forecast_sub.is_enabled():
@@ -445,9 +311,7 @@ class SoilPredictor(SoilBase):
         sliced = df.loc[(df.index >= now) & (df.index <= end)]
         return sliced if not sliced.empty else None
 
-    # =========================================================================
     # PDE integration over horizon
-    # =========================================================================
 
     def _integrate_horizon(
         self,
@@ -459,15 +323,10 @@ class SoilPredictor(SoilBase):
         dict[pd.Timestamp, np.ndarray],
         dict[str, list[float]],
     ]:
-        """Step the predictor PDE through every (t, t+Δt) interval covered
-        by the forecast. Per-segment ET / rain values are read from the
-        forecast row at each step; no irrigation source is applied.
+        """Step the predictor PDE through every (t, t+Δt) forecast interval; no irrigation applied.
 
         Returns ``(timestamps, trajectories, snapshots, diagnostics)``.
-        Diagnostics carry one entry per timestamp — ``NaN`` at the IC row
-        (no interval to diagnose yet), then per-interval kg/(m²·h) flux
-        densities computed from the same mass-balance math the live
-        solver runs via :meth:`SoilBase._compute_diagnostics`.
+        ``diagnostics`` values are kg/(m²·h) flux densities; NaN at the IC row (no interval yet).
         """
         idx = et_data.index
         timestamps: list[pd.Timestamp] = []
@@ -486,12 +345,10 @@ class SoilPredictor(SoilBase):
             snapshots[ts] = self._pde.snapshot()
             last_save_ts = ts
 
-        # Initial state — the IC the caller just reset.
         if len(idx) > 0:
             timestamps.append(idx[0])
             for p in self._probes:
                 trajectories[p.channel_id].append(self._pde.sample(p))
-            # No interval has elapsed yet at the IC, so diagnostics are NaN.
             for key in diagnostics:
                 diagnostics[key].append(float("nan"))
             _maybe_snapshot(idx[0])
@@ -511,10 +368,6 @@ class SoilPredictor(SoilBase):
             )
             storage_before = self._total_water()
 
-            # HYDRUS-style adaptive walk over this forecast interval —
-            # shared with the live solver via SoilPDECore.walk_window
-            # (accept mode: under-converged finite states are kept at
-            # dt_min, non-finite substeps are rolled back and skipped).
             walk = self._pde.walk_window(
                 rates=rates,
                 window_s=elapsed_s,
@@ -537,8 +390,6 @@ class SoilPredictor(SoilBase):
                 diagnostics[key].append(interval_diag.get(key, float("nan")))
             _maybe_snapshot(ts_next)
 
-        # Always archive the final row so the horizon-end state is
-        # available even when it falls < save_freq after the last save.
         if capture_snapshots and timestamps:
             final_ts = timestamps[-1]
             if final_ts not in snapshots:
@@ -574,13 +425,7 @@ class SoilPredictor(SoilBase):
             return 0.0
         return float(precip) / elapsed_s  # mm/s == kg/(m²·s)
 
-    # The PDE state (state set/snapshot, apply_source, solve, sample) is
-    # owned by :class:`SoilPDECore` (``self._pde``) and shared with
-    # :class:`SoilSimulation` to keep the two solvers in lock-step.
-
-    # =========================================================================
     # Channel publishing
-    # =========================================================================
 
     def _publish_results(
         self,
@@ -591,26 +436,11 @@ class SoilPredictor(SoilBase):
         diagnostics: dict[str, list[float]],
         forecast_creation: pd.Timestamp,
     ) -> None:
-        # Per-probe emission: one row per forecast target timestamp, every
-        # row stamped with the same ``forecast_creation``. The composite
-        # ``(timestamp, timestamp_creation)`` PK lets multiple forecasts
-        # addressing the same target coexist as distinct rows.
-        #
-        # ``self.data`` on a Component is a ``DataAccess`` (a registry-like
-        # facade over individual channels); it does not expose a
-        # frame-level ``set_frame``. The lories pattern for multi-row
-        # channel values is to hand each channel a ``pd.Series`` indexed
-        # by the row timestamps — ``Channel.to_series`` then forwards the
-        # Series straight to the logger, which lands N rows in one INSERT
-        # (mirrors what WeatherForecast does after a Brightsky read).
         if not timestamps:
             return
 
         index = pd.DatetimeIndex(timestamps, name="timestamp")
 
-        # ``timestamp_creation``: same value on every emitted row (composite
-        # PK partner). Broadcasting the scalar through pandas gives us a
-        # Series of identical Timestamps, indexed by the target timestamps.
         creation_series = pd.Series(forecast_creation, index=index)
         self.data[self._TIMESTAMP_CREATION_KEY].set(index[0], creation_series)
 
@@ -620,17 +450,9 @@ class SoilPredictor(SoilBase):
                 continue
             traj = trajectories.get(probe.channel_id, [])
             if len(traj) != len(index):
-                # Defensive: integration produced a different sample
-                # count than the shared time axis. Skip rather than
-                # broadcast or truncate silently.
                 continue
             self.data[key].set(index[0], pd.Series(traj, index=index, dtype=float))
 
-        # Per-interval flux-density diagnostics on the same time axis. The
-        # IC row carries NaN (no interval to diagnose yet); pandas
-        # serialises that as SQL NULL so the joined-on-timestamp logger
-        # frame stays consistent and the dashboard table renders the
-        # row as "—".
         for constant in _DIAGNOSTIC_CONSTANTS:
             values = diagnostics.get(constant.key, [])
             if len(values) != len(index):
@@ -643,10 +465,6 @@ class SoilPredictor(SoilBase):
         if not snapshots:
             return
 
-        # Snapshot rows share timestamps with probe rows (we sample
-        # save_freq-aligned forecast rows), so the timestamp_creation
-        # Series above already covers them. Sort once so state and plot
-        # rows line up to the same time axis.
         save_index = pd.DatetimeIndex(sorted(snapshots), name="timestamp")
 
         if self._save_state:
@@ -662,9 +480,6 @@ class SoilPredictor(SoilBase):
                 try:
                     plot_values.append(self._render_snapshot_png(snapshots[t], t))
                 except Exception:  # noqa: BLE001
-                    # Disable for the rest of this tick — a failure here
-                    # must not strand the state / probe channels we've
-                    # already (or are about to) publish above.
                     logging.exception(
                         "%s: predict_plot render failed at %s; skipping " "remaining plot snapshots this tick.",
                         self.name,
@@ -685,10 +500,7 @@ class SoilPredictor(SoilBase):
         return buf.getvalue()
 
     def _render_snapshot_png(self, rel_sat: np.ndarray, sim_t: pd.Timestamp) -> bytes:
-        """Render one saturation snapshot to PNG bytes via the shared
-        :mod:`plot_render` helpers. Builds the fig/ax/norm lazily on the
-        first call and reuses them across the tick so 24 hourly frames
-        don't allocate 24 figures."""
+        """Render a saturation snapshot to PNG bytes; fig/ax/norm are lazily initialised and reused."""
         if self._plot_fig is None:
             self._plot_fig, self._plot_ax, self._plot_norm = plot_render.init_rel_sat_figure(
                 self._mesh_config.width,
