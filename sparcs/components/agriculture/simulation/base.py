@@ -49,7 +49,7 @@ class FieldSimulation(Component):
 
     VEGETATION_CHANNELS = [TEMP_GROUND, LAI, ROUGHNESS, PLANT_HEIGHT, NDVI]
 
-    # Bundled per-segment channels — each holds a ``list[float]`` ordered by ``top_segment_names``.
+    # Bundled per-segment channels, each holds a ``list[float]`` ordered by ``top_segment_names``.
     SEG_GHI = Constant(list, "seg_ghi", "GHI (per segment)", "W/m^2")
     SEG_EVAPOTRANSPIRATION = Constant(list, "seg_evapotranspiration", "Evapotranspiration (per segment)", "kg/(m^2*h)")
     SEG_TEMP_GROUND = Constant(list, "seg_temp_ground", "Ground Temperature (per segment)", "°C")
@@ -79,7 +79,7 @@ class FieldSimulation(Component):
     }
     _OPTIONAL_WEATHER_KEYS: frozenset[str] = frozenset(_WEATHER_DEFAULTS.keys())
 
-    # Bay width (m) — shared by soil mesh and ground-shading children.
+    # Bay width (m), shared by soil mesh and ground-shading children.
     _bay_width: float = 3.5
 
     # Latest per-segment shade factors from GroundShading; {} = no data yet (treated as 1.0).
@@ -99,7 +99,17 @@ class FieldSimulation(Component):
 
         self._lai_type = configs.get("lai_type", default="grass")
         if self._lai_type not in _LAI_BY_TYPE:
-            raise ValueError(f"Unsupported lai_type '{self._lai_type}'. " f"Must be one of: {sorted(_LAI_BY_TYPE)}")
+            raise ValueError(f"Unsupported lai_type '{self._lai_type}'. Must be one of: {sorted(_LAI_BY_TYPE)}")
+
+        # TODO: remove this later from configs
+        self.roughness = configs.get("roughness", default=0.002)
+        self.plant_height = configs.get("plant_height", default=0.1)
+        self.ndvi = configs.get("ndvi", default=0.25)
+
+        self.bare_lai = configs.get("bare_lai", default=1.0)
+        self.bare_roughness = configs.get("bare_roughness", default=0.002)
+        self.bare_plant_height = configs.get("bare_plant_height", default=0.1)
+        self.bare_ndvi = configs.get("bare_ndvi", default=0.25)
 
         self._bay_width = float(configs.get("bay_width", default=3.5))
 
@@ -179,7 +189,7 @@ class FieldSimulation(Component):
         names = self.top_segment_names
         if mapping.keys() != set(names):
             raise ValueError(
-                f"set_segment_values({channel!s}) keys {sorted(mapping)} " f"!= registered segments {sorted(names)}"
+                f"set_segment_values({channel!s}) keys {sorted(mapping)} != registered segments {sorted(names)}"
             )
         self.data[channel].set(timestamp, [float(mapping[n]) for n in names])
 
@@ -207,7 +217,7 @@ class FieldSimulation(Component):
             return
 
         if self.weather is None:
-            logging.warning("%s: no Weather component resolved — chain will never tick.", self.name)
+            logging.warning("%s: no Weather component resolved; chain will never tick.", self.name)
             return
 
         self._weather_channels = Channels(list(self.weather.data.values()))
@@ -217,7 +227,7 @@ class FieldSimulation(Component):
         soil_data = self.soil_simulation.data
         if not soil_data.simulation_state.has_logger():
             logging.warning(
-                "%s: SIMULATION_STATE has no logger configured — soil state will not "
+                "%s: SIMULATION_STATE has no logger configured; soil state will not "
                 "persist across restarts. Configure a logger on the channel to enable "
                 "warm starts.",
                 self.name,
@@ -302,7 +312,7 @@ class FieldSimulation(Component):
         ]
         if missing:
             logging.debug(
-                "%s: skipping advance — weather channels not valid: %s",
+                "%s: skipping advance; weather channels not valid: %s",
                 self.name,
                 missing,
             )
@@ -364,10 +374,10 @@ class FieldSimulation(Component):
             seg_props.append(
                 SegmentProperties(
                     name=name,
-                    lai=canopy_lai if is_canopy else self._BARE_LAI,
-                    plant_height=canopy_plant_height if is_canopy else self._BARE_PLANT_HEIGHT,
-                    ndvi=canopy_ndvi if is_canopy else self._BARE_NDVI,
-                    roughness=canopy_roughness if is_canopy else self._BARE_ROUGHNESS,
+                    lai=canopy_lai if is_canopy else self.bare_lai,
+                    plant_height=canopy_plant_height if is_canopy else self.bare_plant_height,
+                    ndvi=canopy_ndvi if is_canopy else self.bare_ndvi,
+                    roughness=canopy_roughness if is_canopy else self.bare_roughness,
                     shade_factor=float(self._segment_shade.get(name, 1.0)),
                     face_length=float(soil.segment_face_length(name)),
                     is_canopy=is_canopy,
@@ -380,7 +390,7 @@ class FieldSimulation(Component):
         if not self._vegetation_placeholder_warned:
             logging.warning(
                 "%s: using placeholder vegetation state (LAI from monthly table '%s', "
-                "ROUGHNESS=0.002, PLANT_HEIGHT=0.1, NDVI=0.25) — "
+                "ROUGHNESS=0.002, PLANT_HEIGHT=0.1, NDVI=0.25); "
                 "no Crop subcomponent or field-level sensors are publishing these "
                 "channels yet. Values are still written for debugging visibility.",
                 self.name,
@@ -388,15 +398,15 @@ class FieldSimulation(Component):
             )
             self._vegetation_placeholder_warned = True
         df[self.LAI] = pd.array(_LAI_BY_TYPE[self._lai_type])[df.index.month - 1].astype(float)
-        df[self.ROUGHNESS] = 0.002
-        df[self.PLANT_HEIGHT] = 0.1
-        df[self.NDVI] = 0.25
+        df[self.ROUGHNESS] = self.roughness
+        df[self.PLANT_HEIGHT] = self.plant_height
+        df[self.NDVI] = self.ndvi
 
         for key, default in self._WEATHER_DEFAULTS.items():
             if key not in df.columns or df[key].isna().all():
                 if key not in self._weather_default_warned:
                     logging.warning(
-                        "%s: weather feed does not supply '%s' — defaulting to %s.",
+                        "%s: weather feed does not supply '%s'; defaulting to %s.",
                         self.name,
                         key,
                         default,
