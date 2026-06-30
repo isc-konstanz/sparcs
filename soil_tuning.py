@@ -48,7 +48,14 @@ from lories.components.weather import Weather
 from lories.core.configs.directories import Directories, Directory
 from sparcs.components.agriculture import Irrigation, SoilMoisture
 from sparcs.components.agriculture.simulation import FieldSimulation, SoilSimulation, plot_render
+from sparcs.components.agriculture.simulation._anchor import (
+    AnchorConfig,
+    AnchorSensor,
+    anchor_update,
+)
 from sparcs.components.agriculture.simulation._soil import (
+    SE_MAX,
+    SE_MIN,
     FluxRates,
     PDEConfig,
     SoilPDECore,
@@ -122,6 +129,9 @@ _W_RENDER_STRIDE: int = 4
 _W_PROGRESS_Q: Any = None  # Manager().Queue()
 _W_PNG_STORE: Any = None  # Manager().dict()  job_id -> (png_bytes, ts)
 _W_CANCEL_DICT: Any = None  # Manager().dict()  job_id -> bool
+_W_ANCHOR_CFG: Any = None  # AnchorConfig (anchoring off unless [anchor] enabled)
+_W_ANCHOR_SENSORS: Any = None  # list[AnchorSensor]
+_W_ANCHOR_HISTORY: Any = None  # dict[sensor key -> measured tension series, hPa]
 
 
 def _worker_init(
@@ -136,11 +146,15 @@ def _worker_init(
     progress_q,
     png_store,
     cancel_dict,
+    anchor_cfg,
+    anchor_sensors,
+    anchor_history,
 ) -> None:
     """Populate the per-worker globals once, before any task is dispatched."""
     global _W_MESH_CONFIG, _W_BASE_PDE_CONFIG, _W_PROBES
     global _W_ET_DATA, _W_SEG_ET, _W_IRRIGATION, _W_INITIAL_BLOB
     global _W_RENDER_STRIDE, _W_PROGRESS_Q, _W_PNG_STORE, _W_CANCEL_DICT
+    global _W_ANCHOR_CFG, _W_ANCHOR_SENSORS, _W_ANCHOR_HISTORY
 
     np.seterr(all="ignore")
     warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -156,6 +170,9 @@ def _worker_init(
     _W_PROGRESS_Q = progress_q
     _W_PNG_STORE = png_store
     _W_CANCEL_DICT = cancel_dict
+    _W_ANCHOR_CFG = anchor_cfg
+    _W_ANCHOR_SENSORS = anchor_sensors or []
+    _W_ANCHOR_HISTORY = anchor_history or {}
 
 
 def _worker_ping() -> bool:
@@ -178,6 +195,9 @@ class TuningRunner:
         initial_blob: Optional[bytes],
         max_workers: int = 40,
         render_stride: int = 4,
+        anchor_cfg: Optional[AnchorConfig] = None,
+        anchor_sensors: Optional[list] = None,
+        anchor_history: Optional[dict] = None,
     ) -> None:
         self.mesh_config = mesh_config
         self.base_pde_config = base_pde_config
@@ -188,6 +208,9 @@ class TuningRunner:
         self.initial_blob = initial_blob
         self.max_workers = max_workers
         self.render_stride = render_stride
+        self.anchor_cfg = anchor_cfg
+        self.anchor_sensors = anchor_sensors or []
+        self.anchor_history = anchor_history or {}
         self._lock = threading.Lock()
         self._jobs: "OrderedDict[str, TuningJob]" = OrderedDict()
 
@@ -213,6 +236,9 @@ class TuningRunner:
                 self._progress_q,
                 self._png_store,
                 self._cancel_dict,
+                self.anchor_cfg,
+                self.anchor_sensors,
+                self.anchor_history,
             ),
         )
 
@@ -370,6 +396,51 @@ class TuningRunner:
                 log.warning("[%s] %s", job_id, msg.get("msg"))
 
 
+def _anchor_replay_step(pde: SoilPDECore, t_now: pd.Timestamp, last_anchored: dict) -> None:
+    """Offline anchor backend: nudge the field toward measured tension at ``t_now``.
+
+    Mirrors the live ``SoilSimulation._apply_anchor`` (same shared ``anchor_update``)
+    so what the bench validates is what production runs. The read_tension closure
+    looks up each sensor's latest logged reading at or before ``t_now``; the
+    freshness/staleness gate lives in ``anchor_update``. ``cfg.sensors`` is this
+    run's allowlist -- hold a sensor out of it to score the model at its location.
+    """
+    cfg = _W_ANCHOR_CFG
+    sensors = [s for s in _W_ANCHOR_SENSORS if s.key in cfg.sensors]
+    if not sensors:
+        return
+
+    def read(sensor: AnchorSensor):
+        series = _W_ANCHOR_HISTORY.get(sensor.key)
+        if series is None or len(series) == 0:
+            return None, float("nan")
+        prior = series.loc[:t_now]
+        if len(prior) == 0:
+            return None, float("nan")
+        value = float(prior.iloc[-1])
+        if not np.isfinite(value):
+            return None, float("nan")
+        return prior.index[-1], value
+
+    result = anchor_update(
+        np.asarray(pde.rel_sat.value),
+        np.asarray(pde.mesh.cellCenters),
+        sensors,
+        read,
+        t_now,
+        cfg,
+        pde.soil_model,
+        _W_MESH_CONFIG.width,
+        last_anchored,
+        SE_MIN,
+        SE_MAX,
+    )
+    if result is None:
+        return
+    pde.set_state(result.se_new, update_old=True)
+    last_anchored.update(result.anchored_at)
+
+
 def _worker_run_job(job_id: str, label: str, params: dict[str, float]) -> None:
     """Run one tuning simulation in a pool worker: stream progress rows via the
     Manager queue, write PNG frames directly into the shared png-store."""
@@ -427,6 +498,8 @@ def _worker_run_job(job_id: str, label: str, params: dict[str, float]) -> None:
         put({"type": "row", "row": row0, "progress": 0.0})
         _push_render(png_store, job_id, label, fig, ax, norm, pde, timeline[0])
 
+        anchor_on = _W_ANCHOR_CFG is not None and _W_ANCHOR_CFG.enabled and _W_ANCHOR_SENSORS
+        last_anchored: dict = {}
         for i in range(1, len(timeline)):
             if cancel():
                 put({"type": "cancelled"})
@@ -452,6 +525,9 @@ def _worker_run_job(job_id: str, label: str, params: dict[str, float]) -> None:
                 else:
                     put({"type": "failed", "error": reason})
                 return
+
+            if anchor_on:
+                _anchor_replay_step(pde, t_now, last_anchored)
 
             row = _sample_probe_row(pde, t_now, probes)
             put(
@@ -726,6 +802,8 @@ def _load_history(
         log.exception("state-blob lookup failed; using PDEConfig IC")
 
     measurements: list[pd.DataFrame] = []
+    anchor_sensors: list[AnchorSensor] = []
+    anchor_history: dict[str, pd.Series] = {}
     field_component = field_sim.context  # AgriculturalField
     for child in _walk_components(field_component):
         if not isinstance(child, SoilMoisture):
@@ -742,8 +820,12 @@ def _load_history(
         tension = _sensor_tension_series(child, m)
         if tension is not None and not tension.empty:
             measurements.append(tension.to_frame())
+            # Keyed history + geometry for the offline anchor backend (mirrors the
+            # live discovery). Sorted so the at-or-before lookup in the replay works.
+            anchor_history[child.key] = tension.sort_index()
+            anchor_sensors.append(AnchorSensor(key=child.key, x_offset_cm=child.x_offset, depth_cm=child.depth))
 
-    return et_data, seg_et, irrigation, initial_blob, measurements
+    return et_data, seg_et, irrigation, initial_blob, measurements, anchor_sensors, anchor_history
 
 
 def _sensor_tension_series(sensor: SoilMoisture, frame: pd.DataFrame) -> Optional[pd.Series]:
@@ -1255,7 +1337,7 @@ def main() -> int:
             return 2
         log.info("history window %s .. %s", start, end)
 
-        et_data, seg_et, irrigation, initial_blob, measurements = _load_history(
+        et_data, seg_et, irrigation, initial_blob, measurements, anchor_sensors, anchor_history = _load_history(
             soil_sim,
             field_sim,
             start,
@@ -1278,7 +1360,16 @@ def main() -> int:
             irrigation=irrigation,
             initial_blob=initial_blob,
             max_workers=max_workers,
+            anchor_cfg=soil_sim._anchor_cfg,
+            anchor_sensors=anchor_sensors,
+            anchor_history=anchor_history,
         )
+        if soil_sim._anchor_cfg.enabled:
+            log.info(
+                "anchoring ON: %d sensor(s) in allowlist, %d with history",
+                len(soil_sim._anchor_cfg.sensors),
+                sum(1 for s in anchor_sensors if s.key in soil_sim._anchor_cfg.sensors),
+            )
 
         dash_app = build_app(runner, measurements, poll_seconds=poll_seconds)
         log.info(
