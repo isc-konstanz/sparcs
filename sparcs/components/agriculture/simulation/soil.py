@@ -24,8 +24,10 @@ import pandas as pd
 from lories import Constant
 from lories.components.weather import Weather
 from lories.typing import Configurations
+from lories.util import to_timedelta
 
 from . import plot_render
+from ._anchor import AnchorConfig, AnchorSensor, anchor_update
 
 logging.getLogger("fipy").setLevel(logging.WARNING)
 np.seterr(all="ignore")
@@ -73,9 +75,31 @@ def _walk_components(root) -> list:
     return out
 
 
+def _parse_anchor_config(configs: Configurations) -> AnchorConfig:
+    """Parse an ``[anchor]`` block into the FiPy-free ``AnchorConfig``.
+
+    Off by default, so existing configs and calibration runs are unaffected.
+    ``sensors`` is the allowlist (a list of sensor keys, or a comma string).
+    Per-sensor pF overrides are deferred: the orchestrator supports them, but the
+    first-cut parser maps every allowlisted sensor to the global ``sigma_meas_pf``.
+    """
+    raw = configs.get("sensors", default=[]) or []
+    if isinstance(raw, str):
+        raw = [s.strip() for s in raw.split(",") if s.strip()]
+    return AnchorConfig(
+        enabled=configs.get_bool("enabled", default=False),
+        sigma_sys=float(configs.get("sigma_sys", default=0.05)),
+        sigma_meas_pf=float(configs.get("sigma_meas_pf", default=0.15)),
+        r_horizontal=float(configs.get("r_horizontal", default=0.5)),
+        r_vertical=float(configs.get("r_vertical", default=0.2)),
+        staleness=to_timedelta(configs.get("staleness", default="6h")),
+        sensors={str(key): None for key in raw},
+    )
+
+
 class SoilSimulation(SoilBase):
     TYPE: str = "soil_simulation"
-    INCLUDES = ["mesh", "pde", "plot", "probes"]
+    INCLUDES = ["mesh", "pde", "plot", "probes", "anchor"]
 
     SIMULATION_STATE = Constant(bytes, "simulation_state", "Soil Simulation State", "-")
     SOIL_PROGRESS_IMAGE = Constant(bytes, "soil_progress_image", "Soil Simulation Progress Image", "png")
@@ -95,6 +119,10 @@ class SoilSimulation(SoilBase):
         "Mass-Balance Residual (integral - direct)",
         "kg/(m^2*h)",
     )
+    # Per-step assimilation increment from anchoring [kg per out-of-plane metre,
+    # matching total_water()]. A diagnostic of how hard the correction works; not
+    # a flux, so it is excluded from the mass-balance residual.
+    WATER_ANCHOR = Constant(float, "water_anchor", "Anchor Assimilation Increment", "kg/m")
 
     _plot_config: Optional[PlotConfig] = None
 
@@ -137,8 +165,11 @@ class SoilSimulation(SoilBase):
             SoilSimulation.WATER_RUNOFF,
             SoilSimulation.WATER_DEMAND_UNMET,
             SoilSimulation.WATER_BALANCE_RESIDUAL,
+            SoilSimulation.WATER_ANCHOR,
         ):
             self.data.add(c, aggregate="mean", logger={"enabled": True})
+
+        self._anchor_cfg = _parse_anchor_config(configs.get_member("anchor", defaults={}))
 
         if configs.get_bool("plot_structure", default=False):
             structure_dir = configs.get(
@@ -235,7 +266,11 @@ class SoilSimulation(SoilBase):
             if self._plot_progress:
                 self._render_progress_safe(now)
 
+            # Snapshot the PDE-only storage change before anchoring so the
+            # mass-balance residual sees the solver alone, not the correction.
             delta_storage = self._total_water() - storage_before
+            if self._anchor_cfg.enabled and self._anchor_sensors:
+                self._apply_anchor(now, water_after_walk=self._total_water())
             diagnostics = self._record_diagnostics(
                 rates,
                 now,
@@ -417,7 +452,15 @@ class SoilSimulation(SoilBase):
         # stays off unless a config explicitly enables it.
         self._sensor_probes = []
         self._sensor_probes_ready = False
-        self._discover_sensor_probes_enabled = configs.get_bool("discover_sensor_probes", default=False)
+        # Anchor sensors + their live tension channels + per-sensor "last anchored
+        # at" map, populated by _discover_sensor_probes on first advance().
+        self._anchor_sensors: list[AnchorSensor] = []
+        self._anchor_channels: dict[str, Any] = {}
+        self._last_anchored: dict[str, pd.Timestamp] = {}
+        # Enabling [anchor] drives discovery on, so the operator sets one switch.
+        self._discover_sensor_probes_enabled = (
+            configs.get_bool("discover_sensor_probes", default=False) or self._anchor_cfg.enabled
+        )
         if not configs.has_member("probes"):
             return
         probes_cfg = configs.get_member("probes", defaults={})
@@ -471,6 +514,8 @@ class SoilSimulation(SoilBase):
         if field is None:
             return
         found: list[ProbeSpec] = []
+        anchor_sensors: list[AnchorSensor] = []
+        anchor_channels: dict[str, Any] = {}
         for comp in _walk_components(field):
             if not isinstance(comp, SoilMoisture):
                 continue
@@ -478,6 +523,8 @@ class SoilSimulation(SoilBase):
                 if not comp.has_measured_tension:
                     continue
                 found.append(resolve_probe_from_sensor(comp, self._mesh_fipy, self._mesh_config))
+                anchor_sensors.append(AnchorSensor(key=comp.key, x_offset_cm=comp.x_offset, depth_cm=comp.depth))
+                anchor_channels[comp.key] = comp.data[SoilMoisture.WATER_TENSION]
             except Exception:
                 logging.exception(
                     "%s: failed to derive probe from sensor %s",
@@ -485,8 +532,50 @@ class SoilSimulation(SoilBase):
                     getattr(comp, "key", "?"),
                 )
         self._sensor_probes = found
+        self._anchor_sensors = anchor_sensors
+        self._anchor_channels = anchor_channels
         if found:
             logging.info("%s: discovered %d sensor probe(s) for anchoring", self.name, len(found))
+
+    def _read_live_tension(self, sensor: AnchorSensor) -> tuple[Optional[pd.Timestamp], float]:
+        """Live backend for anchor_update: the sensor's latest valid water-tension
+        reading as ``(timestamp, hPa)``, or ``(None, nan)`` when it has none."""
+        channel = self._anchor_channels.get(sensor.key)
+        if channel is None or not channel.is_valid:
+            return None, float("nan")
+        return channel.timestamp, float(channel.value)
+
+    def _apply_anchor(self, now: pd.Timestamp, water_after_walk: float) -> None:
+        """Nudge the post-walk saturation field toward fresh tensiometer readings.
+
+        Runs only on the live path (advance()); the SoilPredictor forecast never
+        anchors. Called after the walk and after the PDE-only mass-balance snapshot
+        is taken, so the correction is excluded from the residual. Publishes the
+        assimilation increment and logs each sensor's innovation.
+        """
+        sensors = [s for s in self._anchor_sensors if s.key in self._anchor_cfg.sensors]
+        if not sensors:
+            return
+        result = anchor_update(
+            np.asarray(self._pde.rel_sat.value),
+            np.asarray(self._pde.mesh.cellCenters),
+            sensors,
+            self._read_live_tension,
+            now,
+            self._anchor_cfg,
+            self._pde.soil_model,
+            self._mesh_config.width,
+            self._last_anchored,
+            SE_MIN,
+            SE_MAX,
+        )
+        if result is None:
+            return
+        self._pde.set_state(result.se_new, update_old=True)
+        self._last_anchored.update(result.anchored_at)
+        self.data[SoilSimulation.WATER_ANCHOR].set(now, self._total_water() - water_after_walk)
+        for key, innovation in result.innovations.items():
+            logging.debug("%s: anchor innovation %s = %+.4f Se", self.name, key, innovation)
 
     def _plot_mesh(self, save_path: Optional[str] = None):
         mesh = meshio.read(self._mesh_config.filename)
