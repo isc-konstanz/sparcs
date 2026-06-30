@@ -176,7 +176,7 @@ class TuningRunner:
         seg_et: dict[str, pd.DataFrame],
         irrigation: pd.Series,
         initial_blob: Optional[bytes],
-        max_workers: int = 5,
+        max_workers: int = 40,
         render_stride: int = 4,
     ) -> None:
         self.mesh_config = mesh_config
