@@ -13,11 +13,14 @@ component tree.
 
 from types import SimpleNamespace
 
+import pytest
+
 import numpy as np
 from sparcs.components.agriculture.simulation._soil import (
     _coords_to_cell,
     _nearest_cell_m,
     resolve_probe_from_sensor,
+    resolve_probes,
 )
 
 
@@ -75,3 +78,44 @@ def test_resolve_probe_from_sensor_builds_point_spec():
     # name carries the cm coordinates for log readability.
     assert "30.0cm" in spec.name
     assert "bay1_30cm" in spec.name
+
+
+class _ProbesCfg:
+    """Configurations stand-in exposing only the members resolve_probes reads."""
+
+    def __init__(self, points):
+        self._points = points
+
+    def has_member(self, name):
+        return name == "points" and bool(self._points)
+
+    def get_member(self, name):
+        return self._points
+
+
+def test_resolve_probes_reads_cm_point_coordinates():
+    mesh = _grid([1.5, 1.5], [-0.3, -0.6])
+    mesh_config = SimpleNamespace(width=3.0)
+    cfg = _ProbesCfg(
+        {
+            "root_zone_center": {"x_offset": 0.0, "depth": 50.0},
+            "shallow_center": {"x_offset": 0.0, "depth": 20.0},
+        }
+    )
+
+    probes = resolve_probes(cfg, mesh, mesh_config)
+
+    by_id = {p.channel_id: p for p in probes}
+    # 50 cm -> 0.5 m -> nearest the deeper cell; 20 cm -> 0.2 m -> shallower.
+    assert by_id["root_zone_center"].cell_indices.tolist() == [1]
+    assert by_id["shallow_center"].cell_indices.tolist() == [0]
+    assert by_id["root_zone_center"].weights.tolist() == [1.0]
+
+
+def test_resolve_probes_rejects_legacy_metre_keys():
+    mesh = _grid([1.5], [-0.5])
+    mesh_config = SimpleNamespace(width=3.0)
+    cfg = _ProbesCfg({"old": {"x": 0.0, "y": 0.5}})
+
+    with pytest.raises(ValueError, match="x_offset"):
+        resolve_probes(cfg, mesh, mesh_config)

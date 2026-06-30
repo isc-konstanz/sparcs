@@ -194,61 +194,37 @@ def resolve_probes(
     mesh_config: "MeshConfig",
     log_name: Optional[str] = None,
 ) -> list[ProbeSpec]:
-    """Resolve ``[probes.points.<name>]`` / ``[probes.areas.<name>]`` config blocks
-    against a FiPy mesh into a list of ``ProbeSpec`` sampling recipes.
+    """Resolve ``[probes.points.<name>]`` config blocks against a FiPy mesh into
+    a list of point ``ProbeSpec`` sampling recipes.
 
-    Coordinates: ``x`` bay-centered, ``y`` positive depth in metres.
+    Coordinates use the same vocabulary and unit as a SoilMoisture sensor
+    (a sensor is-a probe): ``x_offset`` bay-centered and signed (left negative),
+    ``depth`` positive-downward, both in centimetres. See
+    ``docs/adr/0001-soil-coordinate-units-cm.md``.
     """
     probes: list[ProbeSpec] = []
-    cell_centers = np.asarray(mesh_fipy.cellCenters)
-    cell_x, cell_y = cell_centers[0], cell_centers[1]
-    cell_volumes = np.asarray(mesh_fipy.cellVolumes)
-    x_offset = mesh_config.width / 2.0
-
-    if probes_cfg.has_member("points"):
-        for key, spec in probes_cfg.get_member("points").items():
-            x = float(spec["x"])
-            y = float(spec["y"])
-            idx = _nearest_cell_m(cell_x, cell_y, x, y, x_offset)
-            probes.append(
-                ProbeSpec(
-                    name=f"Probe point (x={x:.3f}, depth={y:.3f})",
-                    channel_id=key,
-                    cell_indices=np.array([idx], dtype=int),
-                    weights=np.array([1.0]),
-                )
+    if not probes_cfg.has_member("points"):
+        return probes
+    for key, spec in probes_cfg.get_member("points").items():
+        try:
+            x_offset_cm = float(spec["x_offset"])
+            depth_cm = float(spec["depth"])
+        except (KeyError, TypeError):
+            raise ValueError(
+                f"probe point '{key}' must use centimetre coordinates "
+                f"'x_offset'/'depth'; the old metre keys 'x'/'y' were removed. "
+                f"Convert with x_offset = x * 100, depth = y * 100 "
+                f"(see docs/adr/0001-soil-coordinate-units-cm.md)."
+            ) from None
+        idx = _coords_to_cell(mesh_fipy, mesh_config, x_offset_cm, depth_cm)
+        probes.append(
+            ProbeSpec(
+                name=f"Probe point (x_offset={x_offset_cm:.1f}cm, depth={depth_cm:.1f}cm)",
+                channel_id=key,
+                cell_indices=np.array([idx], dtype=int),
+                weights=np.array([1.0]),
             )
-
-    if probes_cfg.has_member("areas"):
-        for key, spec in probes_cfg.get_member("areas").items():
-            x_min = float(spec["x_min"])
-            x_max = float(spec["x_max"])
-            y_min = float(spec["y_min"])
-            y_max = float(spec["y_max"])
-            mask = (cell_x >= x_min + x_offset) & (cell_x <= x_max + x_offset) & (cell_y >= -y_max) & (cell_y <= -y_min)
-            indices = np.flatnonzero(mask)
-            if indices.size == 0:
-                if log_name:
-                    logging.warning(
-                        "%s: probe area '%s' (x=[%.3f,%.3f], depth=[%.3f,%.3f]) covers no mesh cells; skipping.",
-                        log_name,
-                        key,
-                        x_min,
-                        x_max,
-                        y_min,
-                        y_max,
-                    )
-                continue
-            probes.append(
-                ProbeSpec(
-                    name=(
-                        f"Probe area x=[{x_min:.3f},{x_max:.3f}] depth=[{y_min:.3f},{y_max:.3f}], {indices.size} cells"
-                    ),
-                    channel_id=key,
-                    cell_indices=indices,
-                    weights=cell_volumes[indices].copy(),
-                )
-            )
+        )
     return probes
 
 
