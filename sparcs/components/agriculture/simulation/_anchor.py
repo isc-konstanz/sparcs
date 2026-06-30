@@ -17,8 +17,9 @@ unit-testable on a synthetic cell grid with no mesh and no soil model. See the
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Any, Iterable
 
 import numpy as np
 
@@ -27,6 +28,23 @@ import numpy as np
 # vanish continuously at d = 1 so the next solve is not handed a saturation step.
 # Gaspari-Cohn is the noted upgrade if strict compact support is later wanted.
 _TAPER_STD = 0.5
+
+# 1 hPa of pressure equals this many metres of water column (4 degC).
+_HPA_TO_M_WATER = 0.0101972
+
+_LN10 = math.log(10.0)
+
+# Floor on the measurement variance in Se^2 units. Near saturation the pF->Se
+# Jacobian collapses -- the flat retention curve maps a fixed pF error to a
+# vanishing Se error -- which would hand a near-saturated sensor near-infinite
+# trust and let it overwrite the field. The floor keeps the gain finite. This is
+# the PRD's recorded watch-point (.scratch/soil-sensor-anchoring/PRD.md).
+_MIN_VARIANCE = 1.0e-6
+
+# dh_dse is singular at the saturation bounds (Se = 0 or 1); evaluate the slope a
+# hair inside them. At the bounds head_m is extreme or zero anyway, so the floor
+# governs the variance regardless of the exact clipped slope.
+_SE_EPS = 1.0e-9
 
 
 @dataclass(frozen=True)
@@ -44,6 +62,52 @@ class AnchorObservation:
     y_m: float
     se_meas: float
     variance: float
+
+
+def sensor_xy_m(x_offset_cm: float, depth_cm: float, width_m: float) -> tuple[float, float]:
+    """Sensor mesh position in metres, mirroring the probe resolver's convention.
+
+    Bay-centered ``x_offset`` (cm, left negative) maps to absolute mesh x
+    ``x_offset * 0.01 + width / 2``; positive-downward ``depth`` (cm) maps to mesh
+    ``y = -depth * 0.01`` (the mesh uses negative y for depth). Same mapping as
+    ``_soil._nearest_cell_m``, but kept continuous so the localization ellipse
+    centres on the sensor rather than its snapped cell.
+    """
+    return x_offset_cm * 0.01 + width_m / 2.0, -(depth_cm * 0.01)
+
+
+def observation_from_tension(
+    tension_hpa: float,
+    x_offset_cm: float,
+    depth_cm: float,
+    width_m: float,
+    model: Any,
+    sigma_meas_pf: float,
+) -> AnchorObservation:
+    """Map a tensiometer reading (hPa) at a sensor into an ``AnchorObservation``.
+
+    The shared observation adapter both backends feed: the live channel value in
+    ``advance()`` and the loaded-history lookup in the soil_tuning worker. The
+    measured tension converts to effective saturation through the retention model
+    (``se_from_psi``); the measurement std, specified in pF, converts to an Se
+    variance at the measured state via the curve slope::
+
+        sigma_se = sigma_meas_pf * |dSe/dpF| = sigma_meas_pf * head_m * ln10 / dh_dse
+
+    where ``head_m`` is the measured head in metres of water and ``dh_dse`` is the
+    model's |d head / dSe| in metres. The variance is floored (``_MIN_VARIANCE``)
+    so a near-saturated sensor cannot acquire near-infinite trust. ``model`` is
+    duck-typed (any retention model exposing ``se_from_psi`` and ``dh_dse``), so
+    this stays free of any FiPy import.
+    """
+    se_meas = float(model.se_from_psi(tension_hpa))
+    head_m = abs(tension_hpa) * _HPA_TO_M_WATER
+    se_eval = min(max(se_meas, _SE_EPS), 1.0 - _SE_EPS)
+    slope = float(model.dh_dse(se_eval))
+    sigma_se = sigma_meas_pf * head_m * _LN10 / slope
+    variance = max(sigma_se * sigma_se, _MIN_VARIANCE)
+    x_m, y_m = sensor_xy_m(x_offset_cm, depth_cm, width_m)
+    return AnchorObservation(x_m=x_m, y_m=y_m, se_meas=se_meas, variance=variance)
 
 
 def _localization_weights(cell_centers: np.ndarray, x_m: float, y_m: float, r_h: float, r_v: float) -> np.ndarray:
