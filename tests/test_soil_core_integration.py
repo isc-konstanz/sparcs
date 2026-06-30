@@ -67,7 +67,7 @@ def pde(tmp_path_factory) -> SoilPDECore:
 
 
 def _extreme_rain() -> FluxRates:
-    # ~360 mm/h — far beyond any infiltration capacity; the regime that
+    # ~360 mm/h, far beyond any infiltration capacity; the regime that
     # used to segfault the LU solve and trip the clipper hardest.
     return FluxRates(
         seg_evap={},

@@ -286,7 +286,7 @@ class Genuchten(SoilModel):
     def dh_dse(self, se: Any) -> Any:
         # |dh/dSe| in metres of water column per unit Se. This is the
         # quantity the Richards soil-water diffusivity D(Se) = K(Se)·|dh/dSe|
-        # consumes when K is in m/s and the mesh is in metres — the product
+        # consumes when K is in m/s and the mesh is in metres; the product
         # then lands in m²/s. h here is the magnitude of the (negative)
         # matric pressure head; psi_from_se returns the same magnitude in
         # hPa. Conversion: `alpha` is in cm⁻¹ by van Genuchten convention,
@@ -489,7 +489,7 @@ def _canonical_model_name(name: Optional[str]) -> str:
     key = (name or DEFAULT_SOIL_MODEL).strip().lower().replace(" ", "_")
     canonical = _MODEL_ALIASES.get(key)
     if canonical is None:
-        raise ValueError(f"Unknown soil model {name!r}. Available: " f"{sorted(set(_MODEL_ALIASES.values()))}")
+        raise ValueError(f"Unknown soil model {name!r}. Available: {sorted(set(_MODEL_ALIASES.values()))}")
     return canonical
 
 

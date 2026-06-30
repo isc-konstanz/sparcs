@@ -82,7 +82,7 @@ class SoilPredictor(SoilBase):
         mesh_config = getattr(self.context, "mesh_config", None)
         if mesh_config is None:
             raise ValueError(
-                f"{self.id}: parent FieldSimulation has no mesh_config — "
+                f"{self.id}: parent FieldSimulation has no mesh_config; "
                 "predictor needs a [soil_simulation.mesh] block to derive "
                 "the soil cross-section."
             )
@@ -164,7 +164,7 @@ class SoilPredictor(SoilBase):
 
         if not self._probes:
             logging.warning(
-                "%s: no probes resolved from [soil_simulation.probes] — "
+                "%s: no probes resolved from [soil_simulation.probes]; "
                 "predictor will still run but has no per-probe channels to "
                 "publish.",
                 self.name,
@@ -192,7 +192,7 @@ class SoilPredictor(SoilBase):
         key = (now, forecast_creation)
         if self._last_predicted_key == key:
             logging.debug(
-                "%s: predict skipped — already published for (now=%s, creation=%s).",
+                "%s: predict skipped (already published for now=%s, creation=%s).",
                 self.name,
                 now,
                 forecast_creation,
@@ -202,7 +202,7 @@ class SoilPredictor(SoilBase):
         forecast = self._fetch_forecast(now)
         if forecast is None or forecast.empty:
             logging.info(
-                "%s: predict skipped — no forecast rows in [%s, %s].",
+                "%s: predict skipped: no forecast rows in [%s, %s].",
                 self.name,
                 now,
                 now + self._horizon,
@@ -212,12 +212,12 @@ class SoilPredictor(SoilBase):
         field = self.context
         soil = getattr(field, "soil_simulation", None)
         if soil is None:
-            logging.info("%s: predict skipped — no soil_simulation sibling.", self.name)
+            logging.info("%s: predict skipped: no soil_simulation sibling.", self.name)
             return
 
         if getattr(soil, "_last_simulated_at", None) is None:
             logging.debug(
-                "%s: predict skipped — live solver has no state yet " "(cold-start still running) at %s.",
+                "%s: predict skipped: live solver has no state yet (cold-start still running) at %s.",
                 self.name,
                 now,
             )
@@ -230,7 +230,7 @@ class SoilPredictor(SoilBase):
             return
         if et_data.empty or et_data.shape[0] < 2:
             logging.info(
-                "%s: predict skipped — chain replay returned %d row(s), need ≥ 2.",
+                "%s: predict skipped: chain replay returned %d row(s), need ≥ 2.",
                 self.name,
                 et_data.shape[0],
             )
@@ -254,7 +254,7 @@ class SoilPredictor(SoilBase):
             )
         except Exception:  # noqa: BLE001
             logging.exception(
-                "%s: publishing results failed; predictor channels stay " "stale this tick (now=%s, creation=%s).",
+                "%s: publishing results failed; predictor channels stay stale this tick (now=%s, creation=%s).",
                 self.name,
                 now,
                 forecast_creation,
@@ -262,7 +262,7 @@ class SoilPredictor(SoilBase):
             return
         self._last_predicted_key = key
         logging.info(
-            "%s: predict OK — %d probes, %d rows emitted " "(now=%s, creation=%s).",
+            "%s: predict OK: %d probes, %d rows emitted (now=%s, creation=%s).",
             self.name,
             len(self._probes),
             len(timestamps),
@@ -481,7 +481,7 @@ class SoilPredictor(SoilBase):
                     plot_values.append(self._render_snapshot_png(snapshots[t], t))
                 except Exception:  # noqa: BLE001
                     logging.exception(
-                        "%s: predict_plot render failed at %s; skipping " "remaining plot snapshots this tick.",
+                        "%s: predict_plot render failed at %s; skipping remaining plot snapshots this tick.",
                         self.name,
                         t,
                     )

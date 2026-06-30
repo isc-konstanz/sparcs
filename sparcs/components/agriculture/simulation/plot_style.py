@@ -68,7 +68,7 @@ def apply_subplots_adjust(fig) -> None:
 
 
 def apply_axes_style(ax) -> None:
-    """Bracketed-unit labels, light grid, equal aspect — shared on both plots."""
+    """Bracketed-unit labels, light grid, equal aspect (shared on both plots)."""
     ax.set_xlabel(AXIS_LABEL_X)
     ax.set_ylabel(AXIS_LABEL_Y)
     ax.set_aspect("equal", adjustable="box")

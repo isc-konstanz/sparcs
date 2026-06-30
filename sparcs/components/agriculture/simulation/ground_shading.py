@@ -97,7 +97,7 @@ _GROUND_X_CLAMP = 100.0
 MODE_AS_IS = "as_is"  # fixed-tilt rows; supports `mirrored`
 MODE_HORIZONTAL = "horizontal"  # row geometry forced flat (surface_tilt = 0)
 MODE_TRACKABLE = "trackable"  # single-axis tracker via pvlib.tracking.singleaxis
-MODE_FREE_FIELD = "free_field"  # no PV array — open-sky reference baseline
+MODE_FREE_FIELD = "free_field"  # no PV array; open-sky reference baseline
 _VALID_MODES = (MODE_AS_IS, MODE_HORIZONTAL, MODE_TRACKABLE, MODE_FREE_FIELD)
 
 
@@ -452,7 +452,7 @@ class GroundShading(Component):
         """Parse the [ground_shading] block and build the PV setups."""
         mode = str(configs.get("mode", default=MODE_AS_IS)).lower()
         if mode not in _VALID_MODES:
-            raise ValueError(f"Unsupported ground_shading mode '{mode}'. " f"Must be one of: {sorted(_VALID_MODES)}")
+            raise ValueError(f"Unsupported ground_shading mode '{mode}'. Must be one of: {sorted(_VALID_MODES)}")
         self._mode = mode
         self._albedo = configs.get_float("albedo", default=0.2)
 
@@ -644,7 +644,7 @@ class GroundShading(Component):
             # pvfactors/numpy>=2 compat: collapsed zero-area surfaces can raise
             # inhomogeneous-shape ValueError. Fall back to open-sky; retry next tick.
             logging.warning(
-                "%s: pvfactors raised — falling back to open-sky for this "
+                "%s: pvfactors raised; falling back to open-sky for this "
                 "tick. Underlying cause is usually a pvfactors/numpy>=2 "
                 "compat bug; pin numpy<2 to restore real shading.",
                 self.name,
@@ -835,7 +835,7 @@ class GroundShading(Component):
                 missing.append(name)
         if missing:
             logging.warning(
-                "%s: SEG_GHI has no value for segment(s) %s at %s — writing NaN placeholder.",
+                "%s: SEG_GHI has no value for segment(s) %s at %s; writing NaN placeholder.",
                 self.name,
                 sorted(missing),
                 ts,
@@ -901,7 +901,7 @@ class GroundShading(Component):
         if not on_main_thread:
             if self._plot_config.show:
                 logging.warning(
-                    "%s: progress plot 'show' disabled — runs on a worker "
+                    "%s: progress plot 'show' disabled; runs on a worker "
                     "thread (matplotlib GUI requires the main thread). Use "
                     "'live = true' to view ground_shading.png in a browser.",
                     self.name,

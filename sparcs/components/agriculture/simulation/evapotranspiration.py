@@ -110,7 +110,7 @@ class Evapotranspiration(Component):
         if missing_cols:
             raise ValueError(f"Missing or NaN required columns for evapotranspiration: {missing_cols}")
 
-        # Weather-only terms — segment-independent, computed once.
+        # Weather-only terms, segment-independent, computed once.
         svp = self._sat_vapor_pressure(temperature=df[Weather.TEMP_AIR], only_pos=True)
         gvp = self._ground_vapor_pressure(hum_rel=df[Weather.HUMIDITY_REL], svp=svp)
         vh = self._vaporization_heat(temperature=df[Weather.TEMP_AIR])

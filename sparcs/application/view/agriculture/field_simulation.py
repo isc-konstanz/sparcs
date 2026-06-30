@@ -3,7 +3,7 @@
 sparcs.application.view.agriculture.field_simulation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Detailed dashboard for ``FieldSimulation`` — renders the latest soil-
+Detailed dashboard for ``FieldSimulation``: renders the latest soil-
 saturation and ground-shading PNGs.
 
 The dashboard is **channel-driven**: every panel reads its data straight
