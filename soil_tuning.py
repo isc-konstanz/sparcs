@@ -492,6 +492,18 @@ def _walk_substeps(
     return False, (f"{walk.reason}; params unstable for this forcing (likely rain spike saturating top cells).")
 
 
+def _irrigation_series_from_frame(flow_df: pd.DataFrame) -> pd.Series:
+    """Irrigation flow [L/min] from a logger frame, reading NULL flow as 0.
+
+    A NULL/NaN flow row means "not watering". Filling it with 0 (rather than
+    leaving it NaN) is load-bearing: ``_build_flux_rates`` samples the flow with
+    ``Series.asof``, which skips NaN and would otherwise latch the last nonzero
+    burst forward across the gap -- so the model keeps irrigating after watering
+    has physically stopped.
+    """
+    return flow_df.iloc[:, 0].astype(float).sort_index().fillna(0.0)
+
+
 def _build_flux_rates(
     ts: pd.Timestamp,
     elapsed_s: float,
@@ -694,7 +706,7 @@ def _load_history(
                 end=end,
             )
             if not flow_df.empty:
-                irrigation = flow_df.iloc[:, 0].astype(float).sort_index()
+                irrigation = _irrigation_series_from_frame(flow_df)
         except Exception:
             log.exception("irrigation logger read failed; assuming zero flow")
 
