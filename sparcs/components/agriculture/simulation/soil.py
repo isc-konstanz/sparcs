@@ -47,9 +47,30 @@ from ._soil import (  # noqa: E402, F401
     SolveResult,
     create_mesh,
     ensure_mesh,
+    resolve_probe_from_sensor,
     resolve_probes,
     top_segment_names_from_mesh,
 )
+
+
+def _walk_components(root) -> list:
+    """Flatten a component subtree into a list (root first)."""
+    out: list = []
+    stack = [root]
+    while stack:
+        c = stack.pop()
+        out.append(c)
+        children = getattr(c, "components", None)
+        if children:
+            try:
+                stack.extend(list(children.values()))
+            except Exception:
+                # Some contexts expose iteration differently, so be liberal.
+                try:
+                    stack.extend(list(children))
+                except Exception:
+                    pass
+    return out
 
 
 class SoilSimulation(SoilBase):
@@ -102,7 +123,7 @@ class SoilSimulation(SoilBase):
             logging.warning(
                 "%s: no [model] retention params found (field-level [model] not "
                 "inherited?). Using built-in van Genuchten defaults; any retention "
-                "params under [pde] are ignored — move them into a [model] block.",
+                "params under [pde] are ignored; move them into a [model] block.",
                 self.name,
             )
         self._ode_config = PDEConfig(configs.get_member("pde", defaults={}), model_configs=model_block)
@@ -171,11 +192,19 @@ class SoilSimulation(SoilBase):
 
         self._simulating = True
         try:
+            if self._discover_sensor_probes_enabled and not self._sensor_probes_ready:
+                try:
+                    self._discover_sensor_probes()
+                except Exception:
+                    # Discovery is dormant infra for the anchor; never let it
+                    # break the live solve tick. Mark ready so it does not retry.
+                    self._sensor_probes_ready = True
+                    logging.exception("%s: sensor-probe discovery failed; continuing", self.name)
             # Cold start: spin up with current weather to approximate steady state.
             if self._last_simulated_at is None:
                 elapsed = self._ode_config.cold_start
                 logging.info(
-                    "%s: cold start spin-up — %s with weather at %s",
+                    "%s: cold start spin-up: %s with weather at %s",
                     self.name,
                     elapsed,
                     now,
@@ -349,7 +378,7 @@ class SoilSimulation(SoilBase):
         if result.skipped_s > 0:
             logging.warning(
                 "%s: held state through %.1fs of a %.1fs window (substeps "
-                "unsolvable at dt_min) — mass-balance diagnostics exclude "
+                "unsolvable at dt_min); mass-balance diagnostics exclude "
                 "the skipped slices.",
                 self.name,
                 result.skipped_s,
@@ -382,6 +411,13 @@ class SoilSimulation(SoilBase):
     def _configure_probes(self, configs: Configurations) -> None:
         """Resolve probe specs from ``[probes]`` and register one float channel per probe."""
         self._probes = []
+        # Sensor-derived probes are discovered lazily on first advance() (separate
+        # from config probes: sample-only, no logged channel). See _discover_sensor_probes.
+        # Opt-in: the only consumer is the (separate) anchor work, so discovery
+        # stays off unless a config explicitly enables it.
+        self._sensor_probes = []
+        self._sensor_probes_ready = False
+        self._discover_sensor_probes_enabled = configs.get_bool("discover_sensor_probes", default=False)
         if not configs.has_member("probes"):
             return
         probes_cfg = configs.get_member("probes", defaults={})
@@ -411,6 +447,46 @@ class SoilSimulation(SoilBase):
             return
         for probe in self._probes:
             self.data[probe.channel_id].set(now, self._pde.sample(probe))
+
+    def get_sensor_probes(self) -> list[ProbeSpec]:
+        """Probes derived from tension-measured SoilMoisture sensors, for
+        model-vs-sensor comparison (the live anchor). Populated lazily on the
+        first advance(); empty before then. Method (not property) for the same
+        reason as get_probes()."""
+        return list(getattr(self, "_sensor_probes", []))
+
+    def _discover_sensor_probes(self) -> None:
+        """Derive one probe per enabled, tension-measured SoilMoisture sensor in
+        this field. A sensor is a probe that also carries measured data; here we
+        resolve only the model-side sampling recipe (sample-only, no logged
+        channel). Runs once, on the first advance(), when the whole component tree
+        is configured. This sim's field is reached via SoilSimulation.context
+        (the FieldSimulation) -> .context (the AgriculturalField that owns the
+        sensors)."""
+        # Set the flag first so a failure here doesn't retry on every step.
+        self._sensor_probes_ready = True
+        from sparcs.components.agriculture.soil.moisture import SoilMoisture
+
+        field = getattr(getattr(self, "context", None), "context", None)
+        if field is None:
+            return
+        found: list[ProbeSpec] = []
+        for comp in _walk_components(field):
+            if not isinstance(comp, SoilMoisture):
+                continue
+            try:
+                if not comp.has_measured_tension:
+                    continue
+                found.append(resolve_probe_from_sensor(comp, self._mesh_fipy, self._mesh_config))
+            except Exception:
+                logging.exception(
+                    "%s: failed to derive probe from sensor %s",
+                    self.name,
+                    getattr(comp, "key", "?"),
+                )
+        self._sensor_probes = found
+        if found:
+            logging.info("%s: discovered %d sensor probe(s) for anchoring", self.name, len(found))
 
     def _plot_mesh(self, save_path: Optional[str] = None):
         mesh = meshio.read(self._mesh_config.filename)
@@ -475,7 +551,7 @@ class SoilSimulation(SoilBase):
         plt.close(fig)
 
     def _render_progress_safe(self, sim_t: pd.Timestamp) -> None:
-        """Render at sim_t with error containment — a single render failure
+        """Render at sim_t with error containment; a single render failure
         disables progress plotting for the rest of the run rather than
         crashing the solver."""
         self._last_plot_simtime = sim_t
@@ -493,7 +569,7 @@ class SoilSimulation(SoilBase):
         if self._plot_config.show and not can_show:
             reason = "solver runs on a worker thread" if not on_main_thread else "no GUI display available"
             logging.warning(
-                "%s: progress plot 'show' disabled — %s. Use 'live = true' and "
+                "%s: progress plot 'show' disabled (%s). Use 'live = true' and "
                 "open progress.html in a browser for a live view.",
                 self.name,
                 reason,
@@ -532,7 +608,7 @@ class SoilSimulation(SoilBase):
             "img{max-width:100%;height:auto;display:block;margin:0 auto;}"
             ".meta{text-align:center;padding:0.5em;font-size:0.9em;}"
             "</style></head><body>"
-            "<div class='meta'>auto-refresh every 2s — last reload: <span id='t'></span></div>"
+            "<div class='meta'>auto-refresh every 2s, last reload: <span id='t'></span></div>"
             "<img id='plot' src='progress.png'>"
             "<script>"
             "function r(){const i=document.getElementById('plot');"

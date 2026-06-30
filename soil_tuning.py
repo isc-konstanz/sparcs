@@ -59,7 +59,7 @@ log = logging.getLogger("sparcs.soil_tuning")
 
 
 def _install_log_handler() -> None:
-    """Attach our stderr handler to ``log``. Idempotent — re-runs cleanly
+    """Attach our stderr handler to ``log``. Idempotent; re-runs cleanly
     after Settings._load_logging() (which calls
     logging.config.fileConfig(disable_existing_loggers=True)) wipes the
     initial handlers we registered at import time."""
@@ -254,7 +254,7 @@ class TuningRunner:
                     return
                 j.status = "failed"
                 j.error = (
-                    f"worker raised {type(exc).__name__}: {exc} — "
+                    f"worker raised {type(exc).__name__}: {exc}; "
                     "if this is BrokenProcessPool the pool is dead; restart the app."
                 )
             log.error("[%s] future failed: %s", job.job_id, j.error)
@@ -303,7 +303,7 @@ class TuningRunner:
             self._consumer.join(timeout=2)
         except Exception:
             pass
-        # Tear down the Manager last — proxy objects become invalid afterwards.
+        # Tear down the Manager last; proxy objects become invalid afterwards.
         try:
             self._manager.shutdown()
         except Exception:
@@ -373,7 +373,7 @@ class TuningRunner:
 def _worker_run_job(job_id: str, label: str, params: dict[str, float]) -> None:
     """Run one tuning simulation in a pool worker: stream progress rows via the
     Manager queue, write PNG frames directly into the shared png-store."""
-    # np.seterr / filterwarnings are per-process — re-apply in the spawned child.
+    # np.seterr / filterwarnings are per-process; re-apply in the spawned child.
     np.seterr(all="ignore")
     warnings.filterwarnings("ignore", category=RuntimeWarning)
 
@@ -477,7 +477,7 @@ def _walk_substeps(
     cancel: Any,
 ) -> tuple[bool, Optional[str]]:
     """Strict adaptive-dt walk via SoilPDECore.walk_window. Returns (ok, reason).
-    Fails hard at dt_min (accept_at_dt_min=False) — unlike the live solver — so
+    Fails hard at dt_min (accept_at_dt_min=False), unlike the live solver, so
     the sweep surfaces unstable parameter sets instead of accepting them."""
     walk = pde.walk_window(
         rates=rates,
@@ -489,7 +489,7 @@ def _walk_substeps(
         return True, None
     if walk.cancelled:
         return False, "cancelled"
-    return False, (f"{walk.reason} — params unstable for this forcing " "(likely rain spike saturating top cells).")
+    return False, (f"{walk.reason}; params unstable for this forcing (likely rain spike saturating top cells).")
 
 
 def _build_flux_rates(
@@ -594,7 +594,7 @@ def _walk_components(root) -> list:
             try:
                 stack.extend(list(children.values()))
             except Exception:
-                # Some contexts expose iteration differently — be liberal.
+                # Some contexts expose iteration differently: be liberal.
                 try:
                     stack.extend(list(children))
                 except Exception:
@@ -610,14 +610,14 @@ def _find_soil_simulation(app) -> tuple[SoilSimulation, FieldSimulation]:
                 parent = c.context
                 if not isinstance(parent, FieldSimulation):
                     raise RuntimeError(
-                        f"SoilSimulation {c.id} parent is " f"{type(parent).__name__}, expected FieldSimulation"
+                        f"SoilSimulation {c.id} parent is {type(parent).__name__}, expected FieldSimulation"
                     )
                 return c, parent
-    # Nothing matched — dump the loaded tree to tell a missing/misconfigured
+    # Nothing matched; dump the loaded tree to tell a missing/misconfigured
     # chain from a class-identity mismatch.
-    log.error("no SoilSimulation found — loaded component tree:")
+    log.error("no SoilSimulation found; loaded component tree:")
     if not roots:
-        log.error("  (app.components is empty — no system loaded)")
+        log.error("  (app.components is empty; no system loaded)")
     for root in roots:
         for c in _walk_components(root):
             log.error("  %-28s  %s", type(c).__name__, getattr(c, "id", "?"))
@@ -737,9 +737,11 @@ def _load_history(
 def _sensor_tension_series(sensor: SoilMoisture, frame: pd.DataFrame) -> Optional[pd.Series]:
     """Collapse one sensor's logged frame to a single tension series ψ [hPa].
 
-    Prefers a measured ``water_tension`` column; else converts ``water_content``
-    [%] through the probe's own retention curve (labelled ``(calc. …)``).
-    Returns None when neither channel carries usable data."""
+    Returns the directly-measured ``water_tension`` column (normalised to the
+    negative matric-potential convention) when one is present and non-empty.
+    Returns None otherwise; the ``water_content`` fallback has been removed
+    because converting θ via the retention curve injects model error into a
+    quantity that is treated as ground truth."""
 
     def _first_usable(substr: str) -> Optional[pd.Series]:
         for col in frame.columns:
@@ -753,15 +755,6 @@ def _sensor_tension_series(sensor: SoilMoisture, frame: pd.DataFrame) -> Optiona
     if measured is not None:
         # Normalise to the negative matric-potential convention.
         return (-measured.abs()).dropna().rename(f"{sensor.key} ψ (measured)")
-
-    content = _first_usable("water_content")
-    if content is not None and sensor.model is not None:
-        # content is % (0–100); the curve expects θ [cm³/cm³]. psi_from_theta
-        # returns a bare ndarray, so re-attach the index.
-        theta = content.to_numpy() / 100.0
-        psi = -np.abs(np.asarray(sensor.model.psi_from_theta(theta), dtype=float))
-        series = pd.Series(psi, index=content.index)
-        return series.dropna().rename(f"{sensor.key} ψ (calc. from θ)")
 
     return None
 
@@ -823,7 +816,7 @@ def build_app(
         try:
             raw_frame = pd.concat(measurements, axis=1, join="outer").sort_index()
         except Exception:
-            log.warning("sensor concat failed — falling back to empty frame", exc_info=True)
+            log.warning("sensor concat failed; falling back to empty frame", exc_info=True)
             raw_frame = pd.DataFrame()
         if not raw_frame.empty and isinstance(raw_frame.index, pd.DatetimeIndex):
             measurement_frame = raw_frame.resample("1h").mean(numeric_only=True)
@@ -877,10 +870,10 @@ def build_app(
 
     app.layout = dbc.Container(
         [
-            html.H3("Soil tuning — live parameter sweep", className="my-3"),
+            html.H3("Soil tuning: live parameter sweep", className="my-3"),
             html.Div(
                 f"Window: {runner.et_data.index[0]} .. {runner.et_data.index[-1]} "
-                f"({len(runner.et_data)} rows) — {len(runner.probes)} probe(s), "
+                f"({len(runner.et_data)} rows), {len(runner.probes)} probe(s), "
                 f"{len(measurement_frame.columns)} sensor channel(s)",
                 className="text-muted small mb-2",
             ),
@@ -1056,16 +1049,16 @@ def build_app(
     def _build_panel(_n) -> tuple[str, str, str]:
         render_job = runner.latest_render_job()
         if render_job is None:
-            return "", "Current Se field — (no frame yet)", ""
+            return "", "Current Se field: (no frame yet)", ""
         entry = runner._png_store.get(render_job.job_id)
         if entry is None:
-            return "", "Current Se field — (no frame yet)", ""
+            return "", "Current Se field: (no frame yet)", ""
         _png_bytes, png_ts = entry
         # ?t=<ts> cache-busts the browser between updates.
         ts_key = png_ts.isoformat() if png_ts is not None else str(_n)
         img_src = f"/job-png?id={render_job.job_id}&t={ts_key}"
-        title = f"Current Se field — {render_job.label}"
-        caption = f"job {render_job.job_id} · sim time {png_ts} · " f"status {render_job.status}"
+        title = f"Current Se field: {render_job.label}"
+        caption = f"job {render_job.job_id} · sim time {png_ts} · status {render_job.status}"
         return img_src, title, caption
 
     @app.callback(
@@ -1185,7 +1178,7 @@ def main() -> int:
         settings.dirs.data = data_path
         if not args.conf_dir:
             # Single-dir project: let lories' own flat/nested resolution take over
-            # instead of assuming a conf/ subdir. Mirrors Settings.__init__ — load
+            # instead of assuming a conf/ subdir. Mirrors Settings.__init__; load
             # the data-dir settings.conf override and apply its [directories].
             settings.dirs.conf = None
             override_path = os.path.join(settings.dirs.data, settings.name)
@@ -1214,14 +1207,14 @@ def main() -> int:
         soil_sim, field_sim = _find_soil_simulation(app)
         if not soil_sim.configs.has_member("testing"):
             log.error(
-                "[testing] block missing on %s — refusing to start tuning UI",
+                "[testing] block missing on %s; refusing to start tuning UI",
                 soil_sim.id,
             )
             return 2
         testing_cfg = soil_sim.configs.get_member("testing")
         if not testing_cfg.get_bool("enabled", default=False):
             log.error(
-                "[testing] enabled=false on %s — refusing to start tuning UI",
+                "[testing] enabled=false on %s; refusing to start tuning UI",
                 soil_sim.id,
             )
             return 2

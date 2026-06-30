@@ -53,7 +53,10 @@ class SoilMoisture(Component):
         model_kind = model_params.pop("type", None)
         self.model = create_soil_model(model_kind, **model_params)
 
+        # Both depth and x_offset are in centimetres; x_offset is signed lateral
+        # distance from the bay-center axis (positive = right of center).
         self.depth = configs.get_float("depth")
+        self.x_offset = configs.get_float("x_offset", default=0.0)
 
         def add_channel(constant: Constant, **custom) -> None:
             channel = constant.to_dict()
@@ -76,6 +79,11 @@ class SoilMoisture(Component):
         self.wilting_point = self.model.theta_from_psi(self.model.psi_from_pf(wilting_point))
         self.field_capacity = self.model.theta_from_psi(self.model.psi_from_pf(field_capacity))
         self.water_capacity_available = self.field_capacity - self.wilting_point
+
+    @property
+    def has_measured_tension(self) -> bool:
+        """True when the water_tension channel is backed by a connector."""
+        return self.data.water_tension.has_connector()
 
     # noinspection SpellCheckingInspection
     def activate(self) -> None:

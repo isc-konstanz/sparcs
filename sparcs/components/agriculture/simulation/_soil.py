@@ -49,7 +49,7 @@ class SolveResult:
     """One Picard sweep loop's outcome.
 
     ``converged``: ``max|Δθ_per_sweep| ≤ tol_th``. ``finite``: False when the
-    post-sweep field contains NaN/Inf — state not committed, caller must roll back.
+    post-sweep field contains NaN/Inf; state not committed, caller must roll back.
     ``error``: exception message if the sweep raised.
     """
 
@@ -133,6 +133,61 @@ class MeshConfig:
         self.dx: float = configs.get("d_x", default=0.5)
 
 
+def _nearest_cell_m(
+    cell_x: np.ndarray,
+    cell_y: np.ndarray,
+    x_m: float,
+    depth_m: float,
+    x_offset: float,
+) -> int:
+    """Return the index of the cell nearest to (x_m, depth_m) in mesh coordinates.
+
+    ``x_offset`` is ``mesh_config.width / 2.0``, the bay-center shift that maps
+    bay-centered x to absolute mesh x. ``depth_m`` is positive-downward depth; the
+    mesh uses negative-y for depth, so cell_y target is ``-depth_m``.
+    """
+    return int(np.argmin((cell_x - (x_m + x_offset)) ** 2 + (cell_y - (-depth_m)) ** 2))
+
+
+def _coords_to_cell(
+    mesh_fipy: "Gmsh2D",
+    mesh_config: "MeshConfig",
+    x_offset_cm: float,
+    depth_cm: float,
+) -> int:
+    """Convert sensor coordinates (cm, bay-centered) to the nearest FiPy cell index.
+
+    Converts cm to metres (×0.01), then applies the same nearest-cell mapping used
+    by :func:`resolve_probes` for point probes.
+    """
+    x_m = x_offset_cm * 0.01
+    depth_m = depth_cm * 0.01
+    cell_centers = np.asarray(mesh_fipy.cellCenters)
+    cell_x, cell_y = cell_centers[0], cell_centers[1]
+    x_offset = mesh_config.width / 2.0
+    return _nearest_cell_m(cell_x, cell_y, x_m, depth_m, x_offset)
+
+
+def resolve_probe_from_sensor(
+    sensor: Any,
+    mesh_fipy: "Gmsh2D",
+    mesh_config: "MeshConfig",
+) -> ProbeSpec:
+    """Build a point :class:`ProbeSpec` at a sensor's location.
+
+    A sensor is a probe that also carries measured data: its ``x_offset`` and
+    ``depth`` (both cm, bay-centered) resolve to a single mesh cell exactly as a
+    configured point probe would. ``channel_id`` is the sensor key.
+    """
+    idx = _coords_to_cell(mesh_fipy, mesh_config, sensor.x_offset, sensor.depth)
+    return ProbeSpec(
+        name=f"Sensor {sensor.key} (x_offset={sensor.x_offset:.1f}cm, depth={sensor.depth:.1f}cm)",
+        channel_id=sensor.key,
+        cell_indices=np.array([idx], dtype=int),
+        weights=np.array([1.0]),
+    )
+
+
 def resolve_probes(
     probes_cfg: Configurations,
     mesh_fipy: Gmsh2D,
@@ -154,7 +209,7 @@ def resolve_probes(
         for key, spec in probes_cfg.get_member("points").items():
             x = float(spec["x"])
             y = float(spec["y"])
-            idx = int(np.argmin((cell_x - (x + x_offset)) ** 2 + (cell_y - (-y)) ** 2))
+            idx = _nearest_cell_m(cell_x, cell_y, x, y, x_offset)
             probes.append(
                 ProbeSpec(
                     name=f"Probe point (x={x:.3f}, depth={y:.3f})",
@@ -175,7 +230,7 @@ def resolve_probes(
             if indices.size == 0:
                 if log_name:
                     logging.warning(
-                        "%s: probe area '%s' (x=[%.3f,%.3f], depth=[%.3f,%.3f]) " "covers no mesh cells — skipping.",
+                        "%s: probe area '%s' (x=[%.3f,%.3f], depth=[%.3f,%.3f]) covers no mesh cells; skipping.",
                         log_name,
                         key,
                         x_min,
@@ -187,8 +242,7 @@ def resolve_probes(
             probes.append(
                 ProbeSpec(
                     name=(
-                        f"Probe area x=[{x_min:.3f},{x_max:.3f}] "
-                        f"depth=[{y_min:.3f},{y_max:.3f}], {indices.size} cells"
+                        f"Probe area x=[{x_min:.3f},{x_max:.3f}] depth=[{y_min:.3f},{y_max:.3f}], {indices.size} cells"
                     ),
                     channel_id=key,
                     cell_indices=indices,
@@ -494,7 +548,7 @@ class SoilPDECore:
         if ic_wt is not None:
             rel_sat.setValue(self._hydrostatic_ic_array(ic_wt))
             logging.info(
-                "SoilPDECore: hydrostatic IC (water table at %.2f m below surface) " "Se min=%.3f max=%.3f",
+                "SoilPDECore: hydrostatic IC (water table at %.2f m below surface) Se min=%.3f max=%.3f",
                 ic_wt,
                 float(np.min(rel_sat.value)),
                 float(np.max(rel_sat.value)),
@@ -613,7 +667,7 @@ class SoilPDECore:
         if not (self._feddes_se_p2 > self._feddes_se_p3):
             logging.warning(
                 "Feddes pF thresholds map to non-monotone Se (P2 → Se=%.3f, "
-                "P3 → Se=%.3f). Check pF ordering — dry ramp will be disabled.",
+                "P3 → Se=%.3f). Check pF ordering; dry ramp will be disabled.",
                 self._feddes_se_p2,
                 self._feddes_se_p3,
             )
@@ -642,7 +696,7 @@ class SoilPDECore:
         else:
             if shape != "uniform":
                 logging.warning(
-                    "FeddesConfig.root_distribution=%r unknown; falling back " "to 'uniform'.",
+                    "FeddesConfig.root_distribution=%r unknown; falling back to 'uniform'.",
                     shape,
                 )
             raw = np.ones_like(cell_vols)
@@ -653,7 +707,7 @@ class SoilPDECore:
 
     def feddes_alpha(self, se: np.ndarray) -> np.ndarray:
         """Per-cell Feddes α(Se) ∈ [0, 1]. Returns a constant-1 array when
-        Feddes is disabled — kept callable in both regimes so callers
+        Feddes is disabled, kept callable in both regimes so callers
         don't need to branch.
         """
         if self._feddes_se_p2 is None:
@@ -825,7 +879,7 @@ class SoilPDECore:
         for k in range(max_sweeps):
             try:
                 res = eq.sweep(dt=dt, var=rel_sat, solver=self._solver)
-            except Exception as e:  # noqa: BLE001 — scipy/FiPy raise a zoo of types
+            except Exception as e:  # noqa: BLE001  (scipy/FiPy raise a zoo of types)
                 if log_name is not None:
                     logging.warning(
                         "%s: PDE sweep raised at dt=%.2fs (sweep %d): %s: %s",
@@ -855,7 +909,7 @@ class SoilPDECore:
         if not finite:
             if log_name is not None:
                 logging.warning(
-                    "%s: PDE produced non-finite Se at dt=%.2fs after %d " "sweeps — state not committed.",
+                    "%s: PDE produced non-finite Se at dt=%.2fs after %d sweeps; state not committed.",
                     log_name,
                     float(dt),
                     sweeps,
@@ -872,7 +926,7 @@ class SoilPDECore:
 
         if not converged and log_name is not None:
             logging.warning(
-                "%s: PDE non-converged at dt=%.2fs in %d sweeps (final " "|Δθ|=%.2e, residual=%.2e, tol_th=%.0e).",
+                "%s: PDE non-converged at dt=%.2fs in %d sweeps (final |Δθ|=%.2e, residual=%.2e, tol_th=%.0e).",
                 log_name,
                 float(dt),
                 sweeps,
@@ -936,7 +990,7 @@ class SoilPDECore:
                 failure = result.error or (
                     "non-finite Se field"
                     if not result.finite
-                    else f"non-convergent after {result.sweeps} sweeps " f"(res={result.residual:.3g})"
+                    else f"non-convergent after {result.sweeps} sweeps (res={result.residual:.3g})"
                 )
                 if not accept_at_dt_min:
                     self.set_state(snap)
@@ -947,7 +1001,7 @@ class SoilPDECore:
                     self.set_state(snap)
                     out.skipped_s += attempted
                     logging.warning(
-                        "%s: substep skipped at dt_min=%gs (%s) — state " "held for %.1fs of the window.",
+                        "%s: substep skipped at dt_min=%gs (%s); state held for %.1fs of the window.",
                         log_name or "SoilPDECore",
                         dt_min,
                         failure,
@@ -1178,7 +1232,7 @@ class SoilBase(Component):
 def create_mesh(mesh_config: MeshConfig) -> None:
     """Build the soil cross-section .msh file at ``mesh_config.filename``.
 
-    Heavy gmsh call — callers should gate on file existence via
+    Heavy gmsh call; callers should gate on file existence via
     :func:`ensure_mesh` rather than invoking this directly.
     """
     dl = mesh_config.dl
@@ -1294,6 +1348,6 @@ def create_mesh(mesh_config: MeshConfig) -> None:
 
 def ensure_mesh(mesh_config: MeshConfig) -> None:
     """No-op if the mesh file already exists; otherwise generate it via
-    :func:`create_mesh`. Idempotent — safe for both siblings to call."""
+    :func:`create_mesh`. Idempotent, safe for both siblings to call."""
     if not os.path.exists(mesh_config.filename):
         create_mesh(mesh_config)
