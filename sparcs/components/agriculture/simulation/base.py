@@ -431,9 +431,13 @@ class FieldSimulation(Component):
 
     def _irrigation_callback(self, data: pd.DataFrame) -> None:
         try:
-            self._irrigation_flow_lpm = float(data.iloc[-1, 0])
+            flow = float(data.iloc[-1, 0])
         except (ValueError, TypeError, IndexError):
-            self._irrigation_flow_lpm = 0.0
+            flow = 0.0
+        # A NULL flow row means "not watering". ``float(np.nan)`` does not raise,
+        # so without this guard a NaN latches into the PDE source (soil.py) and
+        # poisons it -- the live analog of the bench asof-latch fix (20431c7).
+        self._irrigation_flow_lpm = 0.0 if pd.isna(flow) else flow
 
     def _prepare_weather(self, data: pd.DataFrame) -> pd.DataFrame:
         return validate_meteo_inputs(data, self.location)
