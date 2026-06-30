@@ -173,3 +173,116 @@ def anchor_field(
         denominator = denominator + precision
 
     return np.clip(numerator / denominator, se_min, se_max)
+
+
+# --- Orchestration layer: the freshness gate + shared update entry point. -------
+# Both backends (live advance() and the soil_tuning replay) call anchor_update;
+# they differ only in the read_tension closure they pass. Timestamps/durations are
+# duck-typed (Any) so this module pulls in no pandas/lories/FiPy.
+
+
+@dataclass(frozen=True)
+class AnchorConfig:
+    """Resolved ``[anchor]`` settings (parsing lives at the call site in soil.py).
+
+    ``sensors`` is the allowlist: sensor key -> a per-sensor pF measurement std,
+    or ``None`` to use the global ``sigma_meas_pf``. ``sigma_sys`` is the model std
+    in Se units, ``r_horizontal``/``r_vertical`` the localization radii in metres,
+    ``staleness`` the maximum age a reading may have to still anchor.
+    """
+
+    enabled: bool
+    sigma_sys: float
+    sigma_meas_pf: float
+    r_horizontal: float
+    r_vertical: float
+    staleness: Any
+    sensors: dict[str, float | None]
+
+    def sensor_sigma(self, key: str) -> float:
+        """The pF measurement std for ``key``: its per-sensor override or the global."""
+        override = self.sensors.get(key)
+        return self.sigma_meas_pf if override is None else override
+
+
+@dataclass(frozen=True)
+class AnchorSensor:
+    """A discovered tension sensor's static anchoring geometry (cm, bay-centered)."""
+
+    key: str
+    x_offset_cm: float
+    depth_cm: float
+
+
+@dataclass(frozen=True)
+class AnchorResult:
+    """Outcome of one anchor update.
+
+    ``se_new`` is the corrected field; ``anchored_at`` maps each sensor that
+    contributed to the reading timestamp it consumed (merge into the caller's
+    persistent ``last_anchored`` only after the field is committed); ``innovations``
+    maps each to ``se_meas - se_model`` at its nearest cell, for diagnostics.
+    """
+
+    se_new: np.ndarray
+    anchored_at: dict[str, Any]
+    innovations: dict[str, float]
+
+
+def _nearest_cell(cell_centers: np.ndarray, x_m: float, y_m: float) -> int:
+    dx = cell_centers[0] - x_m
+    dy = cell_centers[1] - y_m
+    return int(np.argmin(dx * dx + dy * dy))
+
+
+def anchor_update(
+    se: np.ndarray,
+    cell_centers: np.ndarray,
+    sensors: Iterable[AnchorSensor],
+    read_tension: Any,
+    now: Any,
+    cfg: AnchorConfig,
+    model: Any,
+    width_m: float,
+    last_anchored: dict[str, Any],
+    se_min: float,
+    se_max: float,
+) -> AnchorResult | None:
+    """Gather fresh sensor readings and return the corrected field, or ``None``.
+
+    For each sensor, ``read_tension(sensor)`` yields ``(timestamp, tension_hpa)``
+    (the live channel value, or the offline history lookup). A reading anchors only
+    if it is present and finite, strictly newer than ``last_anchored[key]``, and
+    within ``cfg.staleness`` of ``now`` -- the event-driven cadence that stops a
+    stale or frozen sensor from dragging the field. If no sensor qualifies the step
+    is a no-op (``None``); otherwise the qualifying readings are blended in one
+    precision-weighted :func:`anchor_field` call. ``sensors`` is the set to use,
+    already filtered to the run's allowlist (the live path passes ``cfg.sensors``;
+    soil_tuning passes its per-run set so a sensor can be held out).
+    """
+    se = np.asarray(se, dtype=float)
+    fresh: list[AnchorObservation] = []
+    anchored_at: dict[str, Any] = {}
+    innovations: dict[str, float] = {}
+
+    for sensor in sensors:
+        ts, tension = read_tension(sensor)
+        if ts is None or tension is None or not np.isfinite(tension):
+            continue
+        previous = last_anchored.get(sensor.key)
+        if previous is not None and ts <= previous:
+            continue
+        if now - ts > cfg.staleness:
+            continue
+        obs = observation_from_tension(
+            tension, sensor.x_offset_cm, sensor.depth_cm, width_m, model, cfg.sensor_sigma(sensor.key)
+        )
+        fresh.append(obs)
+        anchored_at[sensor.key] = ts
+        innovations[sensor.key] = obs.se_meas - float(se[_nearest_cell(cell_centers, obs.x_m, obs.y_m)])
+
+    if not fresh:
+        return None
+
+    se_new = anchor_field(se, cell_centers, fresh, cfg.sigma_sys, cfg.r_horizontal, cfg.r_vertical, se_min, se_max)
+    return AnchorResult(se_new=se_new, anchored_at=anchored_at, innovations=innovations)
