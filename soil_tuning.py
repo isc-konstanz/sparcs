@@ -436,9 +436,10 @@ def _anchor_replay_step(pde: SoilPDECore, t_now: pd.Timestamp, last_anchored: di
         SE_MAX,
     )
     if result is None:
-        return
+        return None
     pde.set_state(result.se_new, update_old=True)
     last_anchored.update(result.anchored_at)
+    return result
 
 
 def _worker_run_job(job_id: str, label: str, params: dict[str, float]) -> None:
@@ -500,6 +501,24 @@ def _worker_run_job(job_id: str, label: str, params: dict[str, float]) -> None:
 
         anchor_on = _W_ANCHOR_CFG is not None and _W_ANCHOR_CFG.enabled and _W_ANCHOR_SENSORS
         last_anchored: dict = {}
+        anchor_fires = 0
+        if anchor_on:
+            # One-shot setup diagnostic: allowlist vs discovered sensor keys. If
+            # `matched` is empty the config key does not equal the sensor's .key
+            # and the anchor is a silent no-op regardless of the trust knobs.
+            _allow = list(getattr(_W_ANCHOR_CFG, "sensors", {}) or {})
+            _disc = [s.key for s in _W_ANCHOR_SENSORS]
+            put(
+                {
+                    "type": "warn",
+                    "msg": (
+                        f"anchor setup: allow={_allow} discovered={_disc} "
+                        f"matched={[k for k in _disc if k in _allow]} "
+                        f"hist_keys={list(_W_ANCHOR_HISTORY)} "
+                        f"sim_window=[{timeline[0]}..{timeline[-1]}]"
+                    ),
+                }
+            )
         for i in range(1, len(timeline)):
             if cancel():
                 put({"type": "cancelled"})
@@ -527,7 +546,17 @@ def _worker_run_job(job_id: str, label: str, params: dict[str, float]) -> None:
                 return
 
             if anchor_on:
-                _anchor_replay_step(pde, t_now, last_anchored)
+                _res = _anchor_replay_step(pde, t_now, last_anchored)
+                if _res is not None:
+                    anchor_fires += 1
+                    if anchor_fires <= 3 or anchor_fires % 100 == 0:
+                        _inv = {k: round(float(v), 4) for k, v in _res.innovations.items()}
+                        put(
+                            {
+                                "type": "warn",
+                                "msg": f"anchor fired #{anchor_fires} @ {t_now}: innov(se_meas-se_model)={_inv}",
+                            }
+                        )
 
             row = _sample_probe_row(pde, t_now, probes)
             put(
@@ -541,6 +570,18 @@ def _worker_run_job(job_id: str, label: str, params: dict[str, float]) -> None:
             if i % render_every == 0 or i == len(timeline) - 1:
                 _push_render(png_store, job_id, label, fig, ax, norm, pde, t_now)
 
+        if anchor_on and anchor_fires == 0:
+            put(
+                {
+                    "type": "warn",
+                    "msg": (
+                        "anchor ON but fired 0 times -- no reading passed the "
+                        "match/freshness/staleness gate. Check the 'anchor setup' line: "
+                        "empty matched=key mismatch; else the history timestamps do not "
+                        "overlap the sim_window or are older than [anchor] staleness."
+                    ),
+                }
+            )
         put({"type": "done", "n_rows": len(timeline)})
     except Exception as e:
         put({"type": "failed", "error": f"{type(e).__name__}: {e}"})
