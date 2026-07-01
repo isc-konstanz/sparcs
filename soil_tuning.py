@@ -753,6 +753,40 @@ def _find_soil_simulation(app) -> tuple[SoilSimulation, FieldSimulation]:
     raise RuntimeError("no SoilSimulation found in this project")
 
 
+def _log_weather_logger_diagnostics(field_sim: FieldSimulation) -> None:
+    """Dump how each weather channel's logger resolved, to explain an empty read.
+
+    A read comes back empty when the channels the query hits have no enabled
+    logger pointing at the populated table. This prints, per channel, whether it
+    has a logger/connector and the resolved logger config (connector + table), so
+    a config-merge or provider-auto-add mismatch is visible in one run. Best-effort
+    only -- never raises (it runs on an already-failing path)."""
+    try:
+        weather = field_sim.weather
+        log.error("weather read empty; component=%s type=%s", getattr(weather, "id", "?"), type(weather).__name__)
+        for ch in weather.data.values():
+            has_logger = ch.has_logger() if callable(getattr(ch, "has_logger", None)) else "?"
+            has_conn = ch.has_connector() if callable(getattr(ch, "has_connector", None)) else "?"
+            try:
+                logger_cfg = dict(ch.logger.to_configs())
+            except Exception:
+                logger_cfg = str(getattr(ch, "logger", "?"))
+            # weather_id is the surrogate-key attribute the SQL connector filters on
+            # (WHERE id = weather_id). If it is None/missing on the read channels, the
+            # query becomes WHERE id IS NULL and returns nothing on a full table.
+            wid = getattr(ch, "weather_id", "<missing>")
+            log.error(
+                "  channel %-20s has_logger=%s has_connector=%s weather_id=%r logger=%s",
+                ch.id,
+                has_logger,
+                has_conn,
+                wid,
+                logger_cfg,
+            )
+    except Exception:
+        log.exception("weather logger diagnostics failed")
+
+
 def _load_history(
     soil_sim: SoilSimulation,
     field_sim: FieldSimulation,
@@ -778,6 +812,7 @@ def _load_history(
                 )
         except Exception:
             log.exception("could not probe the logged weather range")
+        _log_weather_logger_diagnostics(field_sim)
         raise RuntimeError(f"no weather logged in [{start} .. {end}]{hint}")
 
     # validate_meteo_inputs rejects GHI with any NaN, so hand the chain gap-free
