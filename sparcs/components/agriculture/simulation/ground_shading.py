@@ -220,6 +220,17 @@ class _TrackerConfig:
     gcr: float  # ground coverage ratio used for backtracking
 
 
+def _pvfactors_is_pointing_right(surface_azimuth: float, axis_azimuth: float) -> bool:
+    """pvfactors' tilt-sign convention, mirroring
+    ``pvfactors.geometry.base._get_rotation_from_tilt_azimuth``: it derives a
+    signed ``rotation = tilt if is_pointing_right else -tilt`` and the row
+    geometry follows ``rotation``'s sign. So the *same* signed surface_tilt
+    leans the row opposite ways depending on this flag — which is why the
+    A-frame sign pairing must key off it instead of being hard-coded.
+    """
+    return (surface_azimuth - axis_azimuth) % 360.0 > 180.0
+
+
 class _PVSetup:
     """One PV-array geometry fed to a single solarfactors engine."""
 
@@ -551,12 +562,19 @@ class GroundShading(Component):
                 )
             ]
 
-        # A-frame: both panels lean toward x=0; left panel has -tilt, right +tilt.
-        # +tilt → high edge on the left ("\"), -tilt → high edge on the right ("/").
-        half = common["width"] * np.cos(np.radians(abs(surface_tilt))) / 2.0
+        # A-frame: both panels' high edges lean toward x=0 (a peak). Which tilt
+        # sign leans a row right vs. left depends on pvfactors' azimuth
+        # convention, so the pairing must flip with ``is_pointing_right`` —
+        # hard-coding -left/+right inverts the roof for some axis_azimuth
+        # (e.g. 180). We want the left panel's high edge on its right ("/") and
+        # the right panel's high edge on its left ("\"): rotation>0 → "/",
+        # rotation<0 → "\", with rotation = tilt if pointing_right else -tilt.
+        tilt = abs(surface_tilt)
+        half = common["width"] * np.cos(np.radians(tilt)) / 2.0
+        left_sign = 1.0 if _pvfactors_is_pointing_right(surface_azimuth, common["axis_azimuth"]) else -1.0
         return [
-            _PVSetup(surface_tilt=-abs(surface_tilt), offset_x=-half, **common_with_az),
-            _PVSetup(surface_tilt=+abs(surface_tilt), offset_x=+half, **common_with_az),
+            _PVSetup(surface_tilt=left_sign * tilt, offset_x=-half, **common_with_az),
+            _PVSetup(surface_tilt=-left_sign * tilt, offset_x=+half, **common_with_az),
         ]
 
     # 4c. Segment-range resolution
@@ -809,7 +827,16 @@ class GroundShading(Component):
             return []
         rows: list[tuple] = []
         for setup in self._pv_setups:
-            tilt_rad = np.radians(setup.surface_tilt)
+            # Match pvfactors' geometry: the drawn lean follows the signed
+            # rotation, which negates the stored surface_tilt when the array is
+            # not "pointing right". Without this the night render disagrees with
+            # the daytime pvfactors render for some axis_azimuth (e.g. 180).
+            lean = (
+                -setup.surface_tilt
+                if _pvfactors_is_pointing_right(setup.surface_azimuth, setup.axis_azimuth)
+                else setup.surface_tilt
+            )
+            tilt_rad = np.radians(lean)
             half_x = setup.width / 2.0 * np.cos(tilt_rad)
             half_y = setup.width / 2.0 * np.sin(tilt_rad)
             for i in range(setup.n_rows):
