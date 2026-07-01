@@ -27,7 +27,7 @@ from lories.typing import Configurations
 from lories.util import to_timedelta
 
 from . import plot_render
-from ._anchor import AnchorConfig, AnchorSensor, anchor_update
+from ._anchor import AnchorConfig, AnchorSensor, SensorOverrides, anchor_update
 
 logging.getLogger("fipy").setLevel(logging.WARNING)
 np.seterr(all="ignore")
@@ -75,17 +75,42 @@ def _walk_components(root) -> list:
     return out
 
 
+def _opt_float(spec: Configurations, key: str) -> Optional[float]:
+    """Read an optional float override from a per-sensor sub-block (``None`` if absent)."""
+    value = spec.get(key, default=None)
+    return None if value is None else float(value)
+
+
 def _parse_anchor_config(configs: Configurations) -> AnchorConfig:
     """Parse an ``[anchor]`` block into the FiPy-free ``AnchorConfig``.
 
-    Off by default, so existing configs and calibration runs are unaffected.
-    ``sensors`` is the allowlist (a list of sensor keys, or a comma string).
-    Per-sensor pF overrides are deferred: the orchestrator supports them, but the
-    first-cut parser maps every allowlisted sensor to the global ``sigma_meas_pf``.
+    Off by default, so existing configs and calibration runs are unaffected. Two
+    mutually exclusive ways to name the allowlist:
+
+    - a bare ``sensors`` value (list of keys, or a comma string) -- every sensor
+      inherits the ``[anchor]`` globals; or
+    - per-sensor ``[anchor.sensors.<key>]`` sub-blocks (mirroring the
+      ``[probes.points.<name>]`` precedent), each optionally overriding
+      ``sigma_meas_pf``/``staleness``/``r_horizontal``/``r_vertical``; any omitted
+      key inherits the global. ``sigma_sys`` stays global (see ``SensorOverrides``).
     """
-    raw = configs.get("sensors", default=[]) or []
-    if isinstance(raw, str):
-        raw = [s.strip() for s in raw.split(",") if s.strip()]
+    if configs.has_member("sensors"):
+        sensors: dict[str, SensorOverrides | None] = {
+            str(key): SensorOverrides(
+                sigma_meas_pf=_opt_float(spec, "sigma_meas_pf"),
+                staleness=(
+                    None if spec.get("staleness", default=None) is None else to_timedelta(spec.get("staleness"))
+                ),
+                r_horizontal=_opt_float(spec, "r_horizontal"),
+                r_vertical=_opt_float(spec, "r_vertical"),
+            )
+            for key, spec in configs.get_member("sensors").items()
+        }
+    else:
+        raw = configs.get("sensors", default=[]) or []
+        if isinstance(raw, str):
+            raw = [s.strip() for s in raw.split(",") if s.strip()]
+        sensors = {str(key): None for key in raw}
     return AnchorConfig(
         enabled=configs.get_bool("enabled", default=False),
         sigma_sys=float(configs.get("sigma_sys", default=0.05)),
@@ -93,7 +118,7 @@ def _parse_anchor_config(configs: Configurations) -> AnchorConfig:
         r_horizontal=float(configs.get("r_horizontal", default=0.5)),
         r_vertical=float(configs.get("r_vertical", default=0.2)),
         staleness=to_timedelta(configs.get("staleness", default="6h")),
-        sensors={str(key): None for key in raw},
+        sensors=sensors,
     )
 
 

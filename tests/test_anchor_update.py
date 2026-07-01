@@ -13,6 +13,7 @@ import pandas as pd
 from sparcs.components.agriculture.simulation._anchor import (
     AnchorConfig,
     AnchorSensor,
+    SensorOverrides,
     anchor_update,
 )
 from sparcs.components.agriculture.soil.models import Genuchten
@@ -111,8 +112,26 @@ def test_last_anchored_is_not_mutated():
 def test_per_sensor_pf_override_changes_trust():
     """A tighter per-sensor pF std pulls the field harder (lower variance)."""
     base = _run({"s30": (NOW, 300.0)}, cfg=_cfg(sensors={"s30": None}))
-    tight = _run({"s30": (NOW, 300.0)}, cfg=_cfg(sensors={"s30": 0.01}))
+    tight = _run({"s30": (NOW, 300.0)}, cfg=_cfg(sensors={"s30": SensorOverrides(sigma_meas_pf=0.01)}))
     # Both pull toward the same reading; the tighter sensor moves cell 0 further.
     pulled_base = abs(base.se_new[0] - 0.6)
     pulled_tight = abs(tight.se_new[0] - 0.6)
     assert pulled_tight > pulled_base
+
+
+def test_per_sensor_radii_override_changes_reach():
+    """A per-sensor vertical reach lets a 30 cm sensor touch the 60 cm cell (or not)."""
+    # Cells sit 30 cm apart in depth; the sensor is at cell 0 (30 cm).
+    narrow = _run({"s30": (NOW, 300.0)}, cfg=_cfg(sensors={"s30": SensorOverrides(r_vertical=0.1)}))
+    wide = _run({"s30": (NOW, 300.0)}, cfg=_cfg(sensors={"s30": SensorOverrides(r_vertical=0.5)}))
+    assert np.isclose(narrow.se_new[1], 0.6)  # 30 cm below is outside r_v = 0.1
+    assert not np.isclose(wide.se_new[1], 0.6)  # inside r_v = 0.5 -> pulled
+
+
+def test_per_sensor_staleness_override_gates_independently():
+    """A sensor with its own longer staleness anchors where the global would drop it."""
+    reading = {"s30": (NOW - pd.Timedelta("3h"), 300.0)}  # 3h old
+    dropped = _run(reading, cfg=_cfg(staleness="1h", sensors={"s30": None}))
+    kept = _run(reading, cfg=_cfg(staleness="1h", sensors={"s30": SensorOverrides(staleness=pd.Timedelta("6h"))}))
+    assert dropped is None  # 3h > global 1h
+    assert kept is not None and kept.anchored_at["s30"] == NOW - pd.Timedelta("3h")

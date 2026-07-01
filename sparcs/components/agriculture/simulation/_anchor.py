@@ -18,7 +18,7 @@ unit-testable on a synthetic cell grid with no mesh and no soil model. See the
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Iterable
 
 import numpy as np
@@ -55,13 +55,18 @@ class AnchorObservation:
     downward), matching ``mesh.cellCenters``. ``se_meas``: measured effective
     saturation (from tension via the retention model's ``se_from_psi``).
     ``variance``: measurement variance R in Se^2 units (must be > 0), formed by
-    the caller from the per-sensor pF std.
+    the caller from the per-sensor pF std. ``r_h``, ``r_v``: this sensor's
+    localization radii in metres (default 0 = no reach), attached by
+    :func:`anchor_update` from the per-sensor ``[anchor]`` settings so each
+    tensiometer carries its own reach into the shared :func:`anchor_field`.
     """
 
     x_m: float
     y_m: float
     se_meas: float
     variance: float
+    r_h: float = 0.0
+    r_v: float = 0.0
 
 
 def sensor_xy_m(x_offset_cm: float, depth_cm: float, width_m: float) -> tuple[float, float]:
@@ -131,8 +136,6 @@ def anchor_field(
     cell_centers: np.ndarray,
     observations: Iterable[AnchorObservation],
     sigma_sys: float,
-    r_h: float,
-    r_v: float,
     se_min: float,
     se_max: float,
 ) -> np.ndarray:
@@ -144,23 +147,25 @@ def anchor_field(
         Se_new(c) = ( Se(c)/sigma_sys^2 + sum_s w_s(c) Se_meas,s / R_s )
                     / ( 1/sigma_sys^2     + sum_s w_s(c) / R_s )
 
-    where ``w_s(c)`` is the localization weight. Order-independent, cannot
-    overshoot either reading, and reduces to ``Se + k (Se_meas - Se)`` with
+    where ``w_s(c)`` is the localization weight over sensor ``s``'s own reach
+    ``(obs.r_h, obs.r_v)``. Order-independent, cannot overshoot either reading,
+    and reduces to ``Se + k (Se_meas - Se)`` with
     ``k = sigma_sys^2 / (R + sigma_sys^2)`` for a single sensor at its own cell.
     Cells out of every sensor's reach are returned unchanged. The result is
     clipped to ``[se_min, se_max]``.
 
     ``se``: (N,) effective-saturation field. ``cell_centers``: (2, N) mesh cell
     centres in metres (row 0 x, row 1 y, y < 0 down). ``sigma_sys``: model std in
-    Se units. ``r_h``, ``r_v``: localization radii in metres. ``se_min``,
+    Se units; each observation carries its own localization radii. ``se_min``,
     ``se_max``: physical clip bounds (live callers pass ``_soil.SE_MIN`` /
-    ``SE_MAX``). A non-positive ``sigma_sys`` or radius makes the update a no-op.
+    ``SE_MAX``). A non-positive ``sigma_sys`` makes the update a no-op, as does a
+    non-positive radius on an individual observation (that sensor is skipped).
     """
     se = np.asarray(se, dtype=float)
     cell_centers = np.asarray(cell_centers, dtype=float)
     observations = list(observations)
 
-    if sigma_sys <= 0.0 or r_h <= 0.0 or r_v <= 0.0 or not observations:
+    if sigma_sys <= 0.0 or not observations:
         return se.copy()
 
     inv_sys = 1.0 / sigma_sys**2
@@ -168,7 +173,9 @@ def anchor_field(
     denominator = np.full_like(se, inv_sys)
 
     for obs in observations:
-        precision = _localization_weights(cell_centers, obs.x_m, obs.y_m, r_h, r_v) / obs.variance
+        if obs.r_h <= 0.0 or obs.r_v <= 0.0:
+            continue
+        precision = _localization_weights(cell_centers, obs.x_m, obs.y_m, obs.r_h, obs.r_v) / obs.variance
         numerator = numerator + precision * obs.se_meas
         denominator = denominator + precision
 
@@ -182,13 +189,31 @@ def anchor_field(
 
 
 @dataclass(frozen=True)
+class SensorOverrides:
+    """Per-sensor ``[anchor.sensors.<key>]`` overrides; each field ``None`` inherits.
+
+    A sensor may carry its own trust (``sigma_meas_pf``), freshness tolerance
+    (``staleness``), and reach (``r_horizontal``/``r_vertical``); any field left
+    ``None`` falls back to the corresponding ``[anchor]`` global. ``sigma_sys``
+    stays global -- it is the model/cell prior precision shared by every sensor
+    reaching a cell, and per-sensor pull strength is already fully expressed
+    through ``sigma_meas_pf`` (a larger measurement std pulls that cell less).
+    """
+
+    sigma_meas_pf: float | None = None
+    staleness: Any = None
+    r_horizontal: float | None = None
+    r_vertical: float | None = None
+
+
+@dataclass(frozen=True)
 class AnchorConfig:
     """Resolved ``[anchor]`` settings (parsing lives at the call site in soil.py).
 
-    ``sensors`` is the allowlist: sensor key -> a per-sensor pF measurement std,
-    or ``None`` to use the global ``sigma_meas_pf``. ``sigma_sys`` is the model std
-    in Se units, ``r_horizontal``/``r_vertical`` the localization radii in metres,
-    ``staleness`` the maximum age a reading may have to still anchor.
+    ``sensors`` is the allowlist: sensor key -> its :class:`SensorOverrides` (or
+    ``None`` for an all-inherit entry). ``sigma_sys`` is the model std in Se units,
+    ``sigma_meas_pf``/``r_horizontal``/``r_vertical``/``staleness`` are the global
+    defaults each sensor inherits unless it overrides them.
     """
 
     enabled: bool
@@ -197,12 +222,30 @@ class AnchorConfig:
     r_horizontal: float
     r_vertical: float
     staleness: Any
-    sensors: dict[str, float | None]
+    sensors: dict[str, SensorOverrides | None]
 
     def sensor_sigma(self, key: str) -> float:
         """The pF measurement std for ``key``: its per-sensor override or the global."""
         override = self.sensors.get(key)
-        return self.sigma_meas_pf if override is None else override
+        if override is None or override.sigma_meas_pf is None:
+            return self.sigma_meas_pf
+        return override.sigma_meas_pf
+
+    def sensor_staleness(self, key: str) -> Any:
+        """The freshness tolerance for ``key``: its per-sensor override or the global."""
+        override = self.sensors.get(key)
+        if override is None or override.staleness is None:
+            return self.staleness
+        return override.staleness
+
+    def sensor_radii(self, key: str) -> tuple[float, float]:
+        """The localization radii ``(r_h, r_v)`` for ``key``: overrides or globals."""
+        override = self.sensors.get(key)
+        if override is None:
+            return self.r_horizontal, self.r_vertical
+        r_h = self.r_horizontal if override.r_horizontal is None else override.r_horizontal
+        r_v = self.r_vertical if override.r_vertical is None else override.r_vertical
+        return r_h, r_v
 
 
 @dataclass(frozen=True)
@@ -253,9 +296,10 @@ def anchor_update(
     For each sensor, ``read_tension(sensor)`` yields ``(timestamp, tension_hpa)``
     (the live channel value, or the offline history lookup). A reading anchors only
     if it is present and finite, strictly newer than ``last_anchored[key]``, and
-    within ``cfg.staleness`` of ``now`` -- the event-driven cadence that stops a
-    stale or frozen sensor from dragging the field. If no sensor qualifies the step
-    is a no-op (``None``); otherwise the qualifying readings are blended in one
+    within that sensor's staleness tolerance of ``now`` -- the event-driven cadence
+    that stops a stale or frozen sensor from dragging the field. Each qualifying
+    reading carries its own localization radii into the blend. If no sensor
+    qualifies the step is a no-op (``None``); otherwise the readings are blended in one
     precision-weighted :func:`anchor_field` call. ``sensors`` is the set to use,
     already filtered to the run's allowlist (the live path passes ``cfg.sensors``;
     soil_tuning passes its per-run set so a sensor can be held out).
@@ -272,11 +316,13 @@ def anchor_update(
         previous = last_anchored.get(sensor.key)
         if previous is not None and ts <= previous:
             continue
-        if now - ts > cfg.staleness:
+        if now - ts > cfg.sensor_staleness(sensor.key):
             continue
         obs = observation_from_tension(
             tension, sensor.x_offset_cm, sensor.depth_cm, width_m, model, cfg.sensor_sigma(sensor.key)
         )
+        r_h, r_v = cfg.sensor_radii(sensor.key)
+        obs = replace(obs, r_h=r_h, r_v=r_v)
         fresh.append(obs)
         anchored_at[sensor.key] = ts
         innovations[sensor.key] = obs.se_meas - float(se[_nearest_cell(cell_centers, obs.x_m, obs.y_m)])
@@ -284,5 +330,5 @@ def anchor_update(
     if not fresh:
         return None
 
-    se_new = anchor_field(se, cell_centers, fresh, cfg.sigma_sys, cfg.r_horizontal, cfg.r_vertical, se_min, se_max)
+    se_new = anchor_field(se, cell_centers, fresh, cfg.sigma_sys, se_min, se_max)
     return AnchorResult(se_new=se_new, anchored_at=anchored_at, innovations=innovations)
