@@ -10,7 +10,11 @@ dash, or fipy (see ENVIRONMENT.md).
 The app is served single-threaded (Flask's default): route handlers mutate
 shared state (recorded boot args, the controller) without locks and rely on
 that. Do not enable threaded serving without adding locking around the
-start/stop/restart read-modify-write paths."""
+start/stop/restart read-modify-write paths. The /config routes are a partial
+exception: ``ConfigStore.write`` still takes its own module-level lock (see
+soil_tuning_configfiles.py), since it is the one piece of state here that
+could plausibly be called concurrently if threaded serving were ever turned
+on; the single-threaded assumption otherwise still applies to this module."""
 
 from __future__ import annotations
 
@@ -31,6 +35,7 @@ import psutil
 from flask import Flask, jsonify, request
 
 from soil_tuning_auth import error_response, install_json_errors, load_token, require_bearer
+from soil_tuning_configfiles import ConfigError, ConfigStore, parse_config_allow, parse_validate_cmd
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +51,7 @@ KILL_WAIT_S = 5.0
 DEFAULT_LOG_TAIL_LINES = 200
 MAX_LOG_TAIL_LINES = 10000
 LOG_READ_CHUNK = 8192
+DEFAULT_CONFIG_VALIDATE_TIMEOUT_S = 120.0
 
 # /start and /restart body fields that become CLI flags on the bench
 # (positional `project` is handled separately). Order matches the pinned
@@ -311,14 +317,22 @@ def _tail_lines(path: str, n: int) -> List[str]:
     return lines[-n:] if n > 0 else []
 
 
-def create_app(controller: ProcessController, *, token: str, bench: dict) -> Flask:
+def create_app(
+    controller: ProcessController,
+    *,
+    token: str,
+    bench: dict,
+    config_store: Optional[ConfigStore] = None,
+) -> Flask:
     """App factory: builds the supervisor Flask app bound to ``controller``.
 
     ``bench`` is the launch config (keys: python, script, conf_dir, data_dir,
     host, port, log_path, startup_grace_s, stop_timeout_s). Routes: /start,
-    /stop, /restart, /status, /metrics, /logs. Auth is enforced on every
-    route via before_request; JSON error handlers are installed so no HTML
-    error body can escape.
+    /stop, /restart, /status, /metrics, /logs, /config, /config/<name>. Auth
+    is enforced on every route via before_request; JSON error handlers are
+    installed so no HTML error body can escape. ``config_store`` is optional;
+    if omitted, an empty allowlist is used and every /config route 404s with
+    ``config_not_allowlisted``.
     """
     app = Flask(__name__)
     app.config["SOIL_TUNING_CONTROLLER"] = controller
@@ -326,6 +340,7 @@ def create_app(controller: ProcessController, *, token: str, bench: dict) -> Fla
     app.config["SOIL_TUNING_STARTED_AT"] = None
     app.config["SOIL_TUNING_BOOT_ARGS"] = None
     app.config["SOIL_TUNING_TOKEN"] = token
+    app.config["SOIL_TUNING_CONFIG_STORE"] = config_store if config_store is not None else ConfigStore({})
 
     app.before_request(require_bearer(token))
     install_json_errors(app)
@@ -487,6 +502,43 @@ def create_app(controller: ProcessController, *, token: str, bench: dict) -> Fla
         lines = _tail_lines(log_path, tail)
         return jsonify({"path": log_path, "lines": lines})
 
+    def _config_store() -> ConfigStore:
+        return app.config["SOIL_TUNING_CONFIG_STORE"]
+
+    @app.route("/config", methods=["GET"])
+    def config_list() -> flask.Response:
+        return jsonify({"configs": _config_store().names()})
+
+    @app.route("/config/<name>", methods=["GET"])
+    def config_read(name: str) -> flask.Response:
+        try:
+            result = _config_store().read(name)
+        except ConfigError as e:
+            return error_response(e.code, e.message, e.status, **e.detail)
+        return jsonify(result)
+
+    @app.route("/config/<name>", methods=["PUT"])
+    def config_write(name: str) -> flask.Response:
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict) or not isinstance(body.get("content"), str):
+            return error_response("invalid_request", "content is required and must be a string", 400)
+        author = body.get("author")
+        if author is not None and not isinstance(author, str):
+            return error_response("invalid_request", "author must be a string", 400)
+        message = body.get("message")
+        if message is not None and not isinstance(message, str):
+            return error_response("invalid_request", "message must be a string", 400)
+        try:
+            result = _config_store().write(
+                name,
+                body["content"],
+                author=author or "unknown",
+                message=message or "",
+            )
+        except ConfigError as e:
+            return error_response(e.code, e.message, e.status, **e.detail)
+        return jsonify(result)
+
     return app
 
 
@@ -504,6 +556,28 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-dir", default=".", help="directory the bench log is written under")
     parser.add_argument("--startup-grace", type=float, default=DEFAULT_STARTUP_GRACE_S, dest="startup_grace_s")
     parser.add_argument("--stop-timeout", type=float, default=DEFAULT_STOP_TIMEOUT_S, dest="stop_timeout_s")
+    parser.add_argument(
+        "--config-allow",
+        action="append",
+        default=[],
+        metavar="NAME=PATH",
+        dest="config_allow",
+        help="allowlist one config file for the /config API, repeatable",
+    )
+    parser.add_argument(
+        "--config-validate-cmd",
+        default=None,
+        dest="config_validate_cmd",
+        metavar="COMMAND",
+        help="shell-style command string run as a dry-run validator after each /config write",
+    )
+    parser.add_argument(
+        "--config-validate-timeout",
+        type=float,
+        default=DEFAULT_CONFIG_VALIDATE_TIMEOUT_S,
+        dest="config_validate_timeout",
+        help="timeout in seconds for --config-validate-cmd (default: %(default)s)",
+    )
     return parser
 
 
@@ -522,6 +596,14 @@ def main() -> int:
         logger.error("%s", e)
         return 2
 
+    try:
+        allowlist = dict(parse_config_allow(spec) for spec in args.config_allow)
+    except ValueError as e:
+        logger.error("%s", e)
+        return 2
+    validate_cmd = parse_validate_cmd(args.config_validate_cmd)
+    config_store = ConfigStore(allowlist, validate_cmd=validate_cmd, timeout_s=args.config_validate_timeout)
+
     bench = {
         "python": args.bench_python,
         "script": args.bench_script,
@@ -535,7 +617,7 @@ def main() -> int:
     }
 
     controller = SubprocessController()
-    app = create_app(controller, token=token, bench=bench)
+    app = create_app(controller, token=token, bench=bench, config_store=config_store)
     logger.info("starting soil-tuning supervisor on %s:%s", args.host, args.port)
     app.run(host=args.host, port=args.port)
     return 0
