@@ -151,8 +151,15 @@ class SoilSimulation(SoilBase):
 
     _plot_config: Optional[PlotConfig] = None
 
+    # Irrigation strip fluxes above this are almost certainly a unit or
+    # normalization error (mis-scaled irrigation_flow values, or a wrong
+    # total_drip_line_length_m), not physics: drip irrigation sits around
+    # 20 mm/h over the strip and typical k_s near 180 mm/h.
+    STRIP_FLUX_WARN_MM_H: float = 500.0
+
     _last_simulated_at: Optional[pd.Timestamp] = None
     _simulating: bool = False
+    _strip_flux_warned: bool = False
 
     # Progress-plot state
     _plot_progress: bool = False
@@ -170,6 +177,15 @@ class SoilSimulation(SoilBase):
             bay_width=getattr(self.context, "bay_width", None),
         )
         ensure_mesh(self._mesh_config)
+        # The production flow meter measures the whole-field total [l/min], but the
+        # 2D mesh is one bay cross-section representing 1 m of a single row, so the
+        # metered flow is divided by the TOTAL drip-line length the meter feeds
+        # (n_rows * row_length, not a single field dimension; dividing by one row's
+        # length when there are N rows leaves the input N times too strong). The
+        # default of 1.0 reads the metered value as already per out-of-plane metre.
+        self._total_drip_line_length_m = float(configs.get("total_drip_line_length_m", default=1.0))
+        if self._total_drip_line_length_m <= 0:
+            raise ValueError("Invalid parameters: total_drip_line_length_m must be positive")
         # Retention params from [model]; [pde] carries only solver/IC/timestep knobs.
         model_block = configs.get_member("model", defaults={})
         if not any(k in model_block for k in ("theta_r", "theta_s", "alpha", "n", "k_s")):
@@ -390,7 +406,9 @@ class SoilSimulation(SoilBase):
             if transp > 0.0:
                 seg_transp[name] = transp
 
-        flow_m3s = self.context._irrigation_flow_lpm / 60_000.0  # l/min → m³/s
+        # Whole-field meter [l/min] → m³/s per out-of-plane metre (see configure()).
+        flow_m3s = self.context._irrigation_flow_lpm / (60_000.0 * self._total_drip_line_length_m)
+        self._warn_absurd_strip_flux(flow_m3s)
 
         rain_flux = 0.0
         if elapsed_s > 0 and Weather.PRECIPITATION in et_data.columns:
@@ -404,6 +422,26 @@ class SoilSimulation(SoilBase):
             flow_m3s=flow_m3s,
             rain_flux=rain_flux,
         )
+
+    def _warn_absurd_strip_flux(self, flow_m3s: float) -> None:
+        """Warn once if the watering-strip flux is beyond plausible irrigation rates."""
+        if self._strip_flux_warned or flow_m3s <= 0.0:
+            return
+        watering_width = self._mesh_config.watering_width
+        if watering_width <= 0.0:
+            return
+        strip_mm_h = flow_m3s / watering_width * 3.6e6
+        if strip_mm_h > SoilSimulation.STRIP_FLUX_WARN_MM_H:
+            self._strip_flux_warned = True
+            logging.warning(
+                "%s: irrigation strip flux %.0f mm/h exceeds %.0f mm/h. Check the "
+                "irrigation_flow values (must be true l/min, whole-field total) and "
+                "total_drip_line_length_m (%.1f m; must be n_rows * row_length).",
+                self.name,
+                strip_mm_h,
+                SoilSimulation.STRIP_FLUX_WARN_MM_H,
+                self._total_drip_line_length_m,
+            )
 
     def _walk(
         self,

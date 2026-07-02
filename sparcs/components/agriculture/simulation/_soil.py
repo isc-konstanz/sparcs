@@ -106,8 +106,9 @@ class ClipDiagnostics:
 class FluxRates:
     """Per-callback fluxes for ``_apply_source`` and diagnostics.
 
-    Flux densities in kg/(m²·s); ``flow_m3s`` in m³/s. ``seg_evap`` and
-    ``seg_transp`` are keyed by mesh segment name.
+    Flux densities in kg/(m²·s); ``flow_m3s`` in m³/s per out-of-plane metre of
+    row (the whole-field metered flow divided by the total drip-line length).
+    ``seg_evap`` and ``seg_transp`` are keyed by mesh segment name.
     """
 
     seg_evap: dict[str, float]
