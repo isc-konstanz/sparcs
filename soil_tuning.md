@@ -110,6 +110,16 @@ Troubleshooting for why the import error is silent).
 > incomplete (no `lories` installed). On a Linux host the env is installed
 > normally, so just activate it.
 
+## Remote API
+
+The bench and a companion supervisor process can also be driven over HTTP
+(job submission, start/stop/restart, config read/write), guarded by a
+bearer token. See [`doc/SOIL_TUNING_API.md`](doc/SOIL_TUNING_API.md) for
+the full endpoint reference, error codes, and `curl` examples. Both
+services are off by default: the bench's `/api/v1` blueprint only
+registers if `SOIL_TUNING_API_TOKEN`/`SOIL_TUNING_API_TOKEN_FILE` is set,
+and the supervisor is a separate script you run explicitly.
+
 ## Troubleshooting
 
 - **`Unknown interface type 'dash'`** — a `lories.application.view` dep is
