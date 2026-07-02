@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 import gmsh
-from fipy import CellVariable, DiffusionTerm, FaceVariable, TransientTerm
+from fipy import CellVariable, DiffusionTerm, FaceVariable, ImplicitSourceTerm, TransientTerm
 from fipy.meshes import Gmsh2D
 from fipy.solvers import LinearGMRESSolver
 from fipy.tools import serialComm
@@ -42,6 +42,9 @@ np.seterr(all="ignore")
 RHO_W: float = 1000.0  # kg/m³
 SE_MIN: float = 1e-6  # effective-saturation floor for source clipping
 SE_MAX: float = 0.999  # effective-saturation ceiling for source clipping
+# Floor on (SE_MAX - Se) when linearizing the implicit irrigation intake;
+# bounds the penalty coefficient B when the strip is already at saturation.
+IRR_HEADROOM_EPS: float = 1e-4
 
 
 @dataclass
@@ -85,11 +88,12 @@ class WalkResult:
 @dataclass
 class ClipDiagnostics:
     """Mass (kg per metre of out-of-plane row depth, integrated over dt) that
-    the per-step ``[SE_MIN, SE_MAX]`` clipper removed from requested sources.
+    did not enter or leave the soil as requested.
 
-    - ``top_rejected``: runoff / rejected infiltration (cell at saturation).
+    - ``top_rejected``: rain clipped at a saturated cell (only with ponding
+      disabled; irrigation never contributes — its excess ponds instead).
     - ``bottom_rejected``: unmet evaporation or root-uptake demand (cell too dry).
-    - ``ponding_overflow``: deliberate overflow past ``PondingConfig.h_max_mm``.
+    - ``ponding_overflow``: true runoff — pond overflow past ``PondingConfig.h_max_mm``.
     """
 
     top_rejected: float = 0.0
@@ -100,6 +104,31 @@ class ClipDiagnostics:
         self.top_rejected += other.top_rejected
         self.bottom_rejected += other.bottom_rejected
         self.ponding_overflow += other.ponding_overflow
+
+
+@dataclass
+class PondingPlan:
+    """Deferred surface-pond bookkeeping for one substep.
+
+    ``apply_source`` plans pond updates without mutating ``surface_h``;
+    :meth:`SoilPDECore.commit_ponding` applies them only after the substep's
+    solve is committed, so adaptive-walk rollbacks and skips cannot
+    double-count inflow into the buckets.
+
+    - ``rain_bucket_m``: per open-sky segment bucket depth after this substep's
+      inflow and planned infiltration, before the ``h_max_mm`` overflow trim.
+    - ``irr_available_m``: watering-strip pond plus this substep's irrigation
+      inflow (water-column metres over the strip); the actual intake is read
+      back from the implicit source at commit time.
+    - ``irr_cells`` / ``irr_b``: strip cells and the frozen per-cell intake
+      coefficient B [1/s]; ``None`` when no irrigation water is on offer.
+    """
+
+    dt: float
+    rain_bucket_m: dict[str, float] = field(default_factory=dict)
+    irr_available_m: float = 0.0
+    irr_cells: Optional[np.ndarray] = None
+    irr_b: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -335,18 +364,27 @@ class PondingConfig:
     the segment's infiltration capacity; excess above ``h_max_mm`` overflows
     as runoff. When disabled, rain goes straight to soil cells and the
     clipper-rejected mass surfaces via ``ClipDiagnostics.top_rejected``.
+
+    Irrigation always ponds on the watering strip regardless of ``enabled``
+    (the drip emitter physically ponds; discarding the excess was a numerics
+    bug). ``watering_h_max_mm`` bounds that pond separately — an emitter
+    basin holds far more water column over its narrow strip than sheet
+    ponding does on open ground — and defaults to ``h_max_mm`` when unset.
     """
 
     enabled: bool = False
-    h_max_mm: float = 5.0  # max ponding depth before overflow [mm]
+    h_max_mm: float = 5.0  # max rain-ponding depth before overflow [mm]
+    watering_h_max_mm: float = 5.0  # max emitter-pond depth on the watering strip [mm]
 
     def __init__(self, configs: Optional[Configurations] = None):
         if configs is None:
             self.enabled = False
             self.h_max_mm = 5.0
+            self.watering_h_max_mm = 5.0
             return
         self.enabled = configs.get_bool("enabled", default=False)
         self.h_max_mm = float(configs.get("h_max_mm", default=5.0))
+        self.watering_h_max_mm = float(configs.get("watering_h_max_mm", default=self.h_max_mm))
 
 
 @dataclass
@@ -452,6 +490,8 @@ class SoilPDECore:
     mesh: Gmsh2D
     rel_sat: CellVariable
     source_var: CellVariable
+    irr_source_var: CellVariable  # explicit part A of the implicit irrigation source
+    irr_impl_var: CellVariable  # implicit coefficient (holds -B ≤ 0)
     richards: Any
 
     segment_cells: dict[str, np.ndarray]
@@ -498,8 +538,10 @@ class SoilPDECore:
         self._build_segment_index()
         self._build_feddes_thresholds()
         self._build_root_beta()
-        # Per open-sky segment ponding depth [m of water column]; persists via state blob.
-        self.surface_h: dict[str, float] = {name: 0.0 for name in self.open_sky_segment_names}
+        # Per-segment surface-pond depth [m of water column]; persists via state blob.
+        # Rain ponds on the open-sky segments (gated on PondingConfig.enabled);
+        # irrigation always ponds on the watering strip.
+        self.surface_h: dict[str, float] = {name: 0.0 for name in [*self.open_sky_segment_names, "WateringTopSegment"]}
 
     # -- PDE assembly ----------------------------------------------------------
 
@@ -508,6 +550,12 @@ class SoilPDECore:
         rel_sat = CellVariable(mesh=mesh, name=rel_sat_name, hasOld=True)
         g_faces = FaceVariable(mesh=mesh, name="gravity faces", value=(0, 1.0))
         source = CellVariable(mesh=mesh, name="source", value=0.0)
+        # Irrigation intake as a linearized implicit source r(Se) = A - B·Se
+        # (A = B·SE_MAX, B ≥ 0, frozen per substep): the solver throttles intake
+        # to zero as the strip cell saturates, instead of inject-then-clip.
+        # Both variables stay 0 outside irrigation substeps (no-op in the matrix).
+        irr_source = CellVariable(mesh=mesh, name="irrigation source", value=0.0)
+        irr_impl = CellVariable(mesh=mesh, name="irrigation intake coeff", value=0.0)
 
         kf = self.soil_model.k_from_se(rel_sat)
         d_h = self.soil_model.dh_dse(rel_sat)
@@ -518,7 +566,7 @@ class SoilPDECore:
         gravity_flux = g_faces * kf.faceValue
         gravity_div = gravity_flux.divergence
         richards = TransientTerm(coeff=self.ode_config.theta_s - self.ode_config.theta_r) == (
-            DiffusionTerm(coeff=(kf * d_h)) + gravity_div + source
+            DiffusionTerm(coeff=(kf * d_h)) + gravity_div + source + irr_source + ImplicitSourceTerm(coeff=irr_impl)
         )
 
         ic_wt = self.ode_config.ic_water_table_depth
@@ -536,6 +584,8 @@ class SoilPDECore:
 
         self.rel_sat = rel_sat
         self.source_var = source
+        self.irr_source_var = irr_source
+        self.irr_impl_var = irr_impl
         self.richards = richards
 
     def _hydrostatic_ic_array(self, water_table_depth_m: float) -> np.ndarray:
@@ -710,34 +760,30 @@ class SoilPDECore:
         headroom_m2 = float(np.sum(np.maximum(SE_MAX - se_cells, 0.0) * self.theta_diff * cell_vols))
         return headroom_m2 / face_len
 
-    def _route_rain_through_ponding(
+    def _plan_rain_ponding(
         self,
         rain_flux: float,
         dt: float,
-    ) -> tuple[dict[str, float], float]:
-        """Advance per-segment ponding buckets by one dt.
+    ) -> tuple[dict[str, float], dict[str, float]]:
+        """Plan one dt of the per-segment rain ponding buckets (no state mutation).
 
-        Returns (effective_seg_flux [kg/(m²·s)], overflow_mass [kg/m]).
+        Returns (effective_seg_flux [kg/(m²·s)], bucket_after_m per segment —
+        pre-overflow; the ``h_max_mm`` trim happens in :meth:`commit_ponding`).
         """
-        h_max_m = self.ode_config.ponding.h_max_mm / 1000.0
         effective: dict[str, float] = {}
-        overflow_mass = 0.0
+        bucket_after: dict[str, float] = {}
         for name in self.open_sky_segment_names:
             face_len = self.segment_face_len.get(name, 0.0)
             if face_len <= 0:
                 continue
             weight = self.rain_open_fraction.get(name, 1.0) * self.rain_runoff_amplification
             incoming_m = (rain_flux * dt) / RHO_W * weight if rain_flux > 0 else 0.0
-            self.surface_h[name] = self.surface_h.get(name, 0.0) + incoming_m
+            bucket_m = self.surface_h.get(name, 0.0) + incoming_m
             capacity_m = self._infiltration_capacity_m(name, dt)
-            infiltrated_m = min(self.surface_h[name], capacity_m)
-            self.surface_h[name] -= infiltrated_m
-            if self.surface_h[name] > h_max_m:
-                seg_overflow_m = self.surface_h[name] - h_max_m
-                self.surface_h[name] = h_max_m
-                overflow_mass += seg_overflow_m * RHO_W * face_len
+            infiltrated_m = min(bucket_m, capacity_m)
+            bucket_after[name] = bucket_m - infiltrated_m
             effective[name] = infiltrated_m * RHO_W / dt if dt > 0 else 0.0
-        return effective, overflow_mass
+        return effective, bucket_after
 
     # -- integration primitives -----------------------------------------------
 
@@ -749,20 +795,23 @@ class SoilPDECore:
         rain_flux: float,
         flow_m3s: float,
         dt: float,
-    ) -> ClipDiagnostics:
-        """Rebuild the ``source`` CellVariable for the next ``dt`` step.
+    ) -> tuple[ClipDiagnostics, PondingPlan]:
+        """Rebuild the source variables for the next ``dt`` step.
 
-        Sums rain / evap / irrigation / transpiration as θ-rate [1/s] per cell,
-        clips to keep Se ∈ [SE_MIN, SE_MAX], and returns the clipped mass as
-        :class:`ClipDiagnostics`.
+        Sums rain / evap / transpiration as θ-rate [1/s] per cell and clips to
+        keep Se ∈ [SE_MIN, SE_MAX]; irrigation (plus any ponded strip water) is
+        offered through the linearized implicit source instead, so the solver
+        throttles intake near saturation. Returns the clipped mass as
+        :class:`ClipDiagnostics` plus a :class:`PondingPlan` the caller must
+        pass to :meth:`commit_ponding` once the substep's solve is committed.
         """
         se = self.rel_sat.value
         coeff = self.theta_diff
         theta_rate = np.zeros_like(se)
+        plan = PondingPlan(dt=dt)
 
-        ponding_overflow_mass = 0.0
         if self.ode_config.ponding.enabled:
-            effective_flux, ponding_overflow_mass = self._route_rain_through_ponding(
+            effective_flux, plan.rain_bucket_m = self._plan_rain_ponding(
                 rain_flux,
                 dt,
             )
@@ -793,10 +842,29 @@ class SoilPDECore:
             factor = self.segment_face_len[name] / (RHO_W * vol)
             theta_rate[cells] -= evap * factor
 
-        if flow_m3s > 0.0 and self.irrigation_factor > 0:
-            cells = self.segment_cells.get("WateringTopSegment")
-            if cells is not None and cells.size:
-                theta_rate[cells] += flow_m3s * self.irrigation_factor
+        self.irr_source_var.setValue(0.0)
+        self.irr_impl_var.setValue(0.0)
+        watering_len = self.segment_face_len.get("WateringTopSegment", 0.0)
+        watering_vol = self.segment_cell_volume.get("WateringTopSegment", 0.0)
+        cells = self.segment_cells.get("WateringTopSegment")
+        if watering_len > 0 and watering_vol > 0 and cells is not None and cells.size:
+            plan.irr_available_m = self.surface_h.get("WateringTopSegment", 0.0)
+            if flow_m3s > 0.0 and dt > 0:
+                plan.irr_available_m += flow_m3s * dt / watering_len
+            if plan.irr_available_m > 0 and dt > 0:
+                # Offer the whole pond this substep as r(Se) = B·(SE_MAX - Se),
+                # scaled so r(Se_now) empties the pond in dt where headroom allows.
+                r_offer = plan.irr_available_m * watering_len / (dt * watering_vol)
+                headroom = np.maximum(SE_MAX - np.asarray(se)[cells], IRR_HEADROOM_EPS)
+                b = r_offer / headroom
+                a_arr = np.zeros_like(theta_rate)
+                b_arr = np.zeros_like(theta_rate)
+                a_arr[cells] = b * SE_MAX
+                b_arr[cells] = -b
+                self.irr_source_var.setValue(a_arr)
+                self.irr_impl_var.setValue(b_arr)
+                plan.irr_cells = cells
+                plan.irr_b = b
 
         # Šimůnek & Hopmans (2009) compensated uptake:
         #   S_i = T_pot · α_i · β̂_i / max(ω, ω_c)  [kg/m³/s]
@@ -821,11 +889,45 @@ class SoilPDECore:
         cell_vol = np.asarray(self.mesh.cellVolumes)
         top_excess = np.maximum(excess, 0.0)
         bot_excess = np.maximum(-excess, 0.0)
-        return ClipDiagnostics(
+        clip = ClipDiagnostics(
             top_rejected=float(np.sum(top_excess * cell_vol)) * RHO_W * dt,
             bottom_rejected=float(np.sum(bot_excess * cell_vol)) * RHO_W * dt,
-            ponding_overflow=ponding_overflow_mass,
         )
+        return clip, plan
+
+    def commit_ponding(self, plan: PondingPlan) -> float:
+        """Apply a substep's deferred pond updates after its solve committed.
+
+        Decrements the watering pond by the intake the implicit source actually
+        delivered (read back from the committed field), stores the planned rain
+        buckets, and trims every bucket to ``h_max_mm``. Returns the trimmed
+        (true-runoff) mass [kg per metre of row].
+        """
+        h_max_m = self.ode_config.ponding.h_max_mm / 1000.0
+        overflow_mass = 0.0
+
+        for name, bucket_m in plan.rain_bucket_m.items():
+            face_len = self.segment_face_len.get(name, 0.0)
+            if bucket_m > h_max_m:
+                overflow_mass += (bucket_m - h_max_m) * RHO_W * face_len
+                bucket_m = h_max_m
+            self.surface_h[name] = bucket_m
+
+        if plan.irr_cells is not None and plan.irr_b is not None:
+            face_len = self.segment_face_len.get("WateringTopSegment", 0.0)
+            if face_len > 0:
+                watering_h_max_m = self.ode_config.ponding.watering_h_max_mm / 1000.0
+                se_new = np.asarray(self.rel_sat.value)[plan.irr_cells]
+                intake_rate = np.maximum(plan.irr_b * (SE_MAX - se_new), 0.0)
+                cell_vols = np.asarray(self.mesh.cellVolumes)[plan.irr_cells]
+                intake_m = float(np.sum(intake_rate * cell_vols)) * plan.dt / face_len
+                bucket_m = plan.irr_available_m - min(intake_m, plan.irr_available_m)
+                if bucket_m > watering_h_max_m:
+                    overflow_mass += (bucket_m - watering_h_max_m) * RHO_W * face_len
+                    bucket_m = watering_h_max_m
+                self.surface_h["WateringTopSegment"] = bucket_m
+
+        return overflow_mass
 
     # Picard convergence: max|Δθ| per sweep ≤ tol_th (water-content tolerance).
     DEFAULT_TOL_TH: float = 1.0e-3
@@ -948,7 +1050,7 @@ class SoilPDECore:
 
             attempted = min(sub_dt, window_s - t_offset)
             snap = self.snapshot()
-            clip = self.apply_source(
+            clip, plan = self.apply_source(
                 seg_evap=rates.seg_evap,
                 seg_transp=rates.seg_transp,
                 rain_flux=rates.rain_flux,
@@ -989,6 +1091,7 @@ class SoilPDECore:
                         on_step(t_offset)
                     continue
             t_offset += attempted
+            clip.ponding_overflow += self.commit_ponding(plan)
             out.clip.add(clip)
             if result.converged and result.sweeps <= 3 and sub_dt < dt_max:
                 sub_dt = min(dt_max, sub_dt * 1.5)
@@ -1009,6 +1112,11 @@ class SoilPDECore:
         se = self.rel_sat.value
         theta = self.ode_config.theta_r + self.theta_diff * se
         return float(np.sum(theta * np.asarray(self.mesh.cellVolumes))) * RHO_W
+
+    def surface_water(self) -> float:
+        """Σ pond depth · face_len · ρ_w — water held in the surface ponds
+        (kg per unit out-of-plane depth), on top of :meth:`total_water`."""
+        return float(sum(h * self.segment_face_len.get(name, 0.0) for name, h in self.surface_h.items())) * RHO_W
 
     def bottom_drainage_estimate(self) -> float:
         """Gravity-drainage flux at the bottom face [kg/(m²·s)], from K(Se_bottom) · ρ_w."""
@@ -1049,7 +1157,12 @@ class SoilPDECore:
         if "surface_names" in arrays.files and "surface_h" in arrays.files:
             names = arrays["surface_names"]
             values = arrays["surface_h"]
-            self.surface_h = {str(n): float(v) for n, v in zip(names, values)}
+            # Merge over zeroed defaults: blobs from before the watering pond
+            # existed lack its key, and every known bucket must stay addressable.
+            self.surface_h = {
+                **{name: 0.0 for name in [*self.open_sky_segment_names, "WateringTopSegment"]},
+                **{str(n): float(v) for n, v in zip(names, values)},
+            }
 
 
 class SoilBase(Component):

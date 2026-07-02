@@ -366,7 +366,7 @@ class SoilPredictor(SoilBase):
                 flow_m3s=0.0,
                 rain_flux=rain_flux,
             )
-            storage_before = self._total_water()
+            storage_before = self._total_water() + self._pde.surface_water()
 
             walk = self._pde.walk_window(
                 rates=rates,
@@ -379,7 +379,7 @@ class SoilPredictor(SoilBase):
             timestamps.append(ts_next)
             for p in self._probes:
                 trajectories[p.channel_id].append(self._pde.sample(p))
-            delta_storage = self._total_water() - storage_before
+            delta_storage = self._total_water() + self._pde.surface_water() - storage_before
             interval_diag = self._compute_diagnostics(
                 rates,
                 delta_storage,

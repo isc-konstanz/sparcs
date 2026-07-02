@@ -292,7 +292,9 @@ class SoilSimulation(SoilBase):
 
             rates = self._compute_flux_rates(et_data, seg_et, elapsed_s)
             sim_t0 = now - pd.Timedelta(seconds=elapsed_s)
-            storage_before = self._total_water()
+            # Include the surface ponds so pond build-up/drain-down does not
+            # masquerade as bottom drainage in the balance diagnostics.
+            storage_before = self._total_water() + self._pde.surface_water()
             interval = self._plot_config.interval if self._plot_progress else None
             clip_total = ClipDiagnostics()
             elapsed_s = self._walk(
@@ -309,7 +311,7 @@ class SoilSimulation(SoilBase):
 
             # Snapshot the PDE-only storage change before anchoring so the
             # mass-balance residual sees the solver alone, not the correction.
-            delta_storage = self._total_water() - storage_before
+            delta_storage = self._total_water() + self._pde.surface_water() - storage_before
             if self._anchor_cfg.enabled and self._anchor_sensors:
                 self._apply_anchor(now, water_after_walk=self._total_water())
             diagnostics = self._record_diagnostics(
