@@ -48,6 +48,7 @@ from lories.application.settings import Settings
 from lories.components.weather import Weather
 from lories.core.configs.directories import Directories, Directory
 from soil_tuning_api import register_api
+from soil_tuning_objective import modeled_tension_series, tension_objective
 from sparcs.components.agriculture import Irrigation, SoilMoisture
 from sparcs.components.agriculture.simulation import FieldSimulation, SoilSimulation, plot_render
 from sparcs.components.agriculture.simulation._anchor import (
@@ -1456,6 +1457,12 @@ def main() -> int:
         except RuntimeError:
             log.warning("job API disabled: no token configured")
         else:
+            # anchor_history is already keyed by sensor.key == probe.channel_id
+            # (the same identity _build_figure/_sample_probe_row use) and
+            # sign-normalized, so it doubles directly as the measured side.
+            measured_series: dict[str, pd.Series] = anchor_history
+            if not measured_series:
+                log.info("objective disabled: no measured tension series in history window")
             register_api(
                 dash_app.server,
                 runner,
@@ -1468,7 +1475,11 @@ def main() -> int:
                 },
                 png_lookup=lambda job_id: (runner._png_store.get(job_id) or (None, None))[0],
                 param_exists=lambda k: hasattr(soil_sim._ode_config, k),
-                objective_fn=None,
+                objective_fn=(
+                    (lambda job: tension_objective(modeled_tension_series(job.rows), measured_series))
+                    if measured_series
+                    else None
+                ),
                 dt_ceiling_s=10.0,
             )
         log.info(
