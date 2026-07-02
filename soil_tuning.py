@@ -42,10 +42,12 @@ except ImportError as e:  # pragma: no cover - friendly bail-out
     )
     sys.exit(1)
 
+import soil_tuning_auth
 import sparcs
 from lories.application.settings import Settings
 from lories.components.weather import Weather
 from lories.core.configs.directories import Directories, Directory
+from soil_tuning_api import register_api
 from sparcs.components.agriculture import Irrigation, SoilMoisture
 from sparcs.components.agriculture.simulation import FieldSimulation, SoilSimulation, plot_render
 from sparcs.components.agriculture.simulation._anchor import (
@@ -115,6 +117,7 @@ class TuningJob:
     progress: float = 0.0
     future: Any = None
     submitted_at: pd.Timestamp = field(default_factory=lambda: pd.Timestamp.now(tz="UTC"))
+    objective: Optional[dict] = None
 
 
 # Per-worker globals, populated once by _worker_init.
@@ -1448,6 +1451,26 @@ def main() -> int:
             )
 
         dash_app = build_app(runner, measurements, poll_seconds=poll_seconds)
+        try:
+            api_token = soil_tuning_auth.load_token()
+        except RuntimeError:
+            log.warning("job API disabled: no token configured")
+        else:
+            register_api(
+                dash_app.server,
+                runner,
+                token=api_token,
+                boot_info={
+                    "project": args.project,
+                    "replay_window": {"start": start.isoformat(), "end": end.isoformat()},
+                    "max_workers": max_workers,
+                    "started_at": pd.Timestamp.now(tz="UTC").isoformat(),
+                },
+                png_lookup=lambda job_id: (runner._png_store.get(job_id) or (None, None))[0],
+                param_exists=lambda k: hasattr(soil_sim._ode_config, k),
+                objective_fn=None,
+                dt_ceiling_s=10.0,
+            )
         log.info(
             "Dash app starting at http://%s:%d  (poll=%.1fs, workers=%d)",
             args.host,
