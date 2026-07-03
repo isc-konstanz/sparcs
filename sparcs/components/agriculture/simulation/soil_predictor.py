@@ -60,6 +60,11 @@ _DEFAULT_COMBO_CAP: int = 16
 _DEFAULT_GRID_MODE: str = "fill_order"
 _GRID_MODES = ("fill_order", "full")
 
+# Tension-feasibility decision defaults. `threshold_hpa` is a positive hPa
+# magnitude dryness ceiling; an operator calibration input, not a physical
+# constant, so this default is a placeholder, not a validated field value.
+_DEFAULT_THRESHOLD_HPA: float = 300.0
+
 
 @dataclass(frozen=True)
 class WateringWindow:
@@ -123,6 +128,11 @@ class SoilPredictor(SoilBase):
     _combo_cap: int
     _grid_mode: str
     _ladder: list[tuple[pd.Timedelta, ...]]
+
+    # Tension-feasibility decision: dryness ceiling and the probe subset it is
+    # evaluated over; see _peak_tension / _feasible / _select.
+    _threshold_hpa: float
+    _decision_probes: list[str]
 
     _plot_fig: Any = None
     _plot_ax: Any = None
@@ -209,6 +219,32 @@ class SoilPredictor(SoilBase):
             self._mesh_config,
             log_name=self.name,
         )
+
+        self._threshold_hpa = configs.get_float("threshold_hpa", default=_DEFAULT_THRESHOLD_HPA)
+
+        all_probe_ids = [probe.channel_id for probe in self._probes]
+        decision_probes_cfg = configs.get("decision_probes", default=None)
+        if not decision_probes_cfg:
+            self._decision_probes = list(all_probe_ids)
+            logging.warning(
+                "%s: decision_probes not configured; using ALL probes (%s) for the "
+                "tension decision -- surface and deep probes may distort the result.",
+                self.name,
+                self._decision_probes,
+            )
+        else:
+            decision_probes = [str(p) for p in decision_probes_cfg]
+            unknown = [p for p in decision_probes if p not in all_probe_ids]
+            if unknown:
+                logging.warning(
+                    "%s: decision_probes %s not found among resolved probe channel-ids "
+                    "%s; unknown ids are kept as configured but will never contribute "
+                    "a tension sample.",
+                    self.name,
+                    unknown,
+                    all_probe_ids,
+                )
+            self._decision_probes = decision_probes
 
         self.data.add(
             key=self._TIMESTAMP_CREATION_KEY,
@@ -779,6 +815,118 @@ class SoilPredictor(SoilBase):
         if on_ts < horizon_start:
             on_ts += pd.Timedelta(days=1)
         return on_ts
+
+    # Tension conversion, feasibility, and ladder selection (pure)
+
+    @staticmethod
+    def _peak_tension(
+        trajectory: tuple[list[pd.Timestamp], dict[str, list[float]]],
+        model: Any,
+        decision_probes: list[str],
+    ) -> float:
+        """Worst-case (largest) soil tension over the configured decision probes AND
+        the whole horizon, for one candidate's ``(timestamps, {probe_channel_id: [Se, ...]})``.
+
+        ``model.psi_from_se`` returns a POSITIVE hPa magnitude (drier soil -> lower Se
+        -> larger positive tension; see ``sparcs/components/agriculture/soil/models.py``,
+        the Genuchten implementation at line 270). There is no sign flip here or in
+        ``_feasible`` -- the comparison against ``threshold_hpa`` is direct.
+
+        Probes not present in ``decision_probes`` are ignored. Returns ``-inf`` if
+        ``decision_probes`` selects no probe present in the trajectory (vacuously
+        feasible against any finite threshold).
+        """
+        _timestamps, probe_series = trajectory
+        peak = float("-inf")
+        for channel_id in decision_probes:
+            se_values = probe_series.get(channel_id)
+            if not se_values:
+                continue
+            tensions = model.psi_from_se(np.asarray(se_values, dtype=float))
+            candidate_peak = float(np.max(tensions))
+            if candidate_peak > peak:
+                peak = candidate_peak
+        return peak
+
+    @staticmethod
+    def _feasible(peak_tension: float, threshold_hpa: float) -> bool:
+        """A candidate is feasible iff its peak tension stays at or below the
+        threshold -- direct comparison, no sign flip (``peak_tension`` and
+        ``threshold_hpa`` are both positive hPa magnitudes)."""
+        return peak_tension <= threshold_hpa
+
+    @classmethod
+    def _select(
+        cls,
+        ladder: list[tuple[pd.Timedelta, ...]],
+        trajectories: dict[tuple[pd.Timedelta, ...], tuple[list[pd.Timestamp], dict[str, list[float]]]],
+        model: Any,
+        decision_probes: list[str],
+        threshold_hpa: float,
+        grid_mode: str,
+    ) -> tuple[tuple[pd.Timedelta, ...], str]:
+        """Select the recommended candidate and a status in ``{"ok", "none_needed",
+        "infeasible"}``.
+
+        ``fill_order`` (default): the ladder is a strictly-increasing total-water
+        chain and feasibility is monotone along it (adding later-window water never
+        raises earlier tension), so walk from least water up and take the FIRST
+        feasible rung -- no search, no tie-break. Edges: the all-``0min`` rung (the
+        first) feasible -> ``none_needed``; no rung feasible -> the top (largest-water)
+        rung, ``infeasible``; otherwise the first feasible rung, ``ok``.
+
+        ``full``: the candidate set is a partial order, not a chain. Among feasible
+        candidates, choose least total watering minutes; tie-break in order (a) fewer
+        active (non-zero) windows, (b) earliest active start (the earliest window
+        index with a non-zero duration; a candidate with none is "latest" for this
+        purpose), (c) largest tension margin (``threshold_hpa - peak_tension``). Edges:
+        the all-``0min`` candidate chosen -> ``none_needed``; no candidate feasible ->
+        the largest-total-minutes candidate, ``infeasible``; otherwise ``ok``.
+        """
+        if not ladder:
+            raise ValueError("_select requires a non-empty ladder.")
+
+        peak_tensions = {
+            candidate: cls._peak_tension(trajectories[candidate], model, decision_probes) for candidate in ladder
+        }
+        feasible = {candidate: cls._feasible(peak_tensions[candidate], threshold_hpa) for candidate in ladder}
+        zero_candidate = tuple(pd.Timedelta(0) for _ in ladder[0])
+
+        if grid_mode == "full":
+            feasible_candidates = [c for c in ladder if feasible[c]]
+            if not feasible_candidates:
+                chosen = max(ladder, key=lambda c: cls._total_minutes(c))
+                return chosen, "infeasible"
+
+            def _sort_key(c: tuple[pd.Timedelta, ...]) -> tuple[float, int, int, float]:
+                total_minutes = cls._total_minutes(c)
+                active_count = sum(1 for d in c if d > pd.Timedelta(0))
+                earliest_start = next((i for i, d in enumerate(c) if d > pd.Timedelta(0)), len(c))
+                margin = threshold_hpa - peak_tensions[c]
+                return (total_minutes, active_count, earliest_start, -margin)
+
+            chosen = min(feasible_candidates, key=_sort_key)
+            status = "none_needed" if chosen == zero_candidate else "ok"
+            return chosen, status
+
+        if grid_mode != "fill_order":
+            raise ValueError(f"Unknown grid_mode {grid_mode!r}; expected 'fill_order' or 'full'.")
+
+        # fill_order: the ladder is already ordered least-water-first (see
+        # _build_ladder); walk it and take the first feasible rung.
+        if feasible[ladder[0]]:
+            return ladder[0], "none_needed"
+
+        for candidate in ladder:
+            if feasible[candidate]:
+                return candidate, "ok"
+
+        return ladder[-1], "infeasible"
+
+    @staticmethod
+    def _total_minutes(candidate: tuple[pd.Timedelta, ...]) -> float:
+        """Total watering minutes across a candidate's per-window durations."""
+        return sum((d.total_seconds() / 60.0 for d in candidate), 0.0)
 
     # Forecast retrieval
 
