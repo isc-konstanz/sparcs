@@ -65,6 +65,11 @@ _GRID_MODES = ("fill_order", "full")
 # constant, so this default is a placeholder, not a validated field value.
 _DEFAULT_THRESHOLD_HPA: float = 300.0
 
+# Trajectory table: fixed PK arity (unused window columns filled with the
+# sentinel below) and the sentinel value itself.
+_DEFAULT_MAX_WINDOWS: int = 4
+_UNUSED_WINDOW_SENTINEL: float = -1.0
+
 
 @dataclass(frozen=True)
 class WateringWindow:
@@ -97,6 +102,18 @@ class SoilPredictor(SoilBase):
     _TIMESTAMP_CREATION_KEY: str = "timestamp_creation"
     _STATE_CHANNEL_KEY: str = "predict_state"
     _PLOT_CHANNEL_KEY: str = "predict_plot"
+
+    # Recommendation channels (normal auto-logged path, one row per run).
+    _RECOMMEND_TOTAL_KEY: str = "recommend_total_min"
+    _RECOMMEND_STATUS_KEY: str = "recommend_status"
+
+    # Trajectory-table channels (direct connector write). Distinct-key scheme:
+    # every trajectory column uses a `traj_`/`w{i}_min` prefix so it can never
+    # collide with a legacy auto-logged channel key (`predict_<probe>`,
+    # `timestamp_creation`, ...) -- see the module docstring / configure().
+    _TRAJ_TIMESTAMP_CREATION_KEY: str = "traj_timestamp_creation"
+    _TRAJ_IS_RECOMMENDED_KEY: str = "is_recommended"
+    _TRAJ_TABLE_NAME: str = "soil_predictor_trajectory"
 
     _horizon: pd.Timedelta
     _save_freq: pd.Timedelta
@@ -141,6 +158,21 @@ class SoilPredictor(SoilBase):
     _channel_keys: dict[str, str]
 
     _probes: list[ProbeSpec]
+
+    # Fixed PK arity for the trajectory table (see _build_trajectory_frame) and
+    # the id of the SQL logger connector the direct grid write targets; None
+    # when [soil_predictor].logger is not configured (the grid write is then
+    # skipped with a warning -- see configure()/_write_trajectory_table).
+    _max_windows: int
+    _logger_id: Optional[str]
+
+    # Recommendation channel keys, w0_min ... w{max_windows-1}_min, in window order.
+    _recommend_window_keys: list[str]
+    # Trajectory channel keys, w0_min ... w{max_windows-1}_min (PK columns), in window order.
+    _traj_window_keys: list[str]
+    # probe.channel_id -> trajectory channel key (traj_<probe>), distinct from
+    # _channel_keys (the legacy predict_<probe> auto-logged keys).
+    _traj_channel_keys: dict[str, str]
 
     # Dedup gate: skip if (now, forecast_creation) was already published.
     _last_predicted_key: Optional[tuple[pd.Timestamp, pd.Timestamp]] = None
@@ -204,6 +236,26 @@ class SoilPredictor(SoilBase):
 
         self._ladder = self._build_ladder(self._window_durations, self._grid_mode)
         self._check_combo_cap(self._ladder, self._combo_cap, log_name=self.id)
+
+        self._max_windows = configs.get_int("max_windows", default=_DEFAULT_MAX_WINDOWS)
+        if len(self._windows) > self._max_windows:
+            raise ValueError(
+                f"{self.id}: {len(self._windows)} [soil_predictor.windows] configured, "
+                f"exceeding max_windows={self._max_windows}; max_windows is the fixed "
+                "trajectory-table PK arity and needs a manual table migration to raise "
+                "(see SOIL.md)."
+            )
+
+        self._logger_id = configs.get("logger", default=None)
+        if self._logger_id is not None:
+            self._logger_id = str(self._logger_id)
+        else:
+            logging.warning(
+                "%s: [soil_predictor].logger not configured; the all-candidate "
+                "trajectory table will not be written (the recommendation channels "
+                "still log normally).",
+                self.name,
+            )
 
         if configs.has_member("pde"):
             self._ode_config = PDEConfig(configs.get_member("pde"), model_configs=model_block)
@@ -300,6 +352,110 @@ class SoilPredictor(SoilBase):
                 "publish.",
                 self.name,
             )
+
+        # --- Recommendation channels (normal auto-logged path) ---------------
+        # One row per run: recommend_w0_min ... recommend_w{max_windows-1}_min,
+        # recommend_total_min, recommend_status. Distinct keys from the trajectory
+        # table's w{i}_min PK columns below (different channels, different logger).
+        self._recommend_window_keys = []
+        for i in range(self._max_windows):
+            key = f"recommend_w{i}_min"
+            self._recommend_window_keys.append(key)
+            self.data.add(
+                key,
+                type=float,
+                name=f"Recommended window {i} duration",
+                unit="min",
+                aggregate="last",
+                logger={"enabled": True},
+            )
+
+        self.data.add(
+            self._RECOMMEND_TOTAL_KEY,
+            type=float,
+            name="Recommended total watering duration",
+            unit="min",
+            aggregate="last",
+            logger={"enabled": True},
+        )
+        self.data.add(
+            self._RECOMMEND_STATUS_KEY,
+            type=str,
+            name="Recommendation status",
+            aggregate="last",
+            logger={"enabled": True},
+        )
+
+        # --- Trajectory-table channels (direct connector write) --------------
+        # Bound to the configured `logger` connector, in a dedicated table
+        # (_TRAJ_TABLE_NAME) distinct from the default logger's predictor table.
+        # These channels are NEVER `.set()` by the predictor -- the automatic
+        # flush (Channels.to_frame(unique=True)) skips any channel whose
+        # timestamp is NaT, so leaving them un-set is what keeps the auto path
+        # silent for them (see the module docstring / PRD "Further Notes").
+        # Skipped entirely when no `logger` is configured (degrade, don't crash).
+        self._traj_window_keys = []
+        self._traj_channel_keys = {}
+        if self._logger_id is not None:
+            self.data.add(
+                self._TRAJ_TIMESTAMP_CREATION_KEY,
+                name="Trajectory Creation Timestamp",
+                type=pd.Timestamp,
+                aggregate="last",
+                logger={
+                    "connector": self._logger_id,
+                    "table": self._TRAJ_TABLE_NAME,
+                    "primary": True,
+                    "nullable": False,
+                    "enabled": True,
+                },
+            )
+
+            for i in range(self._max_windows):
+                key = f"w{i}_min"
+                self._traj_window_keys.append(key)
+                self.data.add(
+                    key,
+                    type=float,
+                    name=f"Trajectory window {i} duration",
+                    unit="min",
+                    aggregate="last",
+                    logger={
+                        "connector": self._logger_id,
+                        "table": self._TRAJ_TABLE_NAME,
+                        "primary": True,
+                        "nullable": False,
+                        "enabled": True,
+                    },
+                )
+
+            self.data.add(
+                self._TRAJ_IS_RECOMMENDED_KEY,
+                type=bool,
+                name="Is recommended candidate",
+                aggregate="last",
+                logger={
+                    "connector": self._logger_id,
+                    "table": self._TRAJ_TABLE_NAME,
+                    "enabled": True,
+                },
+            )
+
+            for probe in self._probes:
+                key = f"traj_{probe.channel_id}"
+                self._traj_channel_keys[probe.channel_id] = key
+                self.data.add(
+                    key,
+                    type=float,
+                    name=f"Trajectory {probe.name}",
+                    unit="-",
+                    aggregate="last",
+                    logger={
+                        "connector": self._logger_id,
+                        "table": self._TRAJ_TABLE_NAME,
+                        "enabled": True,
+                    },
+                )
 
     @property
     def cooldown(self) -> pd.Timedelta:
@@ -437,6 +593,47 @@ class SoilPredictor(SoilBase):
             now,
             forecast_creation,
         )
+
+        # Watering-grid roll-out: the ladder, recommendation, and all-candidate
+        # trajectory table. Only when windows are configured -- otherwise the
+        # predictor stays a pure zero-flow forecaster (the legacy path above
+        # already published the all-0min "do nothing" forecast unconditionally,
+        # so nothing here can regress it; see PRD User Story 11). Isolated in
+        # its own try/except: a grid/DB failure must never abort the legacy
+        # forecast, which has already been published above by this point.
+        if self._windows:
+            try:
+                horizon_start = et_data.index[0]
+                horizon_end = et_data.index[-1]
+                ladder_traj = self._rollout_ladder(
+                    ic_rel_sat,
+                    self._ladder,
+                    et_data,
+                    seg_et,
+                    self._flow_m3s,
+                    horizon_start,
+                    horizon_end,
+                )
+                chosen, status = self._select(
+                    self._ladder,
+                    ladder_traj,
+                    self._pde.soil_model,
+                    self._decision_probes,
+                    self._threshold_hpa,
+                    self._grid_mode,
+                )
+                self._publish_recommendation(chosen, status, now, forecast_creation)
+
+                trajectory_frame = self._build_trajectory_frame(ladder_traj, chosen, forecast_creation)
+                self._write_trajectory_table(trajectory_frame)
+            except Exception:  # noqa: BLE001
+                logging.exception(
+                    "%s: watering-grid roll-out/recommendation/trajectory-write failed "
+                    "(now=%s, creation=%s); the legacy zero-flow forecast published above is unaffected.",
+                    self.name,
+                    now,
+                    forecast_creation,
+                )
 
     # PDE backend
 
@@ -1157,6 +1354,175 @@ class SoilPredictor(SoilBase):
                     save_index[0],
                     pd.Series(plot_values, index=save_index, dtype=object),
                 )
+
+    # Recommendation + trajectory-table publishing (the watering-grid outputs)
+
+    def _publish_recommendation(
+        self,
+        chosen: tuple[pd.Timedelta, ...],
+        status: str,
+        run_timestamp: pd.Timestamp,
+        forecast_creation: pd.Timestamp,
+    ) -> None:
+        """Publish the chosen candidate on the recommendation channels (normal
+        auto-logged path): one row at ``run_timestamp``, per-window minutes
+        (unused windows -- i.e. ``chosen`` shorter than ``_max_windows``, which
+        cannot happen given the configure()-time length check, but the fill
+        below is defensive -- get ``0.0``, not the trajectory table's ``-1``
+        sentinel; a "no window configured" reading of 0 minutes is unambiguous
+        on the advisory channel, whereas the sentinel is only meaningful
+        alongside the trajectory table's fixed-arity PK columns), the total
+        watering minutes, and the status string.
+        """
+        total_minutes = self._total_minutes(chosen)
+
+        for i, key in enumerate(self._recommend_window_keys):
+            minutes = chosen[i].total_seconds() / 60.0 if i < len(chosen) else 0.0
+            self.data[key].set(run_timestamp, minutes)
+
+        self.data[self._RECOMMEND_TOTAL_KEY].set(run_timestamp, total_minutes)
+        self.data[self._RECOMMEND_STATUS_KEY].set(run_timestamp, status)
+        logging.debug(
+            "%s: recommendation published: total=%.1fmin status=%s (now=%s, creation=%s).",
+            self.name,
+            total_minutes,
+            status,
+            run_timestamp,
+            forecast_creation,
+        )
+
+    def _build_trajectory_frame(
+        self,
+        ladder_trajectories: dict[tuple[pd.Timedelta, ...], tuple[list[pd.Timestamp], dict[str, list[float]]]],
+        chosen: tuple[pd.Timedelta, ...],
+        forecast_creation: pd.Timestamp,
+    ) -> pd.DataFrame:
+        """Build the all-candidate trajectory frame: index = forecast timestamps
+        (duplicated across candidates); columns = the trajectory channel KEYS
+        (``_TRAJ_TIMESTAMP_CREATION_KEY``, ``w0_min ... w{max_windows-1}_min``,
+        ``is_recommended``, ``traj_<probe>`` for every probe present in
+        ``ladder_trajectories``).
+
+        Every candidate contributes one row per forecast timestamp: its
+        per-window minutes (``_UNUSED_WINDOW_SENTINEL`` for any window index
+        beyond ``len(candidate)``, so the PK column set is stable regardless of
+        how many windows a deployment configures), ``is_recommended`` (True only
+        for ``chosen``'s rows), and its per-probe Se.
+
+        Pure and unit-testable: no ``Channel``/connector access here. Column
+        NAMES are the bare channel keys, not full channel ids --
+        ``_write_trajectory_table`` renames them to ids (``connector.write``
+        matches on ``resource.id in data.columns``) right before the write.
+        """
+        rows: list[dict[str, Any]] = []
+        index: list[pd.Timestamp] = []
+
+        for candidate, (timestamps, probe_series) in ladder_trajectories.items():
+            is_recommended = candidate == chosen
+            window_minutes = [
+                candidate[i].total_seconds() / 60.0 if i < len(candidate) else _UNUSED_WINDOW_SENTINEL
+                for i in range(self._max_windows)
+            ]
+            for t_idx, ts in enumerate(timestamps):
+                row: dict[str, Any] = {self._TRAJ_TIMESTAMP_CREATION_KEY: forecast_creation}
+                for key, minutes in zip(self._traj_window_keys, window_minutes):
+                    row[key] = minutes
+                row[self._TRAJ_IS_RECOMMENDED_KEY] = is_recommended
+                for probe_id, key in self._traj_channel_keys.items():
+                    values = probe_series.get(probe_id)
+                    row[key] = values[t_idx] if values is not None and t_idx < len(values) else np.nan
+                rows.append(row)
+                index.append(ts)
+
+        columns = [self._TRAJ_TIMESTAMP_CREATION_KEY, *self._traj_window_keys, self._TRAJ_IS_RECOMMENDED_KEY]
+        columns.extend(self._traj_channel_keys.values())
+        if not rows:
+            return pd.DataFrame(columns=columns)
+
+        frame = pd.DataFrame.from_records(rows, index=pd.DatetimeIndex(index, name="timestamp"))
+        return frame.loc[:, columns]
+
+    def _write_trajectory_table(self, frame: pd.DataFrame) -> None:
+        """Direct-write the all-candidate trajectory frame to the configured
+        `logger` connector, once. Renames ``frame``'s bare channel-key columns
+        to full channel ids (what ``connector.write`` matches against) first.
+        Warns and skips (never raises) if `logger` is not configured or the
+        connector cannot be resolved/is not a writable connector -- a grid
+        persistence failure must never abort the legacy zero-flow forecast.
+        """
+        if self._logger_id is None:
+            return
+        if frame.empty:
+            logging.debug("%s: trajectory frame empty; skipping direct write.", self.name)
+            return
+
+        connector = self._resolve_logger_connector(self._logger_id)
+        if connector is None:
+            logging.warning(
+                "%s: logger connector '%s' not found; skipping the trajectory-table direct write.",
+                self.name,
+                self._logger_id,
+            )
+            return
+        if not hasattr(connector, "write"):
+            logging.warning(
+                "%s: logger connector '%s' (%s) has no write(); skipping the trajectory-table direct write.",
+                self.name,
+                self._logger_id,
+                type(connector).__name__,
+            )
+            return
+
+        id_by_key = {
+            self._TRAJ_TIMESTAMP_CREATION_KEY: self.data[self._TRAJ_TIMESTAMP_CREATION_KEY].id,
+            self._TRAJ_IS_RECOMMENDED_KEY: self.data[self._TRAJ_IS_RECOMMENDED_KEY].id,
+        }
+        for key in self._traj_window_keys:
+            id_by_key[key] = self.data[key].id
+        for key in self._traj_channel_keys.values():
+            id_by_key[key] = self.data[key].id
+
+        write_frame = frame.rename(columns=id_by_key)
+        try:
+            connector.write(write_frame)
+        except Exception:  # noqa: BLE001
+            logging.exception(
+                "%s: direct write of the trajectory table to logger '%s' failed.",
+                self.name,
+                self._logger_id,
+            )
+            return
+        logging.info(
+            "%s: trajectory table written: %d rows to logger '%s'.",
+            self.name,
+            len(write_frame),
+            self._logger_id,
+        )
+
+    def _resolve_logger_connector(self, logger_id: str) -> Optional[Any]:
+        """Resolve ``logger_id`` (a plain, un-dotted config id, e.g. ``"db"``)
+        against the shared connector registry.
+
+        ``self.connectors[logger_id]`` / ``self.connectors.get(logger_id)``
+        (``ConnectorAccess`` / ``RegistratorAccess._get``) prefix a dot-less id
+        with THIS component's own id before looking it up in the shared map, so
+        a root-level connector (the common case for a shared SQL logger declared
+        at the system's top-level ``[connectors.<id>]``) is not found that way.
+        ``RegistratorAccess.__getattr__`` instead looks up by the connector's
+        bare ``key`` across the shared map regardless of nesting, so it is tried
+        first; the id-based lookup is kept as a fallback for a `logger` value
+        that already is a full dotted id.
+        """
+        try:
+            connector = getattr(self.connectors, logger_id)
+        except AttributeError:
+            connector = None
+        if connector is not None:
+            return connector
+        try:
+            return self.connectors[logger_id]
+        except (KeyError, TypeError):
+            return None
 
     @staticmethod
     def _encode_state(rel_sat: np.ndarray) -> bytes:
