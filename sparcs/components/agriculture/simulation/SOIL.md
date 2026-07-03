@@ -415,8 +415,91 @@ Two components consume it:
   plotting (`progress.png` / `progress.html` auto-refresh),
   mass-balance accounting, the cold-start spin-up, and the wall-clock
   walk.
-- `SoilPredictor` — forecast roll-outs over the planning horizon
-  for the irrigation strategy. Uses the same PDE core.
+- `SoilPredictor` — forecast roll-outs over the planning horizon.
+  Uses the same PDE core. Rolls the Richards equation forward over the
+  weather forecast to answer two questions: the zero-irrigation "what
+  happens if we do nothing" forecast, and — once per day — the
+  least-watering schedule that keeps the root zone above its dryness
+  limit. See §11.1.
+
+### 11.1 The watering-strategy grid predictor
+
+Beyond the zero-irrigation forecast, `SoilPredictor` runs a daily
+watering-recommendation roll-out. It is advisory in v1: it publishes a
+suggestion and persists every candidate for evaluation; it does not
+actuate irrigation.
+
+- **Timing (decoupled from the live solver).** The roll-out is heavy
+  (one PDE integration per candidate schedule), so it must not run on
+  the live-sim weather-callback thread — a multi-minute roll-out there
+  would stall the live solver. Instead the predictor registers its own
+  listener on `SoilSimulation`'s `SIMULATION_STATE` channel (published
+  after every live advance) and self-gates to a fixed daily boundary
+  (`interval` + `offset`, site-local, the same `floor_date + offset`
+  pattern `WeatherForecast` uses). Running on the state channel also
+  means the predictor cannot fire before live state exists, so cold
+  start needs no special case. A per-listener `cooldown` is a
+  backpressure floor, distinct from the daily run cadence.
+- **Watering model.** Each candidate is one duration per configured
+  window. Windows are clock times (`[[soil_predictor.windows]]`, e.g.
+  morning at 08:00, optionally an evening window), each with its own
+  `durations` list (each including `0min`). The emitters run at a fixed
+  flow derived from the drip layout (`nozzle_count * nozzle_flow_lph`
+  normalised by `total_drip_line_length_m`, the same arithmetic the live
+  sim uses), starting at each window's clock time for that candidate's
+  duration.
+- **The fill-order ladder (front-load dominance).** The candidate set is
+  **not** the full Cartesian product. Reading windows in time order, a
+  candidate is admissible only if every window before the first
+  non-maxed one is at its maximum and every window after it is `0min`:
+  sweep the morning with the evening off, then mesh the longest morning
+  with the evening sweep. Back-loaded schedules (a short morning with a
+  long evening) are dropped. The assumption is **front-load dominance**:
+  at equal total water, watering earlier holds the horizon-maximum
+  tension at least as low as watering later. This is sound when the
+  driest moment is during or after the hot day — the typical drip-under-
+  PV case, where midday ET is the peak stress. It can over-recommend on
+  days whose binding peak is the pre-dawn end of the horizon. The ladder
+  turns the candidate count from the product of the list lengths into
+  their sum, and the total-water values form a single strictly-increasing
+  chain. The count is static at `configure()`, so an over-`combo_cap`
+  ladder fails at configuration, never a silent runtime skip.
+- **`grid_mode = "full"`** is the escape hatch for fields where a late or
+  overnight peak binds: it restores the full Cartesian product and a
+  least-total-minutes selector (with tie-breaks), at the cost of more
+  roll-outs.
+- **Prefix-shared roll-out.** Candidates share integration prefixes: the
+  segment before the first window is integrated once from the initial
+  condition; each window's durations are then swept from a saved state of
+  the max-duration branch. Branch state is saved and restored with
+  `save_state_blob` / `load_state_blob`, **not** `snapshot` / `set_state`
+  — the latter round-trip only `rel_sat` and would drop the `surface_h`
+  ponds that watering fills, so a later branch would inherit ponds from
+  the wrong earlier duration.
+- **Decision rule.** At a configured root-zone subset of probes
+  (`decision_probes`), each candidate's `Se` trajectory is converted to
+  soil tension (`model.psi_from_se`, a positive hPa magnitude), and the
+  candidate is feasible if the peak tension over the whole horizon stays
+  at or below `threshold_hpa`. On the `fill_order` ladder feasibility is
+  monotone, so the recommendation is the first feasible rung (status
+  `ok`); `none_needed` if the all-`0min` rung is already feasible;
+  `infeasible` (best-effort top rung) if even maximum watering cannot
+  hold the threshold.
+- **Outputs.** The recommendation goes out on dedicated auto-logged
+  channels (`recommend_w{i}_min`, `recommend_total_min`,
+  `recommend_status`) — one row per run, the seam a future irrigation
+  controller subscribes to. Every candidate's per-timestep trajectory is
+  persisted to a dedicated table via a **direct connector write** keyed on
+  the ladder dimensions (`w{i}_min` composite-PK columns, `is_recommended`
+  marking the winner), because the automatic log path collapses duplicate
+  timestamps. The trajectory channels are never `.set()`, so the auto
+  flush stays silent for them.
+
+**Consumer migration.** The all-`0min` rung reproduces today's
+zero-irrigation forecast. A dashboard reading the current
+`predict_<probe>` channels should move to the trajectory table filtered
+by the all-`0min` PK row (or the `is_recommended` column), so no consumer
+silently reads a mix of candidates.
 
 ---
 
@@ -452,6 +535,36 @@ enabled  = false
 h_max_mm = 5.0
 ```
 
+The `SoilPredictor` grid roll-out (§11.1) adds its own block. It reuses
+`total_drip_line_length_m` from `[soil_simulation]` and the `[model]`
+block the PDE core uses; only the keys below are predictor-specific.
+
+```toml
+[soil_predictor]
+horizon         = "24h"          # forecast roll-out horizon
+interval        = 1440           # run cadence, minutes (daily); own default
+offset          = 60             # minutes past local midnight -> ~01:00 local
+cooldown        = 60             # per-listener backpressure floor, minutes
+threshold_hpa   = 300            # dryness ceiling, positive hPa magnitude
+combo_cap       = 16             # max ladder rungs; FAILS AT CONFIG if exceeded
+grid_mode       = "fill_order"   # "fill_order" ladder (default) | "full" product
+max_windows     = 4              # fixed PK arity for the trajectory table
+logger          = "db"           # id of the SQL logger connector for the grid write
+decision_probes = ["root_20", "root_40"]  # subset of [soil_simulation.probes] keys
+
+  [soil_predictor.drip]          # derives the fixed on-flow
+    nozzle_flow_lph = 1.0        # per-nozzle output, L/h
+    nozzle_count    = 31         # nozzles fed by the meter
+
+  [[soil_predictor.windows]]     # ordered watering windows; omit for "morning only"
+    start     = "08:00"          # site-local clock time
+    durations = ["0min", "30min", "1h", "2h"]
+
+  [[soil_predictor.windows]]
+    start     = "18:00"
+    durations = ["0min", "30min", "1h"]
+```
+
 ---
 
 ## 13. Symbol and parameter reference
@@ -483,7 +596,7 @@ h_max_mm = 5.0
 
 ## 14. Current limitations
 
-Two known gaps remain:
+Three known gaps remain:
 
 1. **Hysteresis** between drying and wetting retention branches
    (Lenhard & Parker, 1992). Can shift the retention curve by 20–40 %
@@ -493,6 +606,15 @@ Two known gaps remain:
    into `K(h, T)` or vapour conductivity. Acceptable for sub-daily
    liquid-water modelling in temperate conditions; insufficient for
    freeze/thaw or hot, dry near-surface evaporation.
+3. **Front-load dominance in the watering recommendation** (§11.1). The
+   `fill_order` ladder assumes that at equal total water, watering
+   earlier holds the horizon-maximum tension at least as low as watering
+   later. It can over-recommend on days whose binding dryness peak is the
+   pre-dawn end of the horizon rather than the midday ET peak. Set
+   `grid_mode = "full"` on fields where that regime is common. The
+   recommendation is also advisory only: it constrains a dryness ceiling,
+   not a waterlogging upper bound, and drives from a single deterministic
+   forecast (no ensemble).
 
 ---
 
