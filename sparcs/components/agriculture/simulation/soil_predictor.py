@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime
 import io
+import itertools
 import logging
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -53,6 +54,11 @@ _DEFAULT_COOLDOWN_MIN: int = 60
 _DEFAULT_NOZZLE_FLOW_LPH: float = 1.0
 _DEFAULT_NOZZLE_COUNT: int = 1
 _DEFAULT_DRIP_LINE_LENGTH_M: float = 1.0
+
+# Candidate-set (ladder) defaults.
+_DEFAULT_COMBO_CAP: int = 16
+_DEFAULT_GRID_MODE: str = "fill_order"
+_GRID_MODES = ("fill_order", "full")
 
 
 @dataclass(frozen=True)
@@ -110,6 +116,14 @@ class SoilPredictor(SoilBase):
     # metre of row); see _derive_flow_m3s.
     _flow_m3s: float
 
+    # Watering windows (ordered by start) and each window's parallel,
+    # ascending, zero-inclusive duration list; see _build_ladder.
+    _windows: list[WateringWindow]
+    _window_durations: list[list[pd.Timedelta]]
+    _combo_cap: int
+    _grid_mode: str
+    _ladder: list[tuple[pd.Timedelta, ...]]
+
     _plot_fig: Any = None
     _plot_ax: Any = None
     _plot_norm: Any = None
@@ -154,6 +168,32 @@ class SoilPredictor(SoilBase):
         nozzle_count = drip_block.get_int("nozzle_count", default=_DEFAULT_NOZZLE_COUNT)
         total_drip_line_length_m = soil_block.get_float("total_drip_line_length_m", default=_DEFAULT_DRIP_LINE_LENGTH_M)
         self._flow_m3s = self._derive_flow_m3s(nozzle_count, nozzle_flow_lph, total_drip_line_length_m)
+
+        windows_cfg = configs.get("windows", default=[])
+        self._windows = []
+        self._window_durations = []
+        for window_cfg in windows_cfg:
+            start = pd.Timestamp(str(window_cfg["start"])).time()
+            durations = sorted(to_timedelta(d) for d in window_cfg["durations"])
+            if pd.Timedelta(0) not in durations:
+                raise ValueError(
+                    f"{self.id}: [soil_predictor.windows] entry with start={window_cfg['start']!r} "
+                    "is missing a '0min' duration; every window's durations list must include zero."
+                )
+            self._windows.append(WateringWindow(start=start))
+            self._window_durations.append(durations)
+
+        order = sorted(range(len(self._windows)), key=lambda i: self._windows[i].start)
+        self._windows = [self._windows[i] for i in order]
+        self._window_durations = [self._window_durations[i] for i in order]
+
+        self._combo_cap = configs.get_int("combo_cap", default=_DEFAULT_COMBO_CAP)
+        self._grid_mode = str(configs.get("grid_mode", default=_DEFAULT_GRID_MODE))
+        if self._grid_mode not in _GRID_MODES:
+            raise ValueError(f"{self.id}: grid_mode={self._grid_mode!r} not in {_GRID_MODES}.")
+
+        self._ladder = self._build_ladder(self._window_durations, self._grid_mode)
+        self._check_combo_cap(self._ladder, self._combo_cap, log_name=self.id)
 
         if configs.has_member("pde"):
             self._ode_config = PDEConfig(configs.get_member("pde"), model_configs=model_block)
@@ -474,6 +514,271 @@ class SoilPredictor(SoilBase):
             active = any(on_ts <= mid_ts < off_ts for on_ts, off_ts in on_intervals)
             segments.append((width, flow_m3s if active else 0.0))
         return segments
+
+    # Fill-order ladder (candidate set)
+
+    @staticmethod
+    def _build_ladder(
+        window_durations: list[list[pd.Timedelta]],
+        grid_mode: str,
+    ) -> list[tuple[pd.Timedelta, ...]]:
+        """Build the candidate set: the fill-order ladder (default) or the full grid.
+
+        ``window_durations`` is one ascending, zero-inclusive duration list per window,
+        windows already ordered by ``start``. Each candidate is a tuple of one duration
+        per window.
+
+        ``fill_order`` (front-load dominance; see the PRD): window 0 contributes ALL of
+        its durations (``(d0, 0, ..., 0)``, including the all-zero candidate); each later
+        window i contributes only its NON-ZERO durations, meshed onto the max of every
+        earlier window (``(max0, ..., max_{i-1}, d_i, 0, ..., 0)``). This excludes the
+        duplicate ``(..., max_{i-1}, 0, ...)`` candidate that window i-1 already
+        contributed and drops every back-loaded candidate. Count =
+        ``|D0| + sum_{i>=1}(|D_i| - 1)``; total-water is strictly increasing.
+
+        ``full``: the Cartesian product of every window's duration list.
+        """
+        if not window_durations:
+            return [()]
+
+        if grid_mode == "full":
+            return list(itertools.product(*window_durations))
+
+        if grid_mode != "fill_order":
+            raise ValueError(f"Unknown grid_mode {grid_mode!r}; expected 'fill_order' or 'full'.")
+
+        n = len(window_durations)
+        maxima = [max(durations) for durations in window_durations]
+        ladder: list[tuple[pd.Timedelta, ...]] = []
+
+        for d0 in window_durations[0]:
+            ladder.append((d0,) + (pd.Timedelta(0),) * (n - 1))
+
+        for i in range(1, n):
+            for d_i in window_durations[i]:
+                if d_i <= pd.Timedelta(0):
+                    continue
+                candidate = tuple(maxima[:i]) + (d_i,) + (pd.Timedelta(0),) * (n - i - 1)
+                ladder.append(candidate)
+
+        return ladder
+
+    @staticmethod
+    def _check_combo_cap(
+        ladder: list[tuple[pd.Timedelta, ...]],
+        combo_cap: int,
+        log_name: str = "",
+    ) -> None:
+        """Fail fast at ``configure()`` if the (static) ladder length exceeds ``combo_cap``,
+        instead of silently skipping candidates at runtime.
+        """
+        if len(ladder) > combo_cap:
+            raise ValueError(
+                f"{log_name}: ladder has {len(ladder)} candidates, exceeding "
+                f"combo_cap={combo_cap}; reduce the per-window durations lists, "
+                "raise combo_cap, or drop windows."
+            )
+
+    # Prefix-shared roll-out (the caterpillar)
+
+    def _roll_segment(
+        self,
+        idx: pd.DatetimeIndex,
+        et_data: pd.DataFrame,
+        seg_et: dict[str, pd.DataFrame],
+        on_intervals: list[tuple[pd.Timestamp, pd.Timestamp]],
+    ) -> tuple[list[pd.Timestamp], dict[str, list[float]]]:
+        """Walk the PDE across ``idx`` (>=1 forecast timestamps; the live PDE state is
+        already the state at ``idx[0]``), applying ``on_intervals`` inside each
+        ``(t, t+dt)`` sub-interval via ``_split_interval``. Returns per-forecast-
+        timestamp Se at every probe, including ``idx[0]`` (sampled as-is, no walk).
+
+        Shared by the prefix roll and every per-window sweep in ``_rollout_ladder``,
+        and by ``_rollout_independent``'s single full-horizon roll.
+        """
+        timestamps: list[pd.Timestamp] = [idx[0]]
+        trajectories: dict[str, list[float]] = {p.channel_id: [self._pde.sample(p)] for p in self._probes}
+
+        for ts_prev, ts_next in zip(idx[:-1], idx[1:]):
+            elapsed_s = (ts_next - ts_prev).total_seconds()
+            if elapsed_s <= 0:
+                timestamps.append(ts_next)
+                for p in self._probes:
+                    trajectories[p.channel_id].append(self._pde.sample(p))
+                continue
+
+            seg_evap, seg_transp = self._segment_flux_dicts(seg_et, ts_next)
+            rain_flux = self._rain_flux(et_data, ts_next, elapsed_s)
+            sub_segments = self._split_interval(on_intervals, ts_prev, ts_next, self._flow_m3s)
+            for sub_window_s, sub_flow_m3s in sub_segments:
+                if sub_window_s <= 0.0:
+                    continue
+                sub_rates = FluxRates(
+                    seg_evap=seg_evap,
+                    seg_transp=seg_transp,
+                    flow_m3s=sub_flow_m3s,
+                    rain_flux=rain_flux,
+                )
+                self._pde.walk_window(
+                    rates=sub_rates,
+                    window_s=sub_window_s,
+                    accept_at_dt_min=True,
+                    log_name=self.name,
+                )
+
+            timestamps.append(ts_next)
+            for p in self._probes:
+                trajectories[p.channel_id].append(self._pde.sample(p))
+
+        return timestamps, trajectories
+
+    @staticmethod
+    def _extend_trajectory(
+        base_timestamps: list[pd.Timestamp],
+        base_trajectories: dict[str, list[float]],
+        tail_timestamps: list[pd.Timestamp],
+        tail_trajectories: dict[str, list[float]],
+    ) -> tuple[list[pd.Timestamp], dict[str, list[float]]]:
+        """Concatenate ``base`` (up to and including a window start) with ``tail``
+        (from that same window start to its segment end), dropping the tail's
+        duplicated leading timestamp.
+        """
+        timestamps = list(base_timestamps) + list(tail_timestamps[1:])
+        trajectories = {
+            channel_id: list(base_trajectories[channel_id]) + list(tail_trajectories[channel_id][1:])
+            for channel_id in base_trajectories
+        }
+        return timestamps, trajectories
+
+    def _rollout_ladder(
+        self,
+        ic_rel_sat: np.ndarray,
+        ladder: list[tuple[pd.Timedelta, ...]],
+        et_data: pd.DataFrame,
+        seg_et: dict[str, pd.DataFrame],
+        flow_m3s: float,
+        horizon_start: pd.Timestamp,
+        horizon_end: pd.Timestamp,
+    ) -> dict[tuple[pd.Timedelta, ...], tuple[list[pd.Timestamp], dict[str, list[float]]]]:
+        """Caterpillar roll-out (``self._grid_mode == "fill_order"``): integrate the
+        shared prefix once, then sweep each window's ladder-contributed durations
+        from a save of the max-prefix branch, saving/restoring branch state with
+        ``save_state_blob``/``load_state_blob`` (never ``snapshot``/``set_state`` --
+        the latter drop the ``surface_h`` ponds that watering fills; see the module
+        docstring / PRD).
+
+        The fill-order chain's prefix-sharing only applies to the ``fill_order``
+        candidate set: for ``self._grid_mode == "full"`` (the full Cartesian
+        product, not a single chain) every candidate is rolled independently via
+        ``_rollout_independent`` instead, with no prefix sharing.
+
+        ``ladder`` is ``_build_ladder``'s output; ``self._windows`` (ordered by
+        ``start``) supplies the window clock times. Window starts are assumed to fall
+        exactly on a forecast timestamp in ``et_data.index`` (the common on-the-hour
+        case); if a window start does not land on a forecast timestamp, the nearest
+        forecast timestamp at or before it is used as the segment boundary instead.
+
+        Returns ``{candidate: (timestamps, {probe_id: [Se, ...]})}`` for every rung.
+        """
+        windows = self._windows
+        idx = et_data.index
+        results: dict[tuple[pd.Timedelta, ...], tuple[list[pd.Timestamp], dict[str, list[float]]]] = {}
+
+        if self._grid_mode == "full" or not windows:
+            # No caterpillar prefix-sharing for the full Cartesian product (or the
+            # no-windows degenerate case): roll every candidate independently.
+            for candidate in ladder:
+                results[candidate] = self._rollout_independent(
+                    ic_rel_sat, candidate, et_data, seg_et, flow_m3s, horizon_start, horizon_end
+                )
+            return results
+
+        self._pde.set_state(ic_rel_sat)
+
+        maxima = [max(durations) for durations in self._window_durations]
+        window_starts = [self._resolve_window_start(w.start, horizon_start) for w in windows]
+
+        def _floor_idx(ts: pd.Timestamp) -> pd.Timestamp:
+            eligible = idx[idx <= ts]
+            return eligible[-1] if len(eligible) > 0 else idx[0]
+
+        segment_bounds = [_floor_idx(ts) for ts in window_starts] + [horizon_end if horizon_end in idx else idx[-1]]
+
+        prefix_idx = idx[idx <= segment_bounds[0]]
+        prefix_timestamps, prefix_trajectories = self._roll_segment(prefix_idx, et_data, seg_et, [])
+        prev_blob = self._pde.save_state_blob()
+
+        for i, window in enumerate(windows):
+            seg_start = segment_bounds[i]
+            seg_end = segment_bounds[i + 1]
+            seg_idx = idx[(idx >= seg_start) & (idx <= seg_end)]
+
+            durations = self._window_durations[i]
+            sweep = durations if i == 0 else [d for d in durations if d > pd.Timedelta(0)]
+            max_duration = maxima[i]
+
+            for d_i in sweep:
+                self._pde.load_state_blob(prev_blob)
+                on_intervals = self._build_flow_schedule([window], [d_i], flow_m3s, seg_start, horizon_end)
+                tail_timestamps, tail_trajectories = self._roll_segment(
+                    idx[idx >= seg_start], et_data, seg_et, on_intervals
+                )
+                full_timestamps, full_trajectories = self._extend_trajectory(
+                    prefix_timestamps, prefix_trajectories, tail_timestamps, tail_trajectories
+                )
+                # Positions before i carry EACH earlier window's OWN max (maxima[j]),
+                # not window i's max -- the state already reflects every earlier
+                # window at its own max (via the max-branch save below), so the key
+                # must label that accurately to match _build_ladder's candidates.
+                candidate = tuple(
+                    maxima[j] if j < i else (d_i if j == i else pd.Timedelta(0)) for j in range(len(windows))
+                )
+                results[candidate] = (full_timestamps, full_trajectories)
+
+                if d_i == max_duration and i + 1 < len(windows):
+                    self._pde.load_state_blob(prev_blob)
+                    on_intervals_seg = self._build_flow_schedule([window], [d_i], flow_m3s, seg_start, seg_end)
+                    seg_timestamps, seg_trajectories = self._roll_segment(seg_idx, et_data, seg_et, on_intervals_seg)
+                    prefix_timestamps, prefix_trajectories = self._extend_trajectory(
+                        prefix_timestamps, prefix_trajectories, seg_timestamps, seg_trajectories
+                    )
+                    prev_blob = self._pde.save_state_blob()
+
+        return results
+
+    def _rollout_independent(
+        self,
+        ic_rel_sat: np.ndarray,
+        candidate: tuple[pd.Timedelta, ...],
+        et_data: pd.DataFrame,
+        seg_et: dict[str, pd.DataFrame],
+        flow_m3s: float,
+        horizon_start: pd.Timestamp,
+        horizon_end: pd.Timestamp,
+    ) -> tuple[list[pd.Timestamp], dict[str, list[float]]]:
+        """Reference roll-out for one candidate: reset to the IC and integrate the
+        whole horizon in a single pass with no prefix sharing. Ground truth that
+        ``_rollout_ladder``'s per-candidate trajectory must match.
+        """
+        self._pde.set_state(ic_rel_sat)
+        on_intervals = self._build_flow_schedule(self._windows, list(candidate), flow_m3s, horizon_start, horizon_end)
+        idx = et_data.index
+        return self._roll_segment(idx, et_data, seg_et, on_intervals)
+
+    @staticmethod
+    def _resolve_window_start(start: datetime.time, horizon_start: pd.Timestamp) -> pd.Timestamp:
+        """Resolve a window's clock time onto ``horizon_start``'s date, rolling
+        forward a day if that time already elapsed before ``horizon_start``
+        (mirrors ``_build_flow_schedule``'s on-edge resolution)."""
+        on_ts = horizon_start.replace(
+            hour=start.hour,
+            minute=start.minute,
+            second=start.second,
+            microsecond=start.microsecond,
+        )
+        if on_ts < horizon_start:
+            on_ts += pd.Timedelta(days=1)
+        return on_ts
 
     # Forecast retrieval
 
