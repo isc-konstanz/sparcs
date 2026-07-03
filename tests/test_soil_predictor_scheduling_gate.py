@@ -108,15 +108,27 @@ class _FakeLocation:
         self.timezone = timezone
 
 
+class _FakeSoil:
+    # Non-None so predict() passes the soil + cold-start guards, which both precede
+    # the boundary claim.
+    _last_simulated_at = pd.Timestamp("2000-01-01 00:00", tz="UTC")
+
+
 class _FakeContext:
     def __init__(self, timezone):
         self.location = _FakeLocation(timezone)
+        self.soil_simulation = _FakeSoil()
+
+    def _run_chain(self, forecast, publish=False):
+        # A single-row chain -> predict() returns at the "< 2 rows" short-forecast
+        # guard, which sits just AFTER the boundary claim, so the claim is exercised
+        # without needing a real PDE roll.
+        return pd.DataFrame({"_": [0.0]}, index=pd.DatetimeIndex([forecast.index[0]])), {}
 
 
 def _make_gate_only_predictor(tz: str, interval_min: int, offset_min: int):
     """Build a bare ``SoilPredictor`` instance with only the attributes the
-    scheduling-gate seam of ``predict()`` touches before the heavy roll-out
-    (the forecast fetch), so this stays PDE-free.
+    scheduling-gate seam of ``predict()`` touches before the heavy roll-out.
 
     ``name`` and ``context`` are read-only properties (backed by ``_name`` and
     the name-mangled ``_Registrator__context``), so those backing attributes
@@ -130,13 +142,12 @@ def _make_gate_only_predictor(tz: str, interval_min: int, offset_min: int):
     predictor._offset_min = offset_min
     predictor._last_boundary_run = None
     predictor._last_predicted_key = None
-    # Referenced by predict()'s no-forecast log message when a test returns None.
     predictor._horizon = pd.Timedelta("24h")
 
-    # A present (non-empty) forecast lets predict() reach the boundary claim (which
-    # sits just after the forecast guard); the fake context has no ``soil_simulation``,
-    # so predict() then returns at the soil guard -- after the mark, before any PDE.
-    # Tests exercising the missing-forecast path override this to return None.
+    # A present (non-empty) forecast lets predict() pass the forecast, soil, and
+    # cold-start guards and reach the boundary claim; the fake _run_chain then
+    # returns a single row, so predict() stops at the short-forecast guard before any
+    # PDE. Tests exercising the missing-forecast path override this to return None.
     predictor._fetch_forecast = lambda now: pd.DataFrame({"_": [0.0]}, index=pd.DatetimeIndex([now]))
     return predictor
 

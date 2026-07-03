@@ -361,3 +361,69 @@ def test_full_grid_mode_rolls_every_candidate_independently(tmp_path):
         err_msg="grid_mode='full' must roll each candidate independently, "
         "matching _rollout_independent for the same candidate",
     )
+
+
+def test_collapsed_segment_bounds_fall_back_to_independent_rolls(tmp_path):
+    """When two window starts floor to the SAME forecast timestamp (a window pair
+    inside one forecast interval), the caterpillar's segment save/restore would
+    silently drop the earlier window's water. The strictly-increasing-bounds guard
+    must instead fall back to independent per-candidate rolls, so a two-window
+    watering candidate still matches its independent roll (and actually ponds)."""
+    horizon_start = pd.Timestamp("2026-07-03 08:00", tz="Europe/Berlin")
+    # Grid points at 0/10/20/25 min. Windows at 8:12 and 8:18 BOTH floor to 8:10 ->
+    # collapsed segment bounds -> fallback. Non-overlapping pulses (8:12-8:17, 8:18-8:23).
+    idx = pd.DatetimeIndex(
+        [horizon_start + pd.Timedelta(minutes=m) for m in (0, 10, 20, 25)],
+        name="timestamp",
+    )
+    horizon_end = idx[-1]
+    et_data = pd.DataFrame(index=idx)
+    seg_et: dict[str, pd.DataFrame] = {}
+
+    windows = [
+        WateringWindow(start=datetime.time(8, 12)),
+        WateringWindow(start=datetime.time(8, 18)),
+    ]
+    window_durations = [
+        [pd.Timedelta(0), pd.Timedelta(minutes=5)],
+        [pd.Timedelta(0), pd.Timedelta(minutes=5)],
+    ]
+    ladder = SoilPredictor._build_ladder(window_durations, grid_mode="fill_order")
+    candidate = (pd.Timedelta(minutes=5), pd.Timedelta(minutes=5))  # both windows active
+    assert candidate in ladder
+
+    ladder_dir = tmp_path / "ladder"
+    ladder_dir.mkdir()
+    independent_dir = tmp_path / "independent"
+    independent_dir.mkdir()
+
+    core_ladder = _build_core(ladder_dir)
+    ic_rel_sat = core_ladder.snapshot()
+    predictor_ladder = _make_predictor(core_ladder, [_watering_strip_probe(core_ladder)], _EXTREME_FLOW)
+    predictor_ladder._windows = windows
+    predictor_ladder._window_durations = window_durations
+
+    ladder_results = predictor_ladder._rollout_ladder(
+        ic_rel_sat, ladder, et_data, seg_et, _EXTREME_FLOW, horizon_start, horizon_end
+    )
+    assert set(ladder_results.keys()) == set(ladder)
+    ladder_timestamps, ladder_traj = ladder_results[candidate]
+
+    core_independent = _build_core(independent_dir)
+    predictor_independent = _make_predictor(core_independent, [_watering_strip_probe(core_independent)], _EXTREME_FLOW)
+    predictor_independent._windows = windows
+    predictor_independent._window_durations = window_durations
+
+    independent_timestamps, independent_traj = predictor_independent._rollout_independent(
+        ic_rel_sat, candidate, et_data, seg_et, _EXTREME_FLOW, horizon_start, horizon_end
+    )
+
+    assert core_independent.surface_h[WATERING] > 0.0, "scenario must pond to exercise the dropped-water bug"
+    assert ladder_timestamps == independent_timestamps
+    np.testing.assert_allclose(
+        ladder_traj["strip"],
+        independent_traj["strip"],
+        atol=1e-6,
+        err_msg="collapsed segment bounds must fall back to an independent roll that "
+        "still applies BOTH windows' water (pre-fix the caterpillar dropped the earlier window)",
+    )

@@ -113,9 +113,10 @@ def _make_predictor(windows, calls, last_simulated_at=pd.Timestamp("2026-07-03 0
 def test_predict_grid_block_invokes_all_collaborators(caplog):
     """The happy path: the legacy roll runs, then the grid block invokes the
     ladder roll-out, selector, recommendation publish, frame build, and direct
-    write -- and its try/except swallows nothing. This fails if predict()
-    references a non-existent attribute (e.g. an accidental self._soil_model
-    instead of self._pde.soil_model)."""
+    write -- and its try/except swallows nothing. This fails if predict() calls a
+    grid collaborator with a non-existent attribute or a wrong argument: the
+    resulting exception is caught by the grid try/except, so the collaborator spies
+    never fire and the 'watering-grid' error is logged -- both asserted below."""
     calls = []
     predictor = _make_predictor([object()], calls)
     now = pd.Timestamp("2026-07-03 01:30", tz=_TZ)
@@ -150,9 +151,10 @@ def test_predict_grid_block_skipped_without_windows():
         assert grid_step not in calls
 
 
-def test_predict_skips_on_cold_start():
+def test_predict_skips_on_cold_start_without_claiming_the_boundary():
     """No live soil state yet -> predict() returns at the cold-start guard before
-    any roll (neither the legacy roll nor the grid runs)."""
+    any roll, and (like the missing-forecast guard) does NOT claim the boundary, so
+    the next tick retries once the live solver has state."""
     calls = []
     predictor = _make_predictor([object()], calls, last_simulated_at=None)
     now = pd.Timestamp("2026-07-03 01:30", tz=_TZ)
@@ -160,6 +162,7 @@ def test_predict_skips_on_cold_start():
     predictor.predict(now, forecast_creation=now)
 
     assert calls == []
+    assert predictor._last_boundary_run is None
 
 
 def test_predict_missing_forecast_does_not_roll_or_claim_boundary():

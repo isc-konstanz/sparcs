@@ -286,7 +286,18 @@ class SoilPredictor(SoilBase):
             )
         else:
             decision_probes = [str(p) for p in decision_probes_cfg]
+            known = [p for p in decision_probes if p in all_probe_ids]
             unknown = [p for p in decision_probes if p not in all_probe_ids]
+            if not known:
+                # An all-unknown decision set can never yield a tension sample, so the
+                # feasibility test would be vacuous (every rung "feasible" -> a silent
+                # none_needed). Fail fast at configure() instead of shipping a
+                # miscalibrated recommender.
+                raise ValueError(
+                    f"{self.id}: decision_probes {decision_probes} match none of the "
+                    f"resolved probe channel-ids {all_probe_ids}; the tension decision "
+                    "would have no probe to evaluate. Fix the decision_probes ids."
+                )
             if unknown:
                 logging.warning(
                     "%s: decision_probes %s not found among resolved probe channel-ids "
@@ -527,12 +538,6 @@ class SoilPredictor(SoilBase):
             )
             return
 
-        # Claim the boundary only once we have a forecast to roll: a transiently
-        # missing forecast at the boundary tick then retries on the next tick instead
-        # of silently skipping the whole day, while a present forecast bounds the heavy
-        # roll-out (and any chain/roll-out failure below) to one attempt per boundary.
-        self._last_boundary_run = boundary
-
         field = self.context
         soil = getattr(field, "soil_simulation", None)
         if soil is None:
@@ -546,6 +551,13 @@ class SoilPredictor(SoilBase):
                 now,
             )
             return
+
+        # Claim the boundary only once every transient precondition has passed (a
+        # present forecast AND live soil state), so a missing-forecast or cold-start
+        # tick retries on the next tick instead of silently burning the whole day,
+        # while a ready tick bounds the heavy chain replay + roll-out to one attempt
+        # per boundary.
+        self._last_boundary_run = boundary
 
         try:
             et_data, seg_et = field._run_chain(forecast, publish=False)
@@ -695,14 +707,7 @@ class SoilPredictor(SoilBase):
         for window, duration in zip(windows, durations):
             if duration <= pd.Timedelta(0):
                 continue
-            on_ts = horizon_start.replace(
-                hour=window.start.hour,
-                minute=window.start.minute,
-                second=window.start.second,
-                microsecond=window.start.microsecond,
-            )
-            if on_ts < horizon_start:
-                on_ts += pd.Timedelta(days=1)
+            on_ts = SoilPredictor._resolve_window_start(window.start, horizon_start)
             off_ts = min(on_ts + duration, horizon_end)
             intervals.append((on_ts, off_ts))
         return intervals
@@ -937,6 +942,28 @@ class SoilPredictor(SoilBase):
 
         segment_bounds = [_floor_idx(ts) for ts in window_starts] + [horizon_end if horizon_end in idx else idx[-1]]
 
+        # The caterpillar's prefix-sharing is only valid when the floored segment
+        # bounds are STRICTLY increasing: each window's floored start must fall
+        # strictly after the previous one, and the horizon end strictly after the
+        # last window. That can fail two ways -- two window starts flooring to the
+        # same forecast timestamp (a window pair inside one forecast interval), or a
+        # window resolving out of temporal order (e.g. a near-midnight window rolled
+        # to the next day landing after a later-clock-time window). In either case
+        # the segment-based save/restore would silently drop or misattribute a
+        # window's water, so fall back to correct (unshared) independent rolls.
+        if not all(segment_bounds[k] < segment_bounds[k + 1] for k in range(len(segment_bounds) - 1)):
+            logging.debug(
+                "%s: caterpillar segment bounds not strictly increasing (%s); "
+                "falling back to independent per-candidate rolls.",
+                self.name,
+                segment_bounds,
+            )
+            for candidate in ladder:
+                results[candidate] = self._rollout_independent(
+                    ic_rel_sat, candidate, et_data, seg_et, flow_m3s, horizon_start, horizon_end
+                )
+            return results
+
         prefix_idx = idx[idx <= segment_bounds[0]]
         prefix_timestamps, prefix_trajectories = self._roll_segment(prefix_idx, et_data, seg_et, [])
         prev_blob = self._pde.save_state_blob()
@@ -1001,8 +1028,13 @@ class SoilPredictor(SoilBase):
     @staticmethod
     def _resolve_window_start(start: datetime.time, horizon_start: pd.Timestamp) -> pd.Timestamp:
         """Resolve a window's clock time onto ``horizon_start``'s date, rolling
-        forward a day if that time already elapsed before ``horizon_start``
-        (mirrors ``_build_flow_schedule``'s on-edge resolution)."""
+        forward a **calendar** day if that time already elapsed before
+        ``horizon_start``. The roll-forward re-resolves the wall-clock fields on the
+        next calendar day rather than adding a fixed ``Timedelta(days=1)``, so the
+        result stays at the intended local clock time across a DST transition (a
+        fixed 24h add would land an hour off on the spring-forward / fall-back night).
+        The single canonical resolver; ``_build_flow_schedule`` calls it too.
+        """
         on_ts = horizon_start.replace(
             hour=start.hour,
             minute=start.minute,
@@ -1010,7 +1042,12 @@ class SoilPredictor(SoilBase):
             microsecond=start.microsecond,
         )
         if on_ts < horizon_start:
-            on_ts += pd.Timedelta(days=1)
+            on_ts = (horizon_start + pd.Timedelta(days=1)).replace(
+                hour=start.hour,
+                minute=start.minute,
+                second=start.second,
+                microsecond=start.microsecond,
+            )
         return on_ts
 
     # Tension conversion, feasibility, and ladder selection (pure)
@@ -1029,9 +1066,12 @@ class SoilPredictor(SoilBase):
         the Genuchten implementation at line 270). There is no sign flip here or in
         ``_feasible`` -- the comparison against ``threshold_hpa`` is direct.
 
-        Probes not present in ``decision_probes`` are ignored. Returns ``-inf`` if
-        ``decision_probes`` selects no probe present in the trajectory (vacuously
-        feasible against any finite threshold).
+        Probes not present in ``decision_probes`` are ignored. Returns ``+inf`` if
+        ``decision_probes`` selects no probe present in the trajectory, so a
+        misconfigured probe subset reads as INFEASIBLE (fail safe) rather than
+        vacuously feasible -- a wrongly-empty decision set must never silently
+        recommend ``none_needed``. ``configure()`` additionally hard-fails when the
+        configured ``decision_probes`` resolve to zero known ids.
         """
         _timestamps, probe_series = trajectory
         peak = float("-inf")
@@ -1043,7 +1083,7 @@ class SoilPredictor(SoilBase):
             candidate_peak = float(np.max(tensions))
             if candidate_peak > peak:
                 peak = candidate_peak
-        return peak
+        return peak if peak != float("-inf") else float("inf")
 
     @staticmethod
     def _feasible(peak_tension: float, threshold_hpa: float) -> bool:
