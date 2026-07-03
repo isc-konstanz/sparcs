@@ -189,8 +189,14 @@ runoff (see §5.5), rather than diverging the Picard loop.
 record:
 
 - **Rain**, on open-sky top segments only (the plant zone is shaded by
-  the PV roof). Optionally routed through a per-segment surface
-  ponding bucket (§5.5).
+  the PV roof). The shaded width is `[pde] rain_shadow_width` [m],
+  centered; segments inside it are blocked. `[pde]
+  rain_shadow_passthrough` (0 = fully blocked, the default; 1 = fully
+  open) admits that fraction of the rain onto the shaded soil, modelling
+  an imperfectly sealing roof / edge drip reaching the bay-center probe
+  column — so a physical `k_s` can respond to rain there without the
+  unphysical value the fully-blocked shadow would otherwise force.
+  Optionally routed through a per-segment surface ponding bucket (§5.5).
 - **Evaporation**, per top segment, using the per-segment shading
   factor that `Evapotranspiration` already computed upstream.
 - **Drip irrigation**, distributed volumetrically over the cells

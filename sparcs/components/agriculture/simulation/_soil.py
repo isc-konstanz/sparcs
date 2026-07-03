@@ -410,6 +410,15 @@ class PDEConfig:
         # Fraction of intercepted rain that runs off onto the open soil (1.0 = all).
         self.rain_runoff_fraction: float = float(configs.get("rain_runoff_fraction", default=1.0))
 
+        # Fraction of rain that passes THROUGH the PV shadow onto the shaded soil
+        # (0 = fully blocked, the default; 1 = the shadow admits all rain). Models
+        # an imperfectly sealing PV roof / edge drip reaching the bay-center column,
+        # so a physical k_s can respond to rain there without over-draining. Clamped
+        # to [0, 1].
+        self.rain_shadow_passthrough: float = min(
+            1.0, max(0.0, float(configs.get("rain_shadow_passthrough", default=0.0)))
+        )
+
         # Initial condition: uniform Se (ic_se) or hydrostatic equilibrium
         # (ic_water_table_depth metres below surface).
         self.ic_se: float = float(configs.get("ic_se", default=0.35))
@@ -636,9 +645,12 @@ class SoilPDECore:
         self.rain_face_len = open_face_len * self.rain_runoff_amplification
 
     def _compute_rain_open_fractions(self, names: list) -> dict:
-        """Fraction of each top segment outside the PV shadow (rain_shadow_width [m], centered)."""
+        """Fraction of each top segment reached by rain: fully open outside the PV
+        shadow (rain_shadow_width [m], centered), and ``rain_shadow_passthrough``
+        of the rain inside it (0 = fully blocked, the default)."""
         mc = self.mesh_config
         shadow = max(0.0, float(getattr(self.ode_config, "rain_shadow_width", 0.0)))
+        passthrough = min(1.0, max(0.0, float(getattr(self.ode_config, "rain_shadow_passthrough", 0.0))))
         center = mc.width / 2.0
         lo, hi = center - shadow / 2.0, center + shadow / 2.0
 
@@ -665,7 +677,9 @@ class SoilPDECore:
                 fractions[name] = 1.0
                 continue
             covered = max(0.0, min(b, hi) - max(a, lo))
-            fractions[name] = max(0.0, 1.0 - covered / seg_len)
+            shadow_frac = covered / seg_len
+            # the shaded portion still admits `passthrough` of the rain
+            fractions[name] = max(0.0, 1.0 - shadow_frac * (1.0 - passthrough))
         return fractions
 
     def _build_feddes_thresholds(self) -> None:
