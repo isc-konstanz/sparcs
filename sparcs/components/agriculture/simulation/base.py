@@ -240,6 +240,15 @@ class FieldSimulation(Component):
                 unique=True,
             )
 
+        if self.soil_predictor is not None:
+            self.data.register(
+                self._predict_callback,
+                Channels([soil_data.simulation_state]),
+                how="any",
+                unique=True,
+                interval=self.soil_predictor.cooldown,
+            )
+
         if self.irrigation is not None:
             try:
                 flow_channel = self.irrigation.data[Irrigation.FLOW]
@@ -276,11 +285,21 @@ class FieldSimulation(Component):
         now = et_data.index[-1]
         self.soil_simulation.advance(et_data, now, seg_et)
 
-        if self.soil_predictor is not None:
-            self.soil_predictor.predict(
-                now,
-                forecast_creation=self._read_forecast_epoch(),
-            )
+    def _predict_callback(self, data: pd.DataFrame) -> None:
+        """Timed predictor trigger, decoupled from the live-sim weather listener.
+
+        Registered on ``SoilSimulation``'s ``SIMULATION_STATE`` channel (published by
+        ``advance()`` after every tick) so the heavy roll-out never runs on the
+        weather-callback thread; the per-listener ``cooldown`` (``activate()``) plus
+        the predictor's own daily self-gate (``SoilPredictor.predict``) keep this cheap.
+        """
+        if self.soil_predictor is None or data.empty:
+            return
+        now = data.index[-1]
+        self.soil_predictor.predict(
+            now,
+            forecast_creation=self._read_forecast_epoch(),
+        )
 
     def _read_forecast_epoch(self) -> Optional[pd.Timestamp]:
         forecast_sub = getattr(self.weather, "forecast", None)

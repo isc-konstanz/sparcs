@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 from lories.components.weather import Weather
 from lories.typing import Configurations
-from lories.util import to_timedelta
+from lories.util import floor_date, to_timedelta
 from sparcs.components.agriculture.simulation.soil import (
     PDEConfig,
     ProbeSpec,
@@ -36,6 +36,16 @@ from ._soil import ClipDiagnostics, FluxRates, MeshConfig, SoilBase
 
 _DEFAULT_HORIZON: str = "24h"
 _DEFAULT_SAVE_FREQ: str = "1h"
+
+# Scheduling gate defaults -- the predictor's OWN cadence, distinct from
+# WeatherForecast's interval=60/offset=0 (do not inherit those). `interval`/
+# `offset` are the run-cadence config (daily at ~01:00 local); `cooldown` is
+# a separate notion, the lories listener-backpressure floor (base.py's
+# `data.register(..., interval=...)`), well below the run cadence so it never
+# gates the fixed daily boundary.
+_DEFAULT_INTERVAL_MIN: int = 1440
+_DEFAULT_OFFSET_MIN: int = 60
+_DEFAULT_COOLDOWN_MIN: int = 60
 
 # Drip-flow derivation defaults; mirrors the [soil_simulation] default of a
 # single already-per-metre line (see soil.py:186) when a field has no
@@ -82,6 +92,16 @@ class SoilPredictor(SoilBase):
     _save_state: bool
     _save_plot: bool
 
+    # Scheduling gate: run cadence, own defaults (not WeatherForecast's).
+    _interval_min: int
+    _offset_min: int
+    # Per-listener backpressure floor (base.py's `data.register(..., interval=...)`);
+    # distinct from `_interval_min`, the run-cadence config above.
+    _cooldown_min: int
+
+    # Last boundary `predict()` actually ran for; None before the first run.
+    _last_boundary_run: Optional[pd.Timestamp] = None
+
     _mesh_config: MeshConfig
     _ode_config: PDEConfig
     _pde: SoilPDECore
@@ -117,6 +137,10 @@ class SoilPredictor(SoilBase):
         self._save_freq = to_timedelta(configs.get("save_freq", default=_DEFAULT_SAVE_FREQ))
         self._save_state = configs.get_bool("save_state", default=False)
         self._save_plot = configs.get_bool("save_plot", default=False)
+
+        self._interval_min = configs.get_int("interval", default=_DEFAULT_INTERVAL_MIN)
+        self._offset_min = configs.get_int("offset", default=_DEFAULT_OFFSET_MIN)
+        self._cooldown_min = configs.get_int("cooldown", default=_DEFAULT_COOLDOWN_MIN)
 
         model_block = self.context.configs.get_member("model", defaults={}, ensure_exists=True)
         soil_block = self.context.configs.get_member(SoilSimulation.TYPE, defaults={}, ensure_exists=True)
@@ -201,6 +225,26 @@ class SoilPredictor(SoilBase):
                 self.name,
             )
 
+    @property
+    def cooldown(self) -> pd.Timedelta:
+        """Per-listener backpressure floor for the ``_predict_callback`` registration
+        (``base.py``'s ``data.register(..., interval=...)``). Distinct from the
+        ``interval``/``offset`` run-cadence config above: this is a low floor (default
+        60 min) well below the daily cadence, so it never gates the fixed boundary --
+        it only protects against the listener re-dispatching on every live-sim tick.
+        """
+        return pd.Timedelta(minutes=self._cooldown_min)
+
+    @staticmethod
+    def _current_boundary(now: pd.Timestamp, tz, interval_min: int, offset_min: int) -> pd.Timestamp:
+        """Most-recent run boundary at or before ``now``, site-local. Mirrors the
+        WeatherForecast pattern (lories ``forecast.py:98-101``).
+        """
+        boundary = floor_date(now, tz, freq=f"{interval_min}T") + pd.Timedelta(minutes=offset_min)
+        if boundary > now:
+            boundary -= pd.Timedelta(minutes=interval_min)
+        return boundary
+
     # Public driver
 
     def predict(self, now: pd.Timestamp, forecast_creation: Optional[pd.Timestamp]) -> None:
@@ -219,6 +263,17 @@ class SoilPredictor(SoilBase):
                 now,
             )
             forecast_creation = now
+
+        tz = self.context.location.timezone
+        boundary = self._current_boundary(now, tz, self._interval_min, self._offset_min)
+        if boundary == self._last_boundary_run:
+            logging.debug(
+                "%s: predict skipped (no new %d-min boundary since %s).",
+                self.name,
+                self._interval_min,
+                self._last_boundary_run,
+            )
+            return
 
         key = (now, forecast_creation)
         if self._last_predicted_key == key:
@@ -239,6 +294,12 @@ class SoilPredictor(SoilBase):
                 now + self._horizon,
             )
             return
+
+        # Claim the boundary only once we have a forecast to roll: a transiently
+        # missing forecast at the boundary tick then retries on the next tick instead
+        # of silently skipping the whole day, while a present forecast bounds the heavy
+        # roll-out (and any chain/roll-out failure below) to one attempt per boundary.
+        self._last_boundary_run = boundary
 
         field = self.context
         soil = getattr(field, "soil_simulation", None)
