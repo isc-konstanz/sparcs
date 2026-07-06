@@ -24,6 +24,7 @@ matching the other predictor test modules.
 
 import datetime
 import logging
+import pickle
 from concurrent.futures import Future
 
 import pytest
@@ -36,6 +37,7 @@ SoilPredictor = soil_predictor.SoilPredictor
 WateringWindow = soil_predictor.WateringWindow
 
 from lories import Configurations  # noqa: E402
+from lories.components.weather import Weather  # noqa: E402
 from sparcs.components.agriculture.simulation._soil import (  # noqa: E402
     MeshConfig,
     PDEConfig,
@@ -229,7 +231,7 @@ def test_rollout_parallel_fans_out_and_gathers_by_candidate(monkeypatch):
     )
     monkeypatch.setattr(soil_predictor, "ProcessPoolExecutor", _FakeExecutor)
 
-    out = p._rollout_parallel("ic", "et", {}, "hs", "he")
+    out = p._rollout_parallel("ic", pd.DataFrame(), {}, "hs", "he")
 
     # Every candidate present and mapped to ITS OWN result (ordering-independent:
     # the task returns its candidate, so the gather never depends on completion order).
@@ -256,7 +258,7 @@ def test_rollout_parallel_worker_count_capped_to_ladder(monkeypatch, max_workers
     monkeypatch.setattr(soil_predictor, "_worker_roll", lambda candidate: (candidate, (["ts"], {"probe": [0.0]})))
     monkeypatch.setattr(soil_predictor, "ProcessPoolExecutor", _FakeExecutor)
 
-    out = p._rollout_parallel("ic", "et", {}, "hs", "he")
+    out = p._rollout_parallel("ic", pd.DataFrame(), {}, "hs", "he")
 
     assert _FakeExecutor.last.max_workers == expected_workers
     assert len(out) == n_candidates
@@ -278,6 +280,37 @@ def test_config_parses_parallel_and_max_workers(tmp_path):
 
     empty = Configurations.load("t2.conf", conf_dir=str(tmp_path), require=False)
     assert empty.get_bool("parallel", default=soil_predictor._DEFAULT_PARALLEL) is False
+
+
+# ---------------------------------------------------------------------------
+# Constant-labeled frames survive the spawn worker boundary (regression)
+# ---------------------------------------------------------------------------
+
+
+def test_stringify_columns_makes_constant_labels_pickle_safe():
+    """Real chain-replay ``et_data`` carries lories ``Constant`` column labels
+    (e.g. ``Weather.PRECIPITATION``), which do NOT survive pickling to a spawn
+    worker -- ``Constant.__new__`` takes ``(type, key, ...)`` so pickle's
+    str-subclass reconstruction passes the value as ``type`` with ``key=None`` and
+    raises. ``_stringify_columns`` must make the frame pickle-safe while keeping
+    Constant-keyed access working (a Constant equals its key str). This is the
+    regression an empty ``et_data`` in the spike/slow test missed."""
+    idx = pd.DatetimeIndex([pd.Timestamp("2026-07-06 12:00", tz="Europe/Berlin")], name="timestamp")
+    frame = pd.DataFrame({Weather.PRECIPITATION: [0.5]}, index=idx)
+
+    raised = False
+    try:
+        pickle.loads(pickle.dumps(frame))
+    except Exception:  # noqa: BLE001 -- documenting that the raw frame is unpicklable
+        raised = True
+    assert raised, "a raw lories Constant column label should not round-trip through pickle"
+
+    safe = soil_predictor._stringify_columns(frame)
+    restored = pickle.loads(pickle.dumps(safe))  # must not raise
+    assert list(restored.columns) == ["precipitation"]
+    # Constant-keyed access still resolves (Constant equals its key str), so the
+    # worker's _rain_flux lookup is unaffected.
+    assert restored.loc[idx[0], Weather.PRECIPITATION] == 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -353,7 +386,11 @@ def test_parallel_equals_caterpillar_solver_backed(tmp_path):
         name="timestamp",
     )
     horizon_end = idx[-1]
-    et_data = pd.DataFrame(index=idx)
+    # Real chain-replay et_data carries lories Constant column labels (e.g.
+    # Weather.PRECIPITATION). Include one (zero rain, so physics is unchanged) so
+    # this exercises the spawn+pickle path a bare/empty frame would miss -- the
+    # copperhead worker-crash regression (Constant '...' is None).
+    et_data = pd.DataFrame({Weather.PRECIPITATION: [0.0, 0.0, 0.0, 0.0]}, index=idx)
     seg_et = {}
     windows = [
         WateringWindow(start=datetime.time(8, 10)),

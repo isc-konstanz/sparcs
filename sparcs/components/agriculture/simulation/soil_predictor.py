@@ -1095,6 +1095,16 @@ class SoilPredictor(SoilBase):
         # No point spawning more workers than candidates; always at least one.
         n_workers = max(1, min(self._max_workers, len(ladder)))
         ctx = multiprocessing.get_context("spawn")
+        # The chain-replay frames carry lories Constant column labels (e.g.
+        # Weather.PRECIPITATION). Constant is a str subclass whose __new__ takes
+        # (type, key, ...), which clashes with how pickle reconstructs a str
+        # subclass: unpickling in a spawned worker calls Constant(<value>) with
+        # key=None and raises "Constant '...' is None", killing the worker. Coerce
+        # every column label to a plain str for transport; a Constant equals its
+        # key str, so the worker's Constant-keyed lookups (_rain_flux etc.) still
+        # match. The caterpillar path keeps the original frames (no pickling).
+        et_data = _stringify_columns(et_data)
+        seg_et = {name: _stringify_columns(frame) for name, frame in seg_et.items()}
         initargs = (
             self._mesh_config,
             self._ode_config,
@@ -1705,6 +1715,19 @@ class SoilPredictor(SoilBase):
             sim_t,
             title="Predicted relative saturation",
         )
+
+
+def _stringify_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    """Copy ``frame`` with every column label coerced to a plain ``str``.
+
+    lories ``Constant`` column labels (str subclasses, e.g. ``Weather.PRECIPITATION``)
+    do not survive pickling across a spawn worker boundary: ``Constant.__new__``
+    takes ``(type, key, ...)``, so pickle's str-subclass reconstruction passes the
+    value as ``type`` with ``key=None`` and the constructor raises. A Constant
+    compares equal to its key str, so flattening the labels leaves Constant-keyed
+    access (``_rain_flux``, ``_segment_flux_dicts``) unchanged downstream.
+    """
+    return frame.rename(columns=str)
 
 
 # --- Parallel-executor worker (module-level, spawn-picklable) ----------------
