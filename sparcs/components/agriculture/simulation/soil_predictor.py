@@ -16,6 +16,9 @@ import datetime
 import io
 import itertools
 import logging
+import multiprocessing
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -33,7 +36,7 @@ from sparcs.components.agriculture.simulation.soil import (
 )
 
 from . import plot_render
-from ._soil import ClipDiagnostics, FluxRates, MeshConfig, SoilBase
+from ._soil import ClipDiagnostics, FluxRates, MeshConfig, SoilBase, ensure_mesh
 
 _DEFAULT_HORIZON: str = "24h"
 _DEFAULT_SAVE_FREQ: str = "1h"
@@ -59,6 +62,11 @@ _DEFAULT_DRIP_LINE_LENGTH_M: float = 1.0
 _DEFAULT_COMBO_CAP: int = 16
 _DEFAULT_GRID_MODE: str = "fill_order"
 _GRID_MODES = ("fill_order", "full")
+
+# Execution-strategy default: keep the proven sequential caterpillar unless an
+# operator opts into parallel independent rolls. Existing deployments are
+# unchanged until they set parallel=true (see docs/adr/0005-...).
+_DEFAULT_PARALLEL: bool = False
 
 # Tension-feasibility decision defaults. `threshold_hpa` is a positive hPa
 # magnitude dryness ceiling; an operator calibration input, not a physical
@@ -145,6 +153,14 @@ class SoilPredictor(SoilBase):
     _combo_cap: int
     _grid_mode: str
     _ladder: list[tuple[pd.Timedelta, ...]]
+
+    # Execution strategy for the ladder roll-out (orthogonal to _grid_mode, which
+    # picks the candidate SET). _parallel=True rolls every candidate independently
+    # across an in-component spawn ProcessPoolExecutor of _max_workers; False keeps
+    # the sequential prefix-shared caterpillar (_rollout_ladder) as the efficient
+    # path and correctness oracle. See docs/adr/0005-...
+    _parallel: bool
+    _max_workers: int
 
     # Tension-feasibility decision: dryness ceiling and the probe subset it is
     # evaluated over; see _peak_tension / _feasible / _select.
@@ -236,6 +252,15 @@ class SoilPredictor(SoilBase):
 
         self._ladder = self._build_ladder(self._window_durations, self._grid_mode)
         self._check_combo_cap(self._ladder, self._combo_cap, log_name=self.id)
+
+        # Execution strategy: parallel independent rolls vs the sequential
+        # caterpillar. max_workers defaults to one below the core count (leaving a
+        # core for the parent/OS); only used when parallel=true.
+        self._parallel = configs.get_bool("parallel", default=_DEFAULT_PARALLEL)
+        default_workers = max(1, (os.cpu_count() or 2) - 1)
+        self._max_workers = configs.get_int("max_workers", default=default_workers)
+        if self._max_workers < 1:
+            raise ValueError(f"{self.id}: max_workers={self._max_workers} must be >= 1.")
 
         self._max_windows = configs.get_int("max_windows", default=_DEFAULT_MAX_WINDOWS)
         if len(self._windows) > self._max_windows:
@@ -617,15 +642,7 @@ class SoilPredictor(SoilBase):
             try:
                 horizon_start = et_data.index[0]
                 horizon_end = et_data.index[-1]
-                ladder_traj = self._rollout_ladder(
-                    ic_rel_sat,
-                    self._ladder,
-                    et_data,
-                    seg_et,
-                    self._flow_m3s,
-                    horizon_start,
-                    horizon_end,
-                )
+                ladder_traj = self._rollout_dispatch(ic_rel_sat, et_data, seg_et, horizon_start, horizon_end)
                 chosen, status = self._select(
                     self._ladder,
                     ladder_traj,
@@ -1024,6 +1041,93 @@ class SoilPredictor(SoilBase):
         on_intervals = self._build_flow_schedule(self._windows, list(candidate), flow_m3s, horizon_start, horizon_end)
         idx = et_data.index
         return self._roll_segment(idx, et_data, seg_et, on_intervals)
+
+    def _rollout_dispatch(
+        self,
+        ic_rel_sat: np.ndarray,
+        et_data: pd.DataFrame,
+        seg_et: dict[str, pd.DataFrame],
+        horizon_start: pd.Timestamp,
+        horizon_end: pd.Timestamp,
+    ) -> dict[tuple[pd.Timedelta, ...], tuple[list[pd.Timestamp], dict[str, list[float]]]]:
+        """Roll every ladder candidate; return ``{candidate: (timestamps, trajectories)}``.
+
+        Dispatches on ``self._parallel``: independent parallel rolls
+        (``_rollout_parallel``) vs the sequential prefix-shared caterpillar
+        (``_rollout_ladder``). The two are equal within solver tolerance -- parallel
+        is a pure wall-time win, not a change to what is stored (``docs/adr/0005-...``).
+        On any parallel-execution failure the run degrades to the caterpillar and
+        logs it; a parallelism failure must never abort the daily forecast.
+        """
+        if self._parallel:
+            try:
+                return self._rollout_parallel(ic_rel_sat, et_data, seg_et, horizon_start, horizon_end)
+            except Exception:  # noqa: BLE001
+                logging.exception(
+                    "%s: parallel roll-out failed; falling back to the sequential caterpillar for this run.",
+                    self.name,
+                )
+        return self._rollout_ladder(
+            ic_rel_sat, self._ladder, et_data, seg_et, self._flow_m3s, horizon_start, horizon_end
+        )
+
+    def _rollout_parallel(
+        self,
+        ic_rel_sat: np.ndarray,
+        et_data: pd.DataFrame,
+        seg_et: dict[str, pd.DataFrame],
+        horizon_start: pd.Timestamp,
+        horizon_end: pd.Timestamp,
+    ) -> dict[tuple[pd.Timedelta, ...], tuple[list[pd.Timestamp], dict[str, list[float]]]]:
+        """Roll every ladder candidate as an independent parallel roll across an
+        in-component spawn ``ProcessPoolExecutor``. Each worker rebuilds the PDE once
+        from the pickled ``MeshConfig`` + ``PDEConfig`` (spawn-safe) and rolls its
+        assigned candidates via ``_rollout_independent``; the parent gathers the
+        ``{candidate: (timestamps, trajectories)}`` map and does every downstream
+        step (select, frame, write) serially. Same candidate set and same stored
+        trajectories as the caterpillar within solver tolerance (``docs/adr/0005-...``).
+
+        The pool is created and torn down per call -- daily cadence makes the setup
+        cost negligible. Raises on pool/worker failure so ``_rollout_dispatch`` can
+        degrade to the caterpillar.
+        """
+        ladder = self._ladder
+        # No point spawning more workers than candidates; always at least one.
+        n_workers = max(1, min(self._max_workers, len(ladder)))
+        ctx = multiprocessing.get_context("spawn")
+        initargs = (
+            self._mesh_config,
+            self._ode_config,
+            self.REL_SAT_NAME,
+            self.name,
+            self._probes,
+            self._windows,
+            self._flow_m3s,
+            self._grid_mode,
+            ic_rel_sat,
+            et_data,
+            seg_et,
+            horizon_start,
+            horizon_end,
+        )
+        results: dict[tuple[pd.Timedelta, ...], tuple[list[pd.Timestamp], dict[str, list[float]]]] = {}
+        with ProcessPoolExecutor(
+            max_workers=n_workers,
+            mp_context=ctx,
+            initializer=_worker_init,
+            initargs=initargs,
+        ) as pool:
+            futures = [pool.submit(_worker_roll, candidate) for candidate in ladder]
+            for fut in as_completed(futures):
+                candidate, result = fut.result()
+                results[candidate] = result
+        logging.debug(
+            "%s: parallel roll-out complete: %d candidates across %d workers.",
+            self.name,
+            len(results),
+            n_workers,
+        )
+        return results
 
     @staticmethod
     def _resolve_window_start(start: datetime.time, horizon_start: pd.Timestamp) -> pd.Timestamp:
@@ -1586,3 +1690,79 @@ class SoilPredictor(SoilBase):
             sim_t,
             title="Predicted relative saturation",
         )
+
+
+# --- Parallel-executor worker (module-level, spawn-picklable) ----------------
+# The ProcessPoolExecutor initializer/task functions must be importable by name
+# for the spawn start method, so they live at module scope, not as methods or
+# closures. Each worker rebuilds one SoilPDECore in _worker_init and reuses it
+# across every candidate that worker handles; the shared per-run inputs are
+# stashed in _WORKER so each task payload is just the candidate tuple. See
+# docs/adr/0005-parallel-independent-rolls-over-caterpillar.md.
+_WORKER: dict[str, Any] = {}
+
+
+def _worker_init(
+    mesh_config: MeshConfig,
+    ode_config: PDEConfig,
+    rel_sat_name: str,
+    name: str,
+    probes: list[ProbeSpec],
+    windows: list[WateringWindow],
+    flow_m3s: float,
+    grid_mode: str,
+    ic_rel_sat: np.ndarray,
+    et_data: pd.DataFrame,
+    seg_et: dict[str, pd.DataFrame],
+    horizon_start: pd.Timestamp,
+    horizon_end: pd.Timestamp,
+) -> None:
+    """ProcessPoolExecutor initializer (runs once per worker process): pin one
+    core, rebuild the PDE from config (spawn-safe -- no fork-inherited state), and
+    stash the shared per-run inputs as worker globals.
+    """
+    # Pin one core per worker BEFORE building/solving the PDE: OMP_NUM_THREADS=1
+    # avoids OpenMP oversubscription across the pool, and KMP_DUPLICATE_LIB_OK=TRUE
+    # avoids the duplicate-runtime abort (OMP #15) that otherwise crashes FiPy.
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+    ensure_mesh(mesh_config)
+    predictor = object.__new__(SoilPredictor)
+    predictor._name = name
+    predictor._pde = SoilPDECore(mesh_config, ode_config, rel_sat_name=rel_sat_name)
+    predictor._probes = probes
+    predictor._windows = windows
+    predictor._flow_m3s = flow_m3s
+    predictor._grid_mode = grid_mode
+
+    _WORKER.clear()
+    _WORKER["predictor"] = predictor
+    _WORKER["ic_rel_sat"] = ic_rel_sat
+    _WORKER["et_data"] = et_data
+    _WORKER["seg_et"] = seg_et
+    _WORKER["flow_m3s"] = flow_m3s
+    _WORKER["horizon_start"] = horizon_start
+    _WORKER["horizon_end"] = horizon_end
+
+
+def _worker_roll(
+    candidate: tuple[pd.Timedelta, ...],
+) -> tuple[tuple[pd.Timedelta, ...], tuple[list[pd.Timestamp], dict[str, list[float]]]]:
+    """ProcessPoolExecutor task: roll one candidate on this worker's rebuilt PDE
+    via the reference ``_rollout_independent``. The payload is only the candidate
+    tuple; every other input comes from the worker globals set by ``_worker_init``.
+    Returns ``(candidate, (timestamps, trajectories))`` so the parent can key the
+    gathered map without tracking submission order.
+    """
+    predictor = _WORKER["predictor"]
+    result = predictor._rollout_independent(
+        _WORKER["ic_rel_sat"],
+        candidate,
+        _WORKER["et_data"],
+        _WORKER["seg_et"],
+        _WORKER["flow_m3s"],
+        _WORKER["horizon_start"],
+        _WORKER["horizon_end"],
+    )
+    return candidate, result

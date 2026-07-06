@@ -61,7 +61,7 @@ class _Ctx:
         return pd.DataFrame({"x": [0.0, 0.0]}, index=idx), {}
 
 
-def _make_predictor(windows, calls, last_simulated_at=pd.Timestamp("2026-07-03 00:00", tz=_TZ)):
+def _make_predictor(windows, calls, last_simulated_at=pd.Timestamp("2026-07-03 00:00", tz=_TZ), parallel=False):
     """A bare SoilPredictor whose heavy collaborators are stubbed to record calls,
     so predict()'s gate -> guards -> legacy roll -> grid wiring can run PDE-free."""
     p = object.__new__(SoilPredictor)
@@ -81,6 +81,9 @@ def _make_predictor(windows, calls, last_simulated_at=pd.Timestamp("2026-07-03 0
     p._decision_probes = []
     p._threshold_hpa = 300.0
     p._grid_mode = "fill_order"
+    # Execution path: the sequential caterpillar (_rollout_ladder stub below) by
+    # default; parallel=True routes through _rollout_parallel (stubbed too).
+    p._parallel = parallel
 
     p._fetch_forecast = lambda now: pd.DataFrame({"f": [0.0]}, index=pd.DatetimeIndex([now]))
 
@@ -100,9 +103,14 @@ def _make_predictor(windows, calls, last_simulated_at=pd.Timestamp("2026-07-03 0
         calls.append("build_frame")
         return pd.DataFrame()
 
+    def _rollout_parallel(*_a, **_k):
+        calls.append("rollout_parallel")
+        return {}
+
     p._solve = _solve
     p._publish_results = lambda *a, **k: calls.append("publish_results")
     p._rollout_ladder = _rollout
+    p._rollout_parallel = _rollout_parallel
     p._select = _select
     p._publish_recommendation = lambda *a, **k: calls.append("publish_recommendation")
     p._build_trajectory_frame = _build_frame
@@ -135,6 +143,42 @@ def test_predict_grid_block_invokes_all_collaborators(caplog):
     ):
         assert step in calls, f"{step!r} not called; predict() grid wiring is broken. calls={calls}"
     assert "watering-grid" not in caplog.text.lower(), f"grid try/except swallowed an error: {caplog.text}"
+
+
+def test_predict_degrades_to_caterpillar_when_parallel_roll_raises(caplog):
+    """parallel=True but the parallel executor raises (e.g. the pool cannot be
+    created): predict() must still produce the forecast via the sequential
+    caterpillar, log the fallback, and NOT let the failure reach the outer grid
+    try/except (which would skip the recommendation + trajectory write)."""
+    calls = []
+    predictor = _make_predictor([object()], calls, parallel=True)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("cannot create process pool")
+
+    predictor._rollout_parallel = _boom
+    now = pd.Timestamp("2026-07-03 01:30", tz=_TZ)
+
+    with caplog.at_level(logging.ERROR):
+        predictor.predict(now, forecast_creation=now)
+
+    # The full grid chain still runs via the caterpillar fallback ("rollout");
+    # the parallel spy never appended, because it raised first.
+    for step in (
+        "solve",
+        "publish_results",
+        "rollout",
+        "select",
+        "publish_recommendation",
+        "build_frame",
+        "write_table",
+    ):
+        assert step in calls, f"{step!r} not called; parallel-degrade wiring is broken. calls={calls}"
+    assert "rollout_parallel" not in calls
+    assert "parallel roll-out failed" in caplog.text.lower()
+    # The degrade is handled inside _rollout_dispatch, so the OUTER grid
+    # try/except (its "watering-grid" error) must not have fired.
+    assert "watering-grid" not in caplog.text.lower()
 
 
 def test_predict_grid_block_skipped_without_windows():
