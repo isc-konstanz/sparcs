@@ -16,10 +16,21 @@ from __future__ import annotations
 import io
 import logging
 import os
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 import gmsh
+
+# FiPy 4.0.2 imports the numpy-2-deprecated `numpy.core` in its numerix module;
+# silence that import-time DeprecationWarning before importing fipy (E402-ignored
+# per file). No fixed FiPy release exists yet.
+warnings.filterwarnings(
+    "ignore",
+    message=r"numpy\.core is deprecated",
+    category=DeprecationWarning,
+)
+
 from fipy import CellVariable, DiffusionTerm, FaceVariable, ImplicitSourceTerm, TransientTerm
 from fipy.meshes import Gmsh2D
 from fipy.solvers import LinearGMRESSolver
@@ -971,7 +982,11 @@ class SoilPDECore:
         sweeps = 0
         for k in range(max_sweeps):
             try:
-                res = eq.sweep(dt=dt, var=rel_sat, solver=self._solver)
+                # np.seterr(all="ignore") at import is thread-local and misses the
+                # solver thread; scope the FP-warning suppression to the solve, where
+                # GMRES matmul on near-singular saturation matrices is the noise source.
+                with np.errstate(all="ignore"):
+                    res = eq.sweep(dt=dt, var=rel_sat, solver=self._solver)
             except Exception as e:  # noqa: BLE001  (scipy/FiPy raise a zoo of types)
                 if log_name is not None:
                     logging.warning(

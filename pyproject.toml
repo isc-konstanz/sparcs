@@ -94,6 +94,8 @@ select = [
 "soil_tuning.py" = ["E402"]
 # Imports follow the pvfactors numpy2 compat patch, which must run first.
 "sparcs/components/agriculture/simulation/ground_shading.py" = ["E402"]
+# Imports follow the FiPy numpy.core DeprecationWarning filter, set before `import fipy`.
+"sparcs/components/agriculture/simulation/_soil.py" = ["E402"]
 
 [tool.ruff.lint.isort]
 extra-standard-library = ["dateutil"]
