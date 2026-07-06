@@ -468,14 +468,36 @@ actuate irrigation.
   overnight peak binds: it restores the full Cartesian product and a
   least-total-minutes selector (with tie-breaks), at the cost of more
   roll-outs.
-- **Prefix-shared roll-out.** Candidates share integration prefixes: the
-  segment before the first window is integrated once from the initial
-  condition; each window's durations are then swept from a saved state of
-  the max-duration branch. Branch state is saved and restored with
-  `save_state_blob` / `load_state_blob`, **not** `snapshot` / `set_state`
-  — the latter round-trip only `rel_sat` and would drop the `surface_h`
-  ponds that watering fills, so a later branch would inherit ponds from
-  the wrong earlier duration.
+- **Prefix-shared roll-out (the caterpillar, `parallel = false`).**
+  Candidates share integration prefixes: the segment before the first
+  window is integrated once from the initial condition; each window's
+  durations are then swept from a saved state of the max-duration branch.
+  Branch state is saved and restored with `save_state_blob` /
+  `load_state_blob`, **not** `snapshot` / `set_state` — the latter
+  round-trip only `rel_sat` and would drop the `surface_h` ponds that
+  watering fills, so a later branch would inherit ponds from the wrong
+  earlier duration. This chain is sequential by design (rung N reuses rung
+  N-1's saved state), so it stays the default and the correctness oracle.
+- **Execution strategy (`parallel`), orthogonal to `grid_mode`.**
+  `grid_mode` picks the candidate *set* (the `fill_order` ladder or the
+  `full` product); `parallel` picks how that set is *executed*. With
+  `parallel = true` each candidate is rolled **independently in parallel**
+  across an in-component spawn `ProcessPoolExecutor` (`max_workers`
+  processes, default `os.cpu_count()-1`), instead of the caterpillar — to
+  use the box's idle cores and drop the daily run's wall-time. Each worker
+  rebuilds its own PDE from the pickled `MeshConfig` + `PDEConfig` (Windows
+  multiprocessing is spawn, so there is no fork-inherited state) and is
+  pinned to one core (`OMP_NUM_THREADS=1`, `KMP_DUPLICATE_LIB_OK=TRUE` set
+  before the PDE build, to avoid OpenMP oversubscription and the
+  duplicate-runtime crash). The parent gathers the per-candidate
+  trajectories and runs selection and the trajectory write **serially**, so
+  the direct-write path and the PK are untouched. The parallel result
+  equals the caterpillar within solver tolerance — a pure wall-time win, not
+  a change to what is stored — and on any pool/worker failure the run
+  degrades to the caterpillar for that day and logs it, so a parallelism
+  fault never aborts the forecast. The trade-off (independent rolls drop
+  prefix sharing, trading extra CPU for wall-time on idle cores) is recorded
+  in `docs/adr/0005-parallel-independent-rolls-over-caterpillar.md`.
 - **Decision rule.** At a configured root-zone subset of probes
   (`decision_probes`), each candidate's `Se` trajectory is converted to
   soil tension (`model.psi_from_se`, a positive hPa magnitude), and the
@@ -500,6 +522,36 @@ zero-irrigation forecast. A dashboard reading the current
 `predict_<probe>` channels should move to the trajectory table filtered
 by the all-`0min` PK row (or the `is_recommended` column), so no consumer
 silently reads a mix of candidates.
+
+**Grafana consumption (out-of-app).** All candidates are already in
+`soil_predictor_trajectory`; there is no in-app comparison view. Grafana
+reads MySQL/MariaDB directly. One panel = one probe; each candidate (its
+`w{i}_min` duration tuple) is one series; filter to the latest
+`traj_timestamp_creation` so only today's forecast shows, and let
+`is_recommended` tag the winning series. Example (probe `root_20`, two
+windows), using Grafana's MySQL **Time series** format:
+
+```sql
+SELECT
+  timestamp AS "time",
+  CONCAT(
+    'w0=', ROUND(w0_min), 'min w1=', ROUND(w1_min), 'min',
+    CASE WHEN is_recommended THEN ' (recommended)' ELSE '' END
+  ) AS metric,
+  traj_root_20 AS value
+FROM soil_predictor_trajectory
+WHERE traj_timestamp_creation = (
+  SELECT MAX(traj_timestamp_creation) FROM soil_predictor_trajectory
+)
+ORDER BY timestamp;
+```
+
+Swap `traj_root_20` for `traj_<probe>` per panel. Only reference the
+`w{i}_min` columns that are actually configured — unused window columns up
+to `max_windows` carry the `-1` sentinel, so exclude them from the label (or
+add `AND w2_min = -1` to pin a specific window count). The recommended row is
+the `is_recommended = 1` candidate; drop the `CASE` and add
+`WHERE is_recommended = 1` for a single-series "the pick" panel.
 
 ---
 
@@ -547,7 +599,9 @@ offset          = 60             # minutes past local midnight -> ~01:00 local
 cooldown        = 60             # per-listener backpressure floor, minutes
 threshold_hpa   = 300            # dryness ceiling, positive hPa magnitude
 combo_cap       = 16             # max ladder rungs; FAILS AT CONFIG if exceeded
-grid_mode       = "fill_order"   # "fill_order" ladder (default) | "full" product
+grid_mode       = "fill_order"   # candidate SET: "fill_order" ladder (default) | "full" product
+parallel        = false          # EXECUTION: roll candidates independently across cores (opt-in)
+max_workers     = 7              # worker processes when parallel=true; default os.cpu_count()-1
 max_windows     = 4              # fixed PK arity for the trajectory table
 logger          = "db"           # id of the SQL logger connector for the grid write
 decision_probes = ["root_20", "root_40"]  # subset of [soil_simulation.probes] keys
