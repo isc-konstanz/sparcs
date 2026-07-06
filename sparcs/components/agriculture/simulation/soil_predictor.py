@@ -1644,19 +1644,23 @@ class SoilPredictor(SoilBase):
         )
 
     def _resolve_logger_connector(self, logger_id: str) -> Optional[Any]:
-        """Resolve ``logger_id`` (a plain, un-dotted config id, e.g. ``"db"``)
-        against the shared connector registry.
+        """Resolve the connector for the trajectory direct-write.
 
-        ``self.connectors[logger_id]`` / ``self.connectors.get(logger_id)``
-        (``ConnectorAccess`` / ``RegistratorAccess._get``) prefix a dot-less id
-        with THIS component's own id before looking it up in the shared map, so
-        a root-level connector (the common case for a shared SQL logger declared
-        at the system's top-level ``[connectors.<id>]``) is not found that way.
-        ``RegistratorAccess.__getattr__`` instead looks up by the connector's
-        bare ``key`` across the shared map regardless of nesting, so it is tried
-        first; the id-based lookup is kept as a fallback for a `logger` value
-        that already is a full dotted id.
+        Prefer the connector the trajectory channels already bound at
+        registration: ``ChannelConnector`` walks the component path to reach a
+        root-level ``[connectors.<id>]`` connector (the common case for a shared
+        SQL logger). ``self.connectors``' bare-key/id lookup is **component
+        scoped** -- ``RegistratorAccess.__getattr__`` only sees this component's
+        own connector map and ``__getitem__`` prefixes a dot-less id with this
+        component's id -- so a root-level connector is unreachable from a nested
+        predictor that way. Reusing the channel's resolution is what makes
+        ``logger = "<bare id>"`` work for a deeply nested predictor; the id-based
+        lookups stay as fallbacks (a full dotted ``logger`` value, or before the
+        channels are bound).
         """
+        connector = self._logger_connector_from_channel()
+        if connector is not None:
+            return connector
         try:
             connector = getattr(self.connectors, logger_id)
         except AttributeError:
@@ -1666,6 +1670,17 @@ class SoilPredictor(SoilBase):
         try:
             return self.connectors[logger_id]
         except (KeyError, TypeError):
+            return None
+
+    def _logger_connector_from_channel(self) -> Optional[Any]:
+        """The connector a trajectory channel already resolved against the root
+        context (``ChannelConnector``'s component-path walk), or ``None`` if the
+        channels are not registered / not bound yet. Defensive: a resolution
+        failure must degrade to the id-based fallback, never raise.
+        """
+        try:
+            return self.data[self._TRAJ_TIMESTAMP_CREATION_KEY].logger._get_registrator()
+        except Exception:  # noqa: BLE001
             return None
 
     @staticmethod

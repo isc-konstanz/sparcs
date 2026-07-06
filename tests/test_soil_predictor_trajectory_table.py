@@ -311,3 +311,60 @@ def test_write_trajectory_table_empty_frame_is_a_noop(monkeypatch):
     predictor._logger_id = "db"
 
     predictor._write_trajectory_table(pd.DataFrame())
+
+
+def test_write_trajectory_table_uses_channel_resolved_connector(monkeypatch):
+    """A nested predictor references a ROOT-level ``[connectors.<id>]`` connector:
+    ``self.connectors``' component-scoped lookup cannot resolve the bare id, but
+    the trajectory channels already bound the connector at registration (walking
+    the component path). ``_write_trajectory_table`` must write via the
+    channel-resolved connector -- the box failure mode ('logger connector not
+    found; skipping the trajectory-table direct write')."""
+    predictor = _make_bare_predictor(max_windows=4, n_windows=2)
+    predictor._logger_id = "mariadb"
+
+    written = {}
+
+    class _Connector:
+        def write(self, frame):
+            written["frame"] = frame
+
+    class _Logger:
+        def _get_registrator(self):
+            return _Connector()
+
+    class _Channel:
+        def __init__(self, channel_id):
+            self.id = channel_id
+            self.logger = _Logger()
+
+    class _Data:
+        def __init__(self, keys):
+            self._channels = {key: _Channel(f"test_soil_predictor_trajectory.{key}") for key in keys}
+
+        def __getitem__(self, key):
+            return self._channels[key]
+
+    keys = [
+        predictor._TRAJ_TIMESTAMP_CREATION_KEY,
+        predictor._TRAJ_IS_RECOMMENDED_KEY,
+        *predictor._traj_window_keys,
+        *predictor._traj_channel_keys.values(),
+    ]
+    _patch_data(monkeypatch, _Data(keys))
+
+    class _NoConnectors:
+        """Component-scoped registry that cannot resolve the root connector."""
+
+        def __getitem__(self, item):
+            raise KeyError(item)
+
+    _patch_connectors(monkeypatch, _NoConnectors())
+
+    frame = pd.DataFrame(
+        {"traj_root_20": [0.9]},
+        index=pd.DatetimeIndex([pd.Timestamp("2026-07-03", tz="UTC")], name="timestamp"),
+    )
+    predictor._write_trajectory_table(frame)
+
+    assert "frame" in written, "must write via the connector the trajectory channel resolved"
