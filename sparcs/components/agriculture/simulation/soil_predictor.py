@@ -211,19 +211,19 @@ class SoilPredictor(SoilBase):
         total_drip_line_length_m = soil_block.get_float("total_drip_line_length_m", default=_DEFAULT_DRIP_LINE_LENGTH_M)
         self._flow_m3s = self._derive_flow_m3s(nozzle_count, nozzle_flow_lph, total_drip_line_length_m)
 
-        windows_cfg = configs.get("windows", default=[])
         self._windows = []
         self._window_durations = []
-        for window_cfg in windows_cfg:
-            start = pd.Timestamp(str(window_cfg["start"])).time()
-            durations = sorted(to_timedelta(d) for d in window_cfg["durations"])
-            if pd.Timedelta(0) not in durations:
-                raise ValueError(
-                    f"{self.id}: [soil_predictor.windows] entry with start={window_cfg['start']!r} "
-                    "is missing a '0min' duration; every window's durations list must include zero."
-                )
-            self._windows.append(WateringWindow(start=start))
-            self._window_durations.append(durations)
+        if configs.has_member("windows"):
+            for name, window_cfg in configs.get_member("windows").items():
+                start = pd.Timestamp(str(window_cfg["start"])).time()
+                durations = sorted(to_timedelta(d) for d in window_cfg["durations"])
+                if pd.Timedelta(0) not in durations:
+                    raise ValueError(
+                        f"{self.id}: [soil_predictor.windows.{name}] "
+                        "is missing a '0min' duration; every window's durations list must include zero."
+                    )
+                self._windows.append(WateringWindow(start=start))
+                self._window_durations.append(durations)
 
         order = sorted(range(len(self._windows)), key=lambda i: self._windows[i].start)
         self._windows = [self._windows[i] for i in order]

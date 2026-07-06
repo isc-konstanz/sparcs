@@ -441,7 +441,7 @@ actuate irrigation.
   start needs no special case. A per-listener `cooldown` is a
   backpressure floor, distinct from the daily run cadence.
 - **Watering model.** Each candidate is one duration per configured
-  window. Windows are clock times (`[[soil_predictor.windows]]`, e.g.
+  window. Windows are clock times (`[soil_predictor.windows.<name>]`, e.g.
   morning at 08:00, optionally an evening window), each with its own
   `durations` list (each including `0min`). The emitters run at a fixed
   flow derived from the drip layout (`nozzle_count * nozzle_flow_lph`
@@ -556,11 +556,11 @@ decision_probes = ["root_20", "root_40"]  # subset of [soil_simulation.probes] k
     nozzle_flow_lph = 1.0        # per-nozzle output, L/h
     nozzle_count    = 31         # nozzles fed by the meter
 
-  [[soil_predictor.windows]]     # ordered watering windows; omit for "morning only"
+  [soil_predictor.windows.morning]   # named watering windows; sorted by start
     start     = "08:00"          # site-local clock time
     durations = ["0min", "30min", "1h", "2h"]
 
-  [[soil_predictor.windows]]
+  [soil_predictor.windows.evening]
     start     = "18:00"
     durations = ["0min", "30min", "1h"]
 ```
