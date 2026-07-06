@@ -20,7 +20,7 @@ import multiprocessing
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 import pandas as pd
@@ -114,6 +114,12 @@ class SoilPredictor(SoilBase):
     # Recommendation channels (normal auto-logged path, one row per run).
     _RECOMMEND_TOTAL_KEY: str = "recommend_total_min"
     _RECOMMEND_STATUS_KEY: str = "recommend_status"
+    # The recommendation lives in its own table keyed by run time only (no
+    # timestamp_creation composite PK), so each run appends one row and the
+    # recommendation history accumulates through the normal auto-logger. Keeping it
+    # out of the soil_predictor forecast table is what avoids the composite-PK
+    # partner problem entirely -- see _publish_recommendation.
+    _RECOMMEND_TABLE_NAME: str = "soil_predictor_recommendation"
 
     # Trajectory-table channels (direct connector write). Distinct-key scheme:
     # every trajectory column uses a `traj_`/`w{i}_min` prefix so it can never
@@ -127,6 +133,8 @@ class SoilPredictor(SoilBase):
     _save_freq: pd.Timedelta
     _save_state: bool
     _save_plot: bool
+    _save_trajectory_plot: bool = False
+    _trajectory_plot_dir: str
 
     # Scheduling gate: run cadence, own defaults (not WeatherForecast's).
     _interval_min: int
@@ -209,6 +217,18 @@ class SoilPredictor(SoilBase):
         self._save_freq = to_timedelta(configs.get("save_freq", default=_DEFAULT_SAVE_FREQ))
         self._save_state = configs.get_bool("save_state", default=False)
         self._save_plot = configs.get_bool("save_plot", default=False)
+
+        # Debug dump of the soil saturation field at every forecast step (hourly),
+        # for every watering candidate on the ladder -- candidates x steps PNGs per
+        # run, in a per-run subdir on disk. Off by default: when on it re-simulates
+        # the whole ladder (slow, disk-heavy) but never blocks or aborts the forecast.
+        self._save_trajectory_plot = configs.get_bool("save_trajectory_plot", default=False)
+        if self._save_trajectory_plot:
+            self._trajectory_plot_dir = configs.get(
+                "plot.dir",
+                default=str(configs.dirs.data.joinpath("soil_predictor")),
+            )
+            os.makedirs(self._trajectory_plot_dir, exist_ok=True)
 
         self._interval_min = configs.get_int("interval", default=_DEFAULT_INTERVAL_MIN)
         self._offset_min = configs.get_int("offset", default=_DEFAULT_OFFSET_MIN)
@@ -390,9 +410,12 @@ class SoilPredictor(SoilBase):
             )
 
         # --- Recommendation channels (normal auto-logged path) ---------------
-        # One row per run: recommend_w0_min ... recommend_w{max_windows-1}_min,
-        # recommend_total_min, recommend_status. Distinct keys from the trajectory
-        # table's w{i}_min PK columns below (different channels, different logger).
+        # One row per run in the dedicated _RECOMMEND_TABLE_NAME table, keyed by run
+        # time only: recommend_w0_min ... recommend_w{max_windows-1}_min,
+        # recommend_total_min, recommend_status. Its own table (no timestamp_creation
+        # composite PK) lets the recommendation history accumulate through the normal
+        # auto-logger. Distinct keys from the trajectory table's w{i}_min PK columns
+        # below (different channels, different table).
         self._recommend_window_keys = []
         for i in range(self._max_windows):
             key = f"recommend_w{i}_min"
@@ -403,7 +426,7 @@ class SoilPredictor(SoilBase):
                 name=f"Recommended window {i} duration",
                 unit="min",
                 aggregate="last",
-                logger={"enabled": True},
+                logger={"enabled": True, "table": self._RECOMMEND_TABLE_NAME},
             )
 
         self.data.add(
@@ -412,14 +435,14 @@ class SoilPredictor(SoilBase):
             name="Recommended total watering duration",
             unit="min",
             aggregate="last",
-            logger={"enabled": True},
+            logger={"enabled": True, "table": self._RECOMMEND_TABLE_NAME},
         )
         self.data.add(
             self._RECOMMEND_STATUS_KEY,
             type=str,
             name="Recommendation status",
             aggregate="last",
-            logger={"enabled": True},
+            logger={"enabled": True, "table": self._RECOMMEND_TABLE_NAME},
         )
 
         # --- Trajectory-table channels (direct connector write) --------------
@@ -655,6 +678,7 @@ class SoilPredictor(SoilBase):
 
                 trajectory_frame = self._build_trajectory_frame(ladder_traj, chosen, forecast_creation)
                 self._write_trajectory_table(trajectory_frame)
+                self._write_trajectory_fields(ic_rel_sat, et_data, seg_et, horizon_start, horizon_end, chosen, now)
             except Exception:  # noqa: BLE001
                 logging.exception(
                     "%s: watering-grid roll-out/recommendation/trajectory-write failed "
@@ -842,6 +866,7 @@ class SoilPredictor(SoilBase):
         et_data: pd.DataFrame,
         seg_et: dict[str, pd.DataFrame],
         on_intervals: list[tuple[pd.Timestamp, pd.Timestamp]],
+        snapshot_sink: Optional[Callable[[pd.Timestamp], None]] = None,
     ) -> tuple[list[pd.Timestamp], dict[str, list[float]]]:
         """Walk the PDE across ``idx`` (>=1 forecast timestamps; the live PDE state is
         already the state at ``idx[0]``), applying ``on_intervals`` inside each
@@ -850,9 +875,17 @@ class SoilPredictor(SoilBase):
 
         Shared by the prefix roll and every per-window sweep in ``_rollout_ladder``,
         and by ``_rollout_independent``'s single full-horizon roll.
+
+        ``snapshot_sink``, when given, is called with each recorded forecast timestamp
+        right after that state is reached -- the live ``self._pde`` is the field at
+        that timestamp, so the sink can read ``self._pde.snapshot()``. Only the debug
+        field-plot re-roll passes it; the forecast/recommendation paths leave it
+        ``None`` (no per-step cost).
         """
         timestamps: list[pd.Timestamp] = [idx[0]]
         trajectories: dict[str, list[float]] = {p.channel_id: [self._pde.sample(p)] for p in self._probes}
+        if snapshot_sink is not None:
+            snapshot_sink(idx[0])
 
         for ts_prev, ts_next in zip(idx[:-1], idx[1:]):
             elapsed_s = (ts_next - ts_prev).total_seconds()
@@ -860,6 +893,8 @@ class SoilPredictor(SoilBase):
                 timestamps.append(ts_next)
                 for p in self._probes:
                     trajectories[p.channel_id].append(self._pde.sample(p))
+                if snapshot_sink is not None:
+                    snapshot_sink(ts_next)
                 continue
 
             seg_evap, seg_transp = self._segment_flux_dicts(seg_et, ts_next)
@@ -884,6 +919,8 @@ class SoilPredictor(SoilBase):
             timestamps.append(ts_next)
             for p in self._probes:
                 trajectories[p.channel_id].append(self._pde.sample(p))
+            if snapshot_sink is not None:
+                snapshot_sink(ts_next)
 
         return timestamps, trajectories
 
@@ -1519,14 +1556,23 @@ class SoilPredictor(SoilBase):
         forecast_creation: pd.Timestamp,
     ) -> None:
         """Publish the chosen candidate on the recommendation channels (normal
-        auto-logged path): one row at ``run_timestamp``, per-window minutes
-        (unused windows -- i.e. ``chosen`` shorter than ``_max_windows``, which
-        cannot happen given the configure()-time length check, but the fill
-        below is defensive -- get ``0.0``, not the trajectory table's ``-1``
-        sentinel; a "no window configured" reading of 0 minutes is unambiguous
-        on the advisory channel, whereas the sentinel is only meaningful
-        alongside the trajectory table's fixed-arity PK columns), the total
-        watering minutes, and the status string.
+        auto-logged path): one row per run at ``run_timestamp`` in the dedicated
+        ``_RECOMMEND_TABLE_NAME`` table. That table is keyed by run time only (no
+        ``timestamp_creation`` composite PK), so each run appends a row and the
+        recommendation history accumulates through the auto-logger -- no PK partner
+        to keep in sync, unlike the forecast table.
+
+        Per-window minutes (unused windows -- i.e. ``chosen`` shorter than
+        ``_max_windows``, which cannot happen given the configure()-time length
+        check, but the fill below is defensive -- get ``0.0``, not the trajectory
+        table's ``-1`` sentinel; a "no window configured" reading of 0 minutes is
+        unambiguous on the advisory channel, whereas the sentinel is only meaningful
+        alongside the trajectory table's fixed-arity PK columns), the total watering
+        minutes, and the status string.
+
+        ``forecast_creation`` is accepted for call-site symmetry with the trajectory
+        write but is not persisted here: the recommendation row is keyed by run time,
+        not by the forecast issue.
         """
         total_minutes = self._total_minutes(chosen)
 
@@ -1537,12 +1583,11 @@ class SoilPredictor(SoilBase):
         self.data[self._RECOMMEND_TOTAL_KEY].set(run_timestamp, total_minutes)
         self.data[self._RECOMMEND_STATUS_KEY].set(run_timestamp, status)
         logging.debug(
-            "%s: recommendation published: total=%.1fmin status=%s (now=%s, creation=%s).",
+            "%s: recommendation published: total=%.1fmin status=%s (now=%s).",
             self.name,
             total_minutes,
             status,
             run_timestamp,
-            forecast_creation,
         )
 
     def _build_trajectory_frame(
@@ -1694,12 +1739,87 @@ class SoilPredictor(SoilBase):
             return None
 
     @staticmethod
+    def _candidate_slug(candidate: tuple[pd.Timedelta, ...]) -> str:
+        """Filesystem-safe per-window-minutes slug for a ladder candidate, e.g.
+        ``(30 min, 0 min)`` -> ``30-0min``. Used in debug field-plot filenames."""
+        return "-".join(f"{c.total_seconds() / 60:g}" for c in candidate) + "min"
+
+    def _write_trajectory_fields(
+        self,
+        ic_rel_sat: np.ndarray,
+        et_data: pd.DataFrame,
+        seg_et: dict[str, pd.DataFrame],
+        horizon_start: pd.Timestamp,
+        horizon_end: pd.Timestamp,
+        chosen: tuple[pd.Timedelta, ...],
+        run_timestamp: pd.Timestamp,
+    ) -> None:
+        """Debug dump: save the soil saturation field as a PNG at every forecast
+        timestamp (hourly), for every watering candidate on the ladder, into a
+        per-run subdirectory of the on-disk plot dir. Gated by `save_trajectory_plot`.
+
+        Each candidate is re-rolled independently from the initial condition (the
+        ground-truth path ``_rollout_independent`` uses), with a snapshot sink that
+        renders and writes each hourly field inline -- so this never accumulates the
+        full mesh across steps, and never touches the parallel/caterpillar forecast
+        roll-out above. Warns and skips (never raises), per-candidate and overall: a
+        debug-plot failure must never abort the forecast/recommendation already
+        published. Off by default; when on it re-simulates the whole ladder and
+        writes candidates x forecast-steps PNGs -- slow and disk-heavy, debug only.
+        """
+        if not self._save_trajectory_plot:
+            return
+
+        run_dir = os.path.join(self._trajectory_plot_dir, f"trajectory_{run_timestamp:%Y%m%dT%H%M%S}")
+        try:
+            os.makedirs(run_dir, exist_ok=True)
+        except OSError:
+            logging.exception("%s: creating the trajectory field-plot dir '%s' failed.", self.name, run_dir)
+            return
+
+        idx = et_data.index
+        written = 0
+        for candidate in self._ladder:
+            slug = self._candidate_slug(candidate)
+            is_chosen = candidate == chosen
+            prefix = f"{'CHOSEN_' if is_chosen else ''}{slug}"
+            label = slug + (" (recommended)" if is_chosen else "")
+
+            def _sink(ts: pd.Timestamp, *, _prefix: str = prefix, _label: str = label) -> None:
+                nonlocal written
+                png = self._render_snapshot_png(self._pde.snapshot(), ts, title=f"Candidate {_label}")
+                path = os.path.join(run_dir, f"{_prefix}_{ts:%Y%m%dT%H%M%S}.png")
+                with open(path, "wb") as handle:
+                    handle.write(png)
+                written += 1
+
+            try:
+                self._pde.set_state(ic_rel_sat)
+                on_intervals = self._build_flow_schedule(
+                    self._windows, list(candidate), self._flow_m3s, horizon_start, horizon_end
+                )
+                self._roll_segment(idx, et_data, seg_et, on_intervals, snapshot_sink=_sink)
+            except Exception:  # noqa: BLE001
+                logging.exception("%s: field-plot re-roll for candidate %s failed; skipping it.", self.name, slug)
+                continue
+
+        logging.debug(
+            "%s: trajectory field plots written: %d PNGs across %d candidates in %s.",
+            self.name,
+            written,
+            len(self._ladder),
+            run_dir,
+        )
+
+    @staticmethod
     def _encode_state(rel_sat: np.ndarray) -> bytes:
         buf = io.BytesIO()
         np.savez(buf, rel_sat=rel_sat)
         return buf.getvalue()
 
-    def _render_snapshot_png(self, rel_sat: np.ndarray, sim_t: pd.Timestamp) -> bytes:
+    def _render_snapshot_png(
+        self, rel_sat: np.ndarray, sim_t: pd.Timestamp, *, title: str = "Predicted relative saturation"
+    ) -> bytes:
         """Render a saturation snapshot to PNG bytes; fig/ax/norm are lazily initialised and reused."""
         if self._plot_fig is None:
             self._plot_fig, self._plot_ax, self._plot_norm = plot_render.init_rel_sat_figure(
@@ -1713,7 +1833,7 @@ class SoilPredictor(SoilBase):
             self._pde.mesh,
             rel_sat,
             sim_t,
-            title="Predicted relative saturation",
+            title=title,
         )
 
 

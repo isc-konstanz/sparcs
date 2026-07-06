@@ -509,13 +509,30 @@ actuate irrigation.
   hold the threshold.
 - **Outputs.** The recommendation goes out on dedicated auto-logged
   channels (`recommend_w{i}_min`, `recommend_total_min`,
-  `recommend_status`) — one row per run, the seam a future irrigation
+  `recommend_status`) written to their own table
+  (`soil_predictor_recommendation`), one row per run keyed by run time
+  only — so the recommendation history accumulates through the normal
+  auto-logger with no `timestamp_creation` composite-PK partner to keep in
+  sync (unlike the forecast table). This is the seam a future irrigation
   controller subscribes to. Every candidate's per-timestep trajectory is
   persisted to a dedicated table via a **direct connector write** keyed on
   the ladder dimensions (`w{i}_min` composite-PK columns, `is_recommended`
   marking the winner), because the automatic log path collapses duplicate
   timestamps. The trajectory channels are never `.set()`, so the auto
   flush stays silent for them.
+- **Debug field plots (optional).** With `save_trajectory_plot = true`,
+  each run dumps the soil saturation field as a PNG at **every forecast
+  step (hourly), for every watering candidate** on the ladder, into a
+  per-run subdir `<data_dir>/soil_predictor/trajectory_<run>/`. Files are
+  `<slug>_<step>.png` (e.g. `30-0min_20260706T140000.png`); the
+  recommended candidate's files carry a `CHOSEN_` prefix. Each candidate
+  is re-rolled independently from the initial condition (the ground-truth
+  `_rollout_independent` path) with a snapshot sink that renders inline,
+  so nothing touches the parallel/caterpillar forecast roll-out and no
+  full-mesh series is held in memory. Off by default; when on it
+  re-simulates the whole ladder — **slow and disk-heavy** (candidates ×
+  forecast steps PNGs per run), for debugging only — but never blocks or
+  aborts the forecast/recommendation already published.
 
 **Consumer migration.** The all-`0min` rung reproduces today's
 zero-irrigation forecast. A dashboard reading the current
