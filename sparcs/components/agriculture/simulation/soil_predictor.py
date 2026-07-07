@@ -201,6 +201,35 @@ class SoilPredictor(SoilBase):
     # Dedup gate: skip if (now, forecast_creation) was already published.
     _last_predicted_key: Optional[tuple[pd.Timestamp, pd.Timestamp]] = None
 
+    @staticmethod
+    def _resolve_ode_config(
+        configs: Configurations,
+        soil_pde: PDEConfig,
+        model_configs: Configurations,
+    ) -> PDEConfig:
+        """Build the predictor's PDE config, inheriting ponding from the live sim.
+
+        The predictor parses its OWN ``[pde]`` block, so any key it does not
+        restate silently falls back to the ``PDEConfig`` default. That is
+        intentional for most keys -- the predictor warm-starts from live soil
+        state, so its IC keys stay predictor-local -- but ponding must track the
+        live ``soil_simulation``: a predictor that keeps the 5 mm
+        ``watering_h_max_mm`` default while the sim ponds to 50 mm overflows its
+        watering rolls ~10x sooner, reading too dry and biasing the
+        recommendation. So when the predictor has its own ``[pde]`` but omits
+        ``[pde.ponding]``, inherit the sim's parsed ``PondingConfig`` verbatim.
+        An explicit ``[pde.ponding]`` still wins; with no ``[pde]`` block at all
+        the predictor inherits ``soil_pde`` wholesale. Ponding is the only key
+        inherited this way (rain-shadow stays explicit).
+        """
+        if not configs.has_member("pde"):
+            return soil_pde
+        pde_block = configs.get_member("pde")
+        ode_config = PDEConfig(pde_block, model_configs=model_configs)
+        if not pde_block.has_member("ponding"):
+            ode_config.ponding = soil_pde.ponding
+        return ode_config
+
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
 
@@ -302,10 +331,7 @@ class SoilPredictor(SoilBase):
                 self.name,
             )
 
-        if configs.has_member("pde"):
-            self._ode_config = PDEConfig(configs.get_member("pde"), model_configs=model_block)
-        else:
-            self._ode_config = soil_pde
+        self._ode_config = self._resolve_ode_config(configs, soil_pde, model_block)
 
         self._pde = self._build_pde()
 
