@@ -1207,6 +1207,8 @@ class SoilBase(Component):
     _ode_config: PDEConfig
     _pde: SoilPDECore
 
+    _intake_delay: pd.Timedelta = pd.Timedelta(0)
+
     def _build_pde(self) -> SoilPDECore:
         """Generate .msh if missing and build a fresh ``SoilPDECore``."""
         ensure_mesh(self._mesh_config)
@@ -1215,6 +1217,37 @@ class SoilBase(Component):
             self._ode_config,
             rel_sat_name=self.REL_SAT_NAME,
         )
+
+    # -- replication frontier (intake_delay) ----------------------------------
+
+    @staticmethod
+    def _parse_intake_delay(configs: Configurations) -> pd.Timedelta:
+        """Parse ``[soil_simulation] intake_delay`` (default ``0`` = feature off)."""
+        return to_timedelta(configs.get("intake_delay", default="0min"))
+
+    def _replication_cutoff(self) -> Optional[pd.Timestamp]:
+        """Wall-clock frontier the sim may consume up to: ``utcnow - intake_delay``.
+
+        ``None`` when ``intake_delay`` is zero, so the frame clip is skipped and
+        the live path stays byte-for-byte the pre-feature behavior. This is the
+        only new wall-clock read for either soil component.
+        """
+        if self._intake_delay == pd.Timedelta(0):
+            return None
+        return pd.Timestamp.now(tz="UTC") - self._intake_delay
+
+    @staticmethod
+    def _clip_to_cutoff(frame: pd.DataFrame, cutoff: Optional[pd.Timestamp]) -> pd.DataFrame:
+        """Drop rows stamped after ``cutoff`` (inclusive keep); pure, no wall-clock.
+
+        ``cutoff is None`` returns ``frame`` unchanged. Otherwise returns the rows
+        at or before ``cutoff`` (possibly empty), so the caller's
+        ``now = frame.index[-1]`` stays a real data timestamp matched to its
+        forcing row rather than a synthesized wall-clock value.
+        """
+        if cutoff is None:
+            return frame
+        return frame.loc[frame.index <= cutoff]
 
     # -- thin accessors onto SoilPDECore --------------------------------------
 

@@ -276,6 +276,11 @@ class FieldSimulation(Component):
         if frame.empty:
             return
 
+        cutoff = self.soil_simulation._replication_cutoff()
+        frame = self.soil_simulation._clip_to_cutoff(frame, cutoff)
+        if frame.empty:
+            return
+
         now = frame.index[-1]
         last = getattr(self.soil_simulation, "_last_simulated_at", None)
         if last is not None and now <= last:
