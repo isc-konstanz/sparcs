@@ -537,7 +537,7 @@ class SoilSimulation(SoilBase):
 
         if self._probes:
             logging.info(
-                "%s: registered %d saturation probe(s)",
+                "%s: registered %d tension probe(s)",
                 self.name,
                 len(self._probes),
             )
@@ -547,7 +547,7 @@ class SoilSimulation(SoilBase):
             probe.channel_id,
             type=float,
             name=probe.name,
-            unit="-",
+            unit="hPa",
             aggregate="mean",
             logger={"enabled": True},
         )
@@ -556,7 +556,8 @@ class SoilSimulation(SoilBase):
         if not self._probes:
             return
         for probe in self._probes:
-            self.data[probe.channel_id].set(now, self._pde.sample(probe))
+            se = self._pde.sample(probe)
+            self.data[probe.channel_id].set(now, float(self._soil_model.psi_from_se(se)))
 
     def get_sensor_probes(self) -> list[ProbeSpec]:
         """Probes derived from tension-measured SoilMoisture sensors, for

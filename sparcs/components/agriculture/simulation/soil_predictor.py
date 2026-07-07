@@ -374,7 +374,7 @@ class SoilPredictor(SoilBase):
                 key,
                 type=float,
                 name=f"Predicted {probe.name}",
-                unit="-",
+                unit="hPa",
                 aggregate="last",
                 logger={"enabled": True},
             )
@@ -507,7 +507,7 @@ class SoilPredictor(SoilBase):
                     key,
                     type=float,
                     name=f"Trajectory {probe.name}",
-                    unit="-",
+                    unit="hPa",
                     aggregate="last",
                     logger={
                         "connector": self._logger_id,
@@ -627,6 +627,10 @@ class SoilPredictor(SoilBase):
             logging.exception("%s: integration failed; skipping tick.", self.name)
             return
 
+        # Se -> tension at the roll->publish boundary: the roll stays in Se (so the
+        # roll-mechanics tests hold), everything downstream is hPa.
+        trajectories = self._trajectories_to_tension(trajectories)
+
         try:
             self._publish_results(
                 trajectories,
@@ -666,10 +670,14 @@ class SoilPredictor(SoilBase):
                 horizon_start = et_data.index[0]
                 horizon_end = et_data.index[-1]
                 ladder_traj = self._rollout_dispatch(ic_rel_sat, et_data, seg_et, horizon_start, horizon_end)
+                # Same Se -> tension boundary as the legacy roll above, per candidate.
+                ladder_traj = {
+                    candidate: (candidate_ts, self._trajectories_to_tension(probe_series))
+                    for candidate, (candidate_ts, probe_series) in ladder_traj.items()
+                }
                 chosen, status = self._select(
                     self._ladder,
                     ladder_traj,
-                    self._pde.soil_model,
                     self._decision_probes,
                     self._threshold_hpa,
                     self._grid_mode,
@@ -1201,20 +1209,35 @@ class SoilPredictor(SoilBase):
             )
         return on_ts
 
+    def _trajectories_to_tension(self, trajectories: dict[str, list[float]]) -> dict[str, list[float]]:
+        """Convert a roll's per-probe Se trajectories to water tension (hPa).
+
+        The PDE roll (``_roll_segment`` / ``_integrate_horizon``) works in the solver's
+        native relative saturation Se, and the roll-mechanics tests compare it against
+        ``SoilPDECore.sample`` (also Se). This is the single boundary where the roll
+        output crosses into the tension-native decision + publish layer; ``psi_from_se``
+        returns a POSITIVE hPa magnitude (drier soil -> larger tension).
+        """
+        model = self._pde.soil_model
+        return {
+            channel_id: [float(v) for v in model.psi_from_se(np.asarray(values, dtype=float))]
+            for channel_id, values in trajectories.items()
+        }
+
     # Tension conversion, feasibility, and ladder selection (pure)
 
     @staticmethod
     def _peak_tension(
         trajectory: tuple[list[pd.Timestamp], dict[str, list[float]]],
-        model: Any,
         decision_probes: list[str],
     ) -> float:
-        """Worst-case (largest) soil tension over the configured decision probes AND
-        the whole horizon, for one candidate's ``(timestamps, {probe_channel_id: [Se, ...]})``.
+        """Worst-case (largest) water tension over the configured decision probes AND
+        the whole horizon, for one candidate's ``(timestamps, {probe_channel_id: [hPa, ...]})``.
 
-        ``model.psi_from_se`` returns a POSITIVE hPa magnitude (drier soil -> lower Se
-        -> larger positive tension; see ``sparcs/components/agriculture/soil/models.py``,
-        the Genuchten implementation at line 270). There is no sign flip here or in
+        The trajectory values are already water tension (hPa): the roll output is
+        converted from the solver's native Se at the roll->publish boundary in
+        ``predict()`` (see ``_trajectories_to_tension``). Tension is a POSITIVE
+        magnitude (drier soil -> larger tension), so there is no sign flip here or in
         ``_feasible`` -- the comparison against ``threshold_hpa`` is direct.
 
         Probes not present in ``decision_probes`` are ignored. Returns ``+inf`` if
@@ -1227,11 +1250,10 @@ class SoilPredictor(SoilBase):
         _timestamps, probe_series = trajectory
         peak = float("-inf")
         for channel_id in decision_probes:
-            se_values = probe_series.get(channel_id)
-            if not se_values:
+            tension_values = probe_series.get(channel_id)
+            if not tension_values:
                 continue
-            tensions = model.psi_from_se(np.asarray(se_values, dtype=float))
-            candidate_peak = float(np.max(tensions))
+            candidate_peak = float(np.max(np.asarray(tension_values, dtype=float)))
             if candidate_peak > peak:
                 peak = candidate_peak
         return peak if peak != float("-inf") else float("inf")
@@ -1248,7 +1270,6 @@ class SoilPredictor(SoilBase):
         cls,
         ladder: list[tuple[pd.Timedelta, ...]],
         trajectories: dict[tuple[pd.Timedelta, ...], tuple[list[pd.Timestamp], dict[str, list[float]]]],
-        model: Any,
         decision_probes: list[str],
         threshold_hpa: float,
         grid_mode: str,
@@ -1274,9 +1295,7 @@ class SoilPredictor(SoilBase):
         if not ladder:
             raise ValueError("_select requires a non-empty ladder.")
 
-        peak_tensions = {
-            candidate: cls._peak_tension(trajectories[candidate], model, decision_probes) for candidate in ladder
-        }
+        peak_tensions = {candidate: cls._peak_tension(trajectories[candidate], decision_probes) for candidate in ladder}
         feasible = {candidate: cls._feasible(peak_tensions[candidate], threshold_hpa) for candidate in ladder}
         zero_candidate = tuple(pd.Timedelta(0) for _ in ladder[0])
 
@@ -1606,7 +1625,7 @@ class SoilPredictor(SoilBase):
         per-window minutes (``_UNUSED_WINDOW_SENTINEL`` for any window index
         beyond ``len(candidate)``, so the PK column set is stable regardless of
         how many windows a deployment configures), ``is_recommended`` (True only
-        for ``chosen``'s rows), and its per-probe Se.
+        for ``chosen``'s rows), and its per-probe water tension (hPa).
 
         Pure and unit-testable: no ``Channel``/connector access here. Column
         NAMES are the bare channel keys, not full channel ids --

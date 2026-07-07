@@ -145,7 +145,10 @@ def test_trajectory_frame_is_recommended_true_only_for_chosen():
     assert frame.loc[chosen_rows, "is_recommended"].sum() == 3  # 3 timestamps
 
 
-def test_trajectory_frame_carries_per_probe_se_values():
+def test_trajectory_frame_carries_per_probe_values():
+    """The frame stores each candidate's per-probe trajectory values as-is. In
+    production these are already water tension (hPa), converted upstream at the
+    roll->publish boundary; the frame itself is a pure pass-through."""
     predictor = _make_bare_predictor(max_windows=4, n_windows=2)
     ladder, timestamps = _synthetic_ladder_trajectories()
     chosen = (_td(0), _td(0))

@@ -82,19 +82,13 @@ def test_build_flow_schedule_dst_window_integrates_at_correct_local_time():
     assert off_ts == pd.Timestamp("2026-03-29 18:30", tz=_TZ)
 
 
-class _IdentityModel:
-    """psi_from_se(se) = se (monotone, positive) -- enough to exercise feasibility."""
-
-    def psi_from_se(self, se):
-        return se
-
-
 def test_peak_tension_zero_matching_probes_is_infeasible_not_vacuous():
     """When decision_probes match no probe in the trajectory, _peak_tension must
-    return +inf so the candidate reads as INFEASIBLE, not vacuously feasible."""
+    return +inf so the candidate reads as INFEASIBLE, not vacuously feasible.
+    Trajectory values are already water tension (hPa); _peak_tension takes no model."""
     trajectory = ([pd.Timestamp("2026-07-03 01:00", tz=_TZ)], {"root_20": [500.0]})
 
-    peak = SoilPredictor._peak_tension(trajectory, _IdentityModel(), ["does_not_exist"])
+    peak = SoilPredictor._peak_tension(trajectory, ["does_not_exist"])
 
     assert peak == float("inf")
     assert SoilPredictor._feasible(peak, threshold_hpa=300.0) is False  # pre-fix: -inf -> True
@@ -106,5 +100,5 @@ def test_peak_tension_matching_probe_still_worst_case():
         [pd.Timestamp("2026-07-03 01:00", tz=_TZ), pd.Timestamp("2026-07-03 02:00", tz=_TZ)],
         {"root_20": [120.0, 480.0], "surface": [900.0, 900.0]},
     )
-    peak = SoilPredictor._peak_tension(trajectory, _IdentityModel(), ["root_20"])
+    peak = SoilPredictor._peak_tension(trajectory, ["root_20"])
     assert peak == 480.0  # surface ignored (not a decision probe); worst-case over time
