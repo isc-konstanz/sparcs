@@ -575,25 +575,28 @@ the `is_recommended = 1` candidate; drop the `CASE` and add
 ## 12. Configuration reference (TOML)
 
 The live driver is configured under `[soil_simulation]`; the `[pde]`, `[model]`,
-`[mesh]`, `[anchor]`, `[probes]`, and `[plot]` blocks below nest under it.
+`[mesh]`, `[anchor]`, `[probes]`, and `[plot]` blocks below nest under it. One
+replication knob, `intake_delay`, sits one level up on the parent
+`[field_simulation]` because it governs the whole chain, not just the PDE:
 
 ```toml
-[soil_simulation]
-intake_delay = "0min"    # hold the live sim this far behind wall-clock; default 0 = off
+[field_simulation]
+intake_delay = "0min"    # hold the whole chain this far behind wall-clock; default 0 = off
 ```
 
-**`intake_delay`** holds the live simulation's data-consumption frontier a fixed
+**`intake_delay`** holds the field simulation's data-consumption frontier a fixed
 duration behind wall-clock: each tick clips the weather frame to rows stamped at
-or before `now_utc - intake_delay` before advancing, so the sim only integrates
-over inputs that are at least that old. It exists for the split-compute
-deployment where the sim and predictor run on a second box reading a **replica**
-database. Set `intake_delay` **at least as large as the replication interval
-feeding that box** — the lories 15-minute replication cron, or the
-`claything_to_copperhead` cron — plus a margin, so every point the sim consumes
-has had time to fully replicate. On a single-box / edge install leave it at the
-default `0`, which is a provable no-op (the frame is passed through unchanged).
-The `SoilPredictor` inherits the same delay automatically through the delayed
-`SIMULATION_STATE` timestamp; there is no separate predictor knob.
+or before `now_utc - intake_delay` before the ET chain, so ground shading, ET,
+the soil PDE, and — through the delayed `SIMULATION_STATE` — the predictor all
+trail the frontier together, and the sim only integrates over inputs that are at
+least that old. It exists for the split-compute deployment where the sim and
+predictor run on a second box reading a **replica** database. Set `intake_delay`
+**at least as large as the replication interval feeding that box** — the lories
+15-minute replication cron, or the `claything_to_copperhead` cron — plus a
+margin, so every point the chain consumes has had time to fully replicate. On a
+single-box / edge install leave it at the default `0`, which is a provable no-op
+(the frame is passed through unchanged). The `SoilPredictor` inherits the same
+delay automatically; there is no separate predictor knob.
 
 ```toml
 [pde]

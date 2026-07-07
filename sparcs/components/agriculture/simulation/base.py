@@ -17,6 +17,7 @@ from lories import Component, Constant
 from lories.components.weather import Weather
 from lories.data import Channels
 from lories.typing import Configurations
+from lories.util import to_timedelta
 from sparcs.components.agriculture.irrigation import Irrigation
 from sparcs.components.weather import validate_meteo_inputs
 
@@ -68,6 +69,9 @@ class FieldSimulation(Component):
     _evapo_rename: dict[str, str]
     _irrigation_flow_lpm: float = 0.0
 
+    # On the orchestrator, not a soil child: clipping at the chain entry delays everything downstream.
+    _intake_delay: pd.Timedelta = pd.Timedelta(0)
+
     _weather_channels: Optional[Channels] = None
     _required_weather_keys: tuple[str, ...] = ()
     _weather_default_warned: set[str]
@@ -112,6 +116,8 @@ class FieldSimulation(Component):
         self.bare_ndvi = configs.get("bare_ndvi", default=0.25)
 
         self._bay_width = float(configs.get("bay_width", default=3.5))
+
+        self._intake_delay = self._parse_intake_delay(configs)
 
         for c in self.VEGETATION_CHANNELS:
             self.data.add(c, aggregate="mean", logger={"enabled": False})
@@ -269,6 +275,37 @@ class FieldSimulation(Component):
             unique=True,
         )
 
+    # -- replication frontier (intake_delay) ----------------------------------
+
+    @staticmethod
+    def _parse_intake_delay(configs: Configurations) -> pd.Timedelta:
+        """Parse ``[field_simulation] intake_delay`` (default ``0`` = feature off)."""
+        return to_timedelta(configs.get("intake_delay", default="0min"))
+
+    def _replication_cutoff(self) -> Optional[pd.Timestamp]:
+        """Wall-clock frontier the chain may consume up to: ``utcnow - intake_delay``.
+
+        ``None`` when ``intake_delay`` is zero, so the frame clip is skipped and
+        the live path stays byte-for-byte the pre-feature behavior. This is the
+        only new wall-clock read.
+        """
+        if self._intake_delay == pd.Timedelta(0):
+            return None
+        return pd.Timestamp.now(tz="UTC") - self._intake_delay
+
+    @staticmethod
+    def _clip_to_cutoff(frame: pd.DataFrame, cutoff: Optional[pd.Timestamp]) -> pd.DataFrame:
+        """Drop rows stamped after ``cutoff`` (inclusive keep); pure, no wall-clock.
+
+        ``cutoff is None`` returns ``frame`` unchanged. Otherwise returns the rows
+        at or before ``cutoff`` (possibly empty), so the caller's
+        ``now = frame.index[-1]`` stays a real data timestamp matched to its
+        forcing row rather than a synthesized wall-clock value.
+        """
+        if cutoff is None:
+            return frame
+        return frame.loc[frame.index <= cutoff]
+
     def _weather_callback(self, data: pd.DataFrame) -> None:
         if not self._weather_inputs_valid():
             return
@@ -276,8 +313,8 @@ class FieldSimulation(Component):
         if frame.empty:
             return
 
-        cutoff = self.soil_simulation._replication_cutoff()
-        frame = self.soil_simulation._clip_to_cutoff(frame, cutoff)
+        cutoff = self._replication_cutoff()
+        frame = self._clip_to_cutoff(frame, cutoff)
         if frame.empty:
             return
 

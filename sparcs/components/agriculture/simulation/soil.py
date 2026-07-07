@@ -173,8 +173,6 @@ class SoilSimulation(SoilBase):
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
 
-        self._intake_delay = self._parse_intake_delay(configs)
-
         self._mesh_config = MeshConfig(
             configs.get_member("mesh", defaults={}, ensure_exists=True),
             bay_width=getattr(self.context, "bay_width", None),
