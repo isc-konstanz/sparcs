@@ -207,7 +207,7 @@ record:
 
 ### 5.5 Surface ponding (optional)
 
-When `[pde.ponding] enabled = true`, each open-sky segment carries a
+When `[ponding] enabled = true`, each open-sky segment carries a
 small surface-water bucket `surface_h` (in metres of water). Rain
 first adds to the bucket; what infiltrates each substep is the smaller
 of the bucket content and the cells' headroom toward `SE_MAX`; any
@@ -248,7 +248,7 @@ Components:
   thresholds at build time against the configured retention curve so
   the runtime path is a cheap piecewise-linear interpolation.
 - **Root density `β̂(z)`** is normalised so that `Σ β̂_i · V_i = 1`.
-  Three shapes are available via `[pde.feddes].root_distribution`:
+  Three shapes are available via `[feddes].root_distribution`:
   uniform, linear (max at surface, zero at bottom of plant block), and
   exponential (decay length configurable).
 - **Compensation `ω_c`** controls demand redistribution across stressed
@@ -609,7 +609,9 @@ dt_min   = "1s"          # floor for adaptive halving
 ic_se    = 0.35          # uniform IC
 # ic_water_table_depth = 1.5   # alternative: hydrostatic IC, metres
 
-[pde.feddes]
+# ponding + feddes are siblings of [pde] (not nested), so a whole-block [pde]
+# override on a child (e.g. the predictor) can never silently drop them.
+[feddes]
 enabled            = false   # opt in per site
 anaerobic          = false
 p0_pf              = 0.0
@@ -620,7 +622,7 @@ root_distribution  = "uniform"   # "uniform" | "linear" | "exponential"
 root_decay_length  = 0.3         # m, used by "exponential"
 omega_c            = 1.0         # Šimůnek threshold; < 1 enables compensation
 
-[pde.ponding]
+[ponding]
 enabled  = false
 h_max_mm = 5.0
 ```
@@ -678,10 +680,10 @@ decision_probes = ["root_20", "root_40"]  # subset of [soil_simulation.probes] k
 | `tol_th` | water-content convergence tolerance | `_solve` constant | m³/m³ |
 | `ic_se` | uniform initial saturation | `[pde].ic_se` | – |
 | `WT depth` | hydrostatic-IC water-table depth | `[pde].ic_water_table_depth` | m |
-| `P0…P3` | Feddes pF thresholds | `[pde.feddes].p*_pf` | pF |
-| `ω_c` | Šimůnek compensation threshold | `[pde.feddes].omega_c` | – |
-| `β̂(z)` | normalised root density | `[pde.feddes].root_distribution` | 1/m³ |
-| `h_max` | ponding-bucket overflow depth | `[pde.ponding].h_max_mm` | mm |
+| `P0…P3` | Feddes pF thresholds | `[feddes].p*_pf` | pF |
+| `ω_c` | Šimůnek compensation threshold | `[feddes].omega_c` | – |
+| `β̂(z)` | normalised root density | `[feddes].root_distribution` | 1/m³ |
+| `h_max` | ponding-bucket overflow depth | `[ponding].h_max_mm` | mm |
 | `SE_MIN/MAX` | per-step saturation clip band | `1e-6 / 0.999` | – |
 
 ---

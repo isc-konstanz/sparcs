@@ -3,15 +3,17 @@
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Unit tests for ``SoilPredictor._resolve_ode_config`` -- the guard that keeps the
-predictor's watering-pond cap consistent with the live ``soil_simulation``.
+predictor's surface forcing (ponding + feddes) consistent with the live
+``soil_simulation``.
 
-The predictor builds its PDE from its OWN ``[pde]`` block, so any key it does not
-restate silently takes the ``PDEConfig`` default. For ponding that default is
-5 mm ``watering_h_max_mm`` while the live sim ponds to 50 mm, so a candidate
-watering roll overflows ~10x sooner and the horizon reads too dry. The guard
-inherits the sim's ``PondingConfig`` when (and only when) the predictor omits its
-own ``[pde.ponding]``. These tests pin the three-branch contract without building
-a mesh or running FiPy -- ``PDEConfig`` construction is pure config parsing.
+``[ponding]`` and ``[feddes]`` are sibling blocks of ``[pde]`` (not nested under
+it), so a whole-block ``[pde]`` override on the predictor cannot silently drop
+them. The predictor inherits the sim's ponding/feddes unless it supplies its own
+sibling block, which then wins. Before this, ponding lived under ``[pde]`` and a
+predictor that restated ``[pde]`` (for a coarser dt) silently reverted
+``watering_h_max_mm`` to the 5 mm default while the sim ponded to 50 mm, biasing
+the recommendation dry. These tests pin the contract without building a mesh --
+``PDEConfig`` construction is pure config parsing.
 """
 
 import pytest
@@ -21,6 +23,7 @@ from lories import Configurations
 soil_predictor = pytest.importorskip("sparcs.components.agriculture.simulation.soil_predictor")
 SoilPredictor = soil_predictor.SoilPredictor
 PDEConfig = soil_predictor.PDEConfig
+apply_surface_forcing = soil_predictor.apply_surface_forcing
 
 
 def _configs(tmp_path, name="t.conf", **values) -> Configurations:
@@ -28,54 +31,79 @@ def _configs(tmp_path, name="t.conf", **values) -> Configurations:
 
 
 def _live_soil_pde(tmp_path) -> PDEConfig:
-    """A parsed sim PDEConfig with a distinctive, non-default ponding (50 mm) and
-    a non-default rain shadow, standing in for the live ``soil_simulation``."""
+    """A parsed sim PDEConfig standing in for the live ``soil_simulation``: its
+    ``[pde]`` plus the sibling ``[ponding]`` (50 mm) and ``[feddes]`` (enabled),
+    attached exactly as ``SoilSimulation.configure`` does."""
     model_block = _configs(tmp_path, name="model.conf")
-    soil_pde_cfg = _configs(
+    soil_block = _configs(
         tmp_path,
         name="soil.conf",
-        rain_shadow_width=1.5,
+        pde={"rain_shadow_width": 1.5},
         ponding={"h_max_mm": 8.0, "watering_h_max_mm": 50.0},
+        feddes={"enabled": True, "p2_pf": 2.5},
     )
-    return PDEConfig(soil_pde_cfg, model_configs=model_block)
+    soil_pde = PDEConfig(soil_block.get_member("pde"), model_configs=model_block)
+    apply_surface_forcing(soil_pde, soil_block)
+    assert soil_pde.ponding.watering_h_max_mm == 50.0  # guard: fixture is set up right
+    assert soil_pde.feddes.enabled is True
+    return soil_pde
 
 
-def test_own_pde_without_ponding_inherits_sim_ponding(tmp_path):
-    """Own ``[pde]`` but no ``[pde.ponding]`` -> the sim's PondingConfig is
-    inherited verbatim (same object), so the 50 mm cap survives; every other key
-    still comes from the predictor's own block (ponding is the ONLY key inherited)."""
+def test_own_pde_without_forcing_inherits_sim_forcing(tmp_path):
+    """Own ``[pde]`` but no ``[ponding]`` / ``[feddes]`` -> both are inherited from
+    the sim verbatim (same objects); the solver keys still come from the
+    predictor's own ``[pde]``, so the two concerns are decoupled."""
     soil_pde = _live_soil_pde(tmp_path)
-    predictor_cfg = _configs(tmp_path, pde={"dt": "40s", "rain_shadow_width": 0.7})
+    predictor_cfg = _configs(tmp_path, pde={"dt": "5min", "rain_shadow_width": 0.7})
     model_block = _configs(tmp_path, name="model.conf")
 
     ode = SoilPredictor._resolve_ode_config(predictor_cfg, soil_pde, model_block)
 
     assert ode is not soil_pde  # own [pde] -> a distinct PDEConfig
-    assert ode.ponding is soil_pde.ponding  # ...but ponding is the sim's object
+    assert ode.ponding is soil_pde.ponding  # ...but forcing is inherited
     assert ode.ponding.watering_h_max_mm == 50.0
-    # Non-ponding keys stay predictor-local -- rain shadow is NOT inherited.
+    assert ode.feddes is soil_pde.feddes
+    assert ode.feddes.enabled is True
+    # Solver keys stay predictor-local -- a [pde] override no longer touches forcing.
     assert ode.rain_shadow_width == 0.7
-    assert ode.dt == 40.0
+    assert ode.dt == 300.0
 
 
-def test_own_ponding_block_wins(tmp_path):
-    """An explicit ``[pde.ponding]`` on the predictor overrides the sim's cap; the
-    predictor's own PondingConfig is used and no inheritance occurs."""
+def test_own_ponding_block_wins_and_does_not_touch_feddes(tmp_path):
+    """An explicit ``[ponding]`` on the predictor overrides the sim's cap; feddes,
+    left unspecified, is still inherited (the blocks are independent)."""
     soil_pde = _live_soil_pde(tmp_path)
-    predictor_cfg = _configs(tmp_path, pde={"dt": "40s", "ponding": {"watering_h_max_mm": 17.0}})
+    predictor_cfg = _configs(tmp_path, pde={"dt": "5min"}, ponding={"watering_h_max_mm": 17.0})
     model_block = _configs(tmp_path, name="model.conf")
 
     ode = SoilPredictor._resolve_ode_config(predictor_cfg, soil_pde, model_block)
 
     assert ode.ponding is not soil_pde.ponding
     assert ode.ponding.watering_h_max_mm == 17.0
+    assert ode.feddes is soil_pde.feddes  # feddes untouched -> inherited
+    assert ode.feddes.enabled is True
+
+
+def test_own_feddes_block_wins_and_does_not_touch_ponding(tmp_path):
+    """The mirror case: an explicit ``[feddes]`` overrides while ponding, left
+    unspecified, is inherited -- confirming ponding and feddes are decoupled."""
+    soil_pde = _live_soil_pde(tmp_path)
+    predictor_cfg = _configs(tmp_path, pde={"dt": "5min"}, feddes={"enabled": False})
+    model_block = _configs(tmp_path, name="model.conf")
+
+    ode = SoilPredictor._resolve_ode_config(predictor_cfg, soil_pde, model_block)
+
+    assert ode.feddes is not soil_pde.feddes
+    assert ode.feddes.enabled is False
+    assert ode.ponding is soil_pde.ponding  # ponding untouched -> inherited
+    assert ode.ponding.watering_h_max_mm == 50.0
 
 
 def test_no_pde_block_inherits_soil_pde_wholesale(tmp_path):
     """No ``[pde]`` block at all -> the predictor inherits the sim's PDEConfig
-    object outright (unchanged from before the guard), ponding included."""
+    object outright, forcing included."""
     soil_pde = _live_soil_pde(tmp_path)
-    predictor_cfg = _configs(tmp_path)  # no pde member
+    predictor_cfg = _configs(tmp_path)  # no pde / ponding / feddes members
     model_block = _configs(tmp_path, name="model.conf")
 
     ode = SoilPredictor._resolve_ode_config(predictor_cfg, soil_pde, model_block)
@@ -83,3 +111,4 @@ def test_no_pde_block_inherits_soil_pde_wholesale(tmp_path):
     assert ode is soil_pde
     assert ode.ponding is soil_pde.ponding
     assert ode.ponding.watering_h_max_mm == 50.0
+    assert ode.feddes is soil_pde.feddes

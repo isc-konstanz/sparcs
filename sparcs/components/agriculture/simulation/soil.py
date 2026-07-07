@@ -47,6 +47,7 @@ from ._soil import (  # noqa: E402, F401
     SoilBase,
     SoilPDECore,
     SolveResult,
+    apply_surface_forcing,
     create_mesh,
     ensure_mesh,
     resolve_probe_from_sensor,
@@ -198,6 +199,8 @@ class SoilSimulation(SoilBase):
                 self.name,
             )
         self._ode_config = PDEConfig(configs.get_member("pde", defaults={}), model_configs=model_block)
+        # ponding + feddes are sibling blocks of [pde], not nested under it.
+        apply_surface_forcing(self._ode_config, configs)
 
         self.data.add(SoilSimulation.SIMULATION_STATE, aggregate="last", logger={"enabled": True})
         for c in (

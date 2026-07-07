@@ -36,7 +36,7 @@ from sparcs.components.agriculture.simulation.soil import (
 )
 
 from . import plot_render
-from ._soil import ClipDiagnostics, FluxRates, MeshConfig, SoilBase, ensure_mesh
+from ._soil import ClipDiagnostics, FluxRates, MeshConfig, SoilBase, apply_surface_forcing, ensure_mesh
 
 _DEFAULT_HORIZON: str = "24h"
 _DEFAULT_SAVE_FREQ: str = "1h"
@@ -207,27 +207,34 @@ class SoilPredictor(SoilBase):
         soil_pde: PDEConfig,
         model_configs: Configurations,
     ) -> PDEConfig:
-        """Build the predictor's PDE config, inheriting ponding from the live sim.
+        """Build the predictor's PDE config, inheriting surface forcing from the sim.
 
-        The predictor parses its OWN ``[pde]`` block, so any key it does not
-        restate silently falls back to the ``PDEConfig`` default. That is
-        intentional for most keys -- the predictor warm-starts from live soil
-        state, so its IC keys stay predictor-local -- but ponding must track the
-        live ``soil_simulation``: a predictor that keeps the 5 mm
+        The predictor parses its OWN ``[pde]`` block (solver / IC / timestep), so
+        any key it does not restate falls back to the ``PDEConfig`` default. That
+        is intentional -- the predictor warm-starts from live soil state, so its IC
+        keys stay predictor-local. But the surface-forcing blocks ``[ponding]`` and
+        ``[feddes]`` are siblings of ``[pde]`` (``soil_pde`` already carries the
+        live sim's, attached by the caller), and they must track the sim unless the
+        predictor deliberately overrides them: a predictor left on the 5 mm
         ``watering_h_max_mm`` default while the sim ponds to 50 mm overflows its
-        watering rolls ~10x sooner, reading too dry and biasing the
-        recommendation. So when the predictor has its own ``[pde]`` but omits
-        ``[pde.ponding]``, inherit the sim's parsed ``PondingConfig`` verbatim.
-        An explicit ``[pde.ponding]`` still wins; with no ``[pde]`` block at all
-        the predictor inherits ``soil_pde`` wholesale. Ponding is the only key
-        inherited this way (rain-shadow stays explicit).
+        watering rolls ~10x sooner, reading too dry and biasing the recommendation.
+
+        Contract: with no ``[pde]`` block the predictor inherits ``soil_pde``
+        wholesale (forcing included); with its own ``[pde]`` it overrides the
+        solver keys but still inherits the sim's ponding + feddes, unless it
+        supplies its own ``[soil_predictor.ponding]`` / ``[soil_predictor.feddes]``
+        (which then win via apply_surface_forcing).
         """
-        if not configs.has_member("pde"):
-            return soil_pde
-        pde_block = configs.get_member("pde")
-        ode_config = PDEConfig(pde_block, model_configs=model_configs)
-        if not pde_block.has_member("ponding"):
-            ode_config.ponding = soil_pde.ponding
+        if configs.has_member("pde"):
+            ode_config = PDEConfig(configs.get_member("pde"), model_configs=model_configs)
+        else:
+            ode_config = soil_pde
+        # Seed the sim's surface forcing, then let the predictor's own sibling
+        # blocks override it. (In the no-[pde] branch ode_config IS soil_pde, so the
+        # seed is a no-op and only an explicit predictor override changes anything.)
+        ode_config.ponding = soil_pde.ponding
+        ode_config.feddes = soil_pde.feddes
+        apply_surface_forcing(ode_config, configs)
         return ode_config
 
     def configure(self, configs: Configurations) -> None:
@@ -269,6 +276,9 @@ class SoilPredictor(SoilBase):
             soil_block.get_member("pde", defaults={}, ensure_exists=True),
             model_configs=model_block,
         )
+        # Attach the live sim's ponding + feddes (sibling blocks of its [pde]) so
+        # soil_pde carries the sim's surface forcing for the predictor to inherit.
+        apply_surface_forcing(soil_pde, soil_block)
 
         drip_block = configs.get_member("drip", defaults={}, ensure_exists=True)
         nozzle_flow_lph = drip_block.get_float("nozzle_flow_lph", default=_DEFAULT_NOZZLE_FLOW_LPH)

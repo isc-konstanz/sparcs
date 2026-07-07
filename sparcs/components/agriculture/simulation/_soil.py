@@ -445,15 +445,12 @@ class PDEConfig:
         else:
             self.cold_start = to_timedelta("3h")
 
-        feddes_block: Optional[Configurations] = None
-        if hasattr(configs, "has_member") and configs.has_member("feddes"):
-            feddes_block = configs.get_member("feddes", defaults={})
-        self.feddes: FeddesConfig = FeddesConfig(feddes_block)
-
-        ponding_block: Optional[Configurations] = None
-        if hasattr(configs, "has_member") and configs.has_member("ponding"):
-            ponding_block = configs.get_member("ponding", defaults={})
-        self.ponding: PondingConfig = PondingConfig(ponding_block)
+        # Surface-forcing configs (ponding, feddes) are sibling blocks of [pde] at
+        # the soil-component level, NOT nested under [pde] -- so a whole-block [pde]
+        # override cannot silently drop them. They default here and are populated
+        # from the component's [ponding]/[feddes] blocks via apply_surface_forcing.
+        self.feddes: FeddesConfig = FeddesConfig(None)
+        self.ponding: PondingConfig = PondingConfig(None)
 
     def build_model(self) -> SoilModel:
         """Instantiate the configured :class:`SoilModel` via the factory."""
@@ -467,6 +464,23 @@ class PDEConfig:
         if self.bpar is not None:
             kwargs["bpar"] = self.bpar
         return create_soil_model(self.model, **kwargs)
+
+
+def apply_surface_forcing(ode_config: PDEConfig, configs: Optional[Configurations]) -> PDEConfig:
+    """Populate ``ode_config.ponding`` / ``.feddes`` from a soil component's
+    sibling ``[ponding]`` / ``[feddes]`` blocks (peers of ``[pde]``, not nested).
+
+    A block that is absent leaves the current value untouched, so the caller can
+    seed inherited defaults first (e.g. a predictor seeding the live sim's forcing)
+    and let the component's own block override. Keeping ponding and feddes out of
+    ``[pde]`` means a whole-block ``[pde]`` override can never silently drop them.
+    """
+    if configs is not None and hasattr(configs, "has_member"):
+        if configs.has_member("ponding"):
+            ode_config.ponding = PondingConfig(configs.get_member("ponding", defaults={}))
+        if configs.has_member("feddes"):
+            ode_config.feddes = FeddesConfig(configs.get_member("feddes", defaults={}))
+    return ode_config
 
 
 # eq=False: identity equality avoids ambiguous numpy array comparisons.
