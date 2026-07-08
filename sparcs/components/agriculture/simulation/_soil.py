@@ -48,7 +48,8 @@ from sparcs.components.agriculture.soil import (
 )
 
 logging.getLogger("fipy").setLevel(logging.WARNING)
-np.seterr(all="ignore")
+
+logger = logging.getLogger(__name__)
 
 RHO_W: float = 1000.0  # kg/m³
 SE_MIN: float = 1e-6  # effective-saturation floor for source clipping
@@ -539,7 +540,6 @@ class SoilPDECore:
     plant_volume: float
 
     theta_diff: float  # θ_s - θ_r
-    irrigation_factor: float  # 1 / vol_watering [1/m³]
     rain_face_len: float  # Σ face_len over open-sky [m]
 
     _feddes_se_p2: Optional[float]
@@ -606,14 +606,16 @@ class SoilPDECore:
         ic_wt = self.ode_config.ic_water_table_depth
         if ic_wt is not None:
             rel_sat.setValue(self._hydrostatic_ic_array(ic_wt))
-            logging.info(
+            logger.info(
                 "SoilPDECore: hydrostatic IC (water table at %.2f m below surface) Se min=%.3f max=%.3f",
                 ic_wt,
                 float(np.min(rel_sat.value)),
                 float(np.max(rel_sat.value)),
             )
         else:
-            rel_sat.setValue(float(self.ode_config.ic_se))
+            # Clamp the unvalidated config value: an ic_se of exactly 0/1 sits on
+            # the retention curve's singularities before any post-sweep clipping.
+            rel_sat.setValue(float(np.clip(self.ode_config.ic_se, SE_MIN, SE_MAX)))
         rel_sat.updateOld()
 
         self.rel_sat = rel_sat
@@ -656,8 +658,6 @@ class SoilPDECore:
         self.plant_volume = float(cell_volumes[self.plant_cells].sum())
 
         self.theta_diff = self.ode_config.theta_s - self.ode_config.theta_r
-        watering_vol = self.segment_cell_volume.get("WateringTopSegment", 0.0)
-        self.irrigation_factor = 1.0 / watering_vol if watering_vol > 0 else 0.0
 
         # Per-segment fraction of rain reaching the soil (1 = fully open, 0 = under modules).
         self.rain_open_fraction = self._compute_rain_open_fractions(names)
@@ -731,7 +731,7 @@ class SoilPDECore:
             self._feddes_se_p1 = None
 
         if not (self._feddes_se_p2 > self._feddes_se_p3):
-            logging.warning(
+            logger.warning(
                 "Feddes pF thresholds map to non-monotone Se (P2 → Se=%.3f, "
                 "P3 → Se=%.3f). Check pF ordering; dry ramp will be disabled.",
                 self._feddes_se_p2,
@@ -761,7 +761,7 @@ class SoilPDECore:
             raw = np.exp(-depth_m / L)
         else:
             if shape != "uniform":
-                logging.warning(
+                logger.warning(
                     "FeddesConfig.root_distribution=%r unknown; falling back to 'uniform'.",
                     shape,
                 )
@@ -996,14 +996,13 @@ class SoilPDECore:
         sweeps = 0
         for k in range(max_sweeps):
             try:
-                # np.seterr(all="ignore") at import is thread-local and misses the
-                # solver thread; scope the FP-warning suppression to the solve, where
-                # GMRES matmul on near-singular saturation matrices is the noise source.
+                # Scope FP-warning suppression to the solve: GMRES matmul on
+                # near-singular saturation matrices is the known noise source.
                 with np.errstate(all="ignore"):
                     res = eq.sweep(dt=dt, var=rel_sat, solver=self._solver)
             except Exception as e:  # noqa: BLE001  (scipy/FiPy raise a zoo of types)
                 if log_name is not None:
-                    logging.warning(
+                    logger.warning(
                         "%s: PDE sweep raised at dt=%.2fs (sweep %d): %s: %s",
                         log_name,
                         float(dt),
@@ -1030,7 +1029,7 @@ class SoilPDECore:
         finite = bool(np.all(np.isfinite(se)))
         if not finite:
             if log_name is not None:
-                logging.warning(
+                logger.warning(
                     "%s: PDE produced non-finite Se at dt=%.2fs after %d sweeps; state not committed.",
                     log_name,
                     float(dt),
@@ -1047,7 +1046,7 @@ class SoilPDECore:
             rel_sat.setValue(np.clip(se, SE_MIN, SE_MAX))
 
         if not converged and log_name is not None:
-            logging.warning(
+            logger.warning(
                 "%s: PDE non-converged at dt=%.2fs in %d sweeps (final |Δθ|=%.2e, residual=%.2e, tol_th=%.0e).",
                 log_name,
                 float(dt),
@@ -1122,7 +1121,7 @@ class SoilPDECore:
                 if not result.finite or result.error is not None:
                     self.set_state(snap)
                     out.skipped_s += attempted
-                    logging.warning(
+                    logger.warning(
                         "%s: substep skipped at dt_min=%gs (%s); state held for %.1fs of the window.",
                         log_name or "SoilPDECore",
                         dt_min,
@@ -1181,7 +1180,8 @@ class SoilPDECore:
 
     def save_state_blob(self) -> bytes:
         buf = io.BytesIO()
-        surface_names = np.array(list(self.surface_h.keys()), dtype=object)
+        # Fixed-width unicode (not object) dtype, so the blob needs no pickle.
+        surface_names = np.array(list(self.surface_h.keys()), dtype=np.str_)
         surface_values = np.array([self.surface_h[k] for k in surface_names], dtype=float)
         np.savez(
             buf,
@@ -1194,8 +1194,17 @@ class SoilPDECore:
 
     def load_state_blob(self, raw: bytes) -> None:
         buf = io.BytesIO(raw)
+        # allow_pickle stays for legacy blobs whose surface_names were saved
+        # with object dtype; new blobs are pickle-free.
         arrays = np.load(buf, allow_pickle=True)
-        self.rel_sat.setValue(arrays["rel_sat"])
+        rel_sat = np.asarray(arrays["rel_sat"])
+        expected = np.asarray(self.rel_sat.value).shape
+        if rel_sat.shape != expected:
+            raise ValueError(
+                f"soil state blob carries {rel_sat.shape} cells but the mesh has {expected}; "
+                "stale blob from a different mesh configuration"
+            )
+        self.rel_sat.setValue(rel_sat)
         self.rel_sat._old.setValue(arrays["rel_sat_old"])
         if "surface_names" in arrays.files and "surface_h" in arrays.files:
             names = arrays["surface_names"]
@@ -1241,40 +1250,12 @@ class SoilBase(Component):
         return self._pde.soil_model
 
     @property
-    def _segment_cells(self) -> dict[str, np.ndarray]:
-        return self._pde.segment_cells
-
-    @property
     def _segment_face_len(self) -> dict[str, float]:
         return self._pde.segment_face_len
 
     @property
-    def _segment_cell_volume(self) -> dict[str, float]:
-        return self._pde.segment_cell_volume
-
-    @property
     def _top_segment_names(self) -> list[str]:
         return self._pde.top_segment_names
-
-    @property
-    def _open_sky_segment_names(self) -> list[str]:
-        return self._pde.open_sky_segment_names
-
-    @property
-    def _plant_cells(self) -> np.ndarray:
-        return self._pde.plant_cells
-
-    @property
-    def _plant_volume(self) -> float:
-        return self._pde.plant_volume
-
-    @property
-    def _theta_diff(self) -> float:
-        return self._pde.theta_diff
-
-    @property
-    def _irrigation_factor(self) -> float:
-        return self._pde.irrigation_factor
 
     @property
     def _rain_face_len(self) -> float:
@@ -1376,107 +1357,120 @@ def create_mesh(mesh_config: MeshConfig) -> None:
     watering_width = mesh_config.watering_width
     d_x = mesh_config.dx
 
-    gmsh.initialize()
-    gmsh.model.add("soil")
-
-    # check parameters validity
+    # check parameters validity (before gmsh.initialize, so a bad config never
+    # leaves the gmsh library initialized)
     if width < plant_width + 2 * d_x:
         raise ValueError("Invalid parameters: width must be at least plant_width + 2 * d_x")
     if height <= 0:
         raise ValueError("Invalid parameters: height must be positive")
     if height <= plant_height:
         raise ValueError("Invalid parameters: height must be greater than plant_height")
-    if ((width - plant_width) / 2) % d_x != 0 and (width - plant_width) / (2 * d_x) > 0:
+    # Tolerance-based multiple check: a float modulo (`% d_x`) spuriously rejects
+    # valid widths (e.g. 0.3 % 0.1 != 0 in binary floats).
+    half_width = (width - plant_width) / 2
+    surface_count = round(half_width / d_x)
+    if surface_count < 1 or abs(half_width - surface_count * d_x) > 1e-9 * max(1.0, half_width):
         raise ValueError("Invalid parameters: (width - plant_width) must be a multiple of 2 * d_x")
 
-    surface_count = int((width - plant_width) / (2 * d_x))
+    gmsh.initialize()
+    try:
+        gmsh.model.add("soil")
 
-    lines_tl = []
-    lines_tr = []
+        lines_tl = []
+        lines_tr = []
 
-    # Top left
-    point_sim_tl = gmsh.model.geo.addPoint(0.0, 0.0, 0.0, dl)
-    point_prev = point_sim_tl
-    offset = d_x
-    for i in range(surface_count):
-        point = gmsh.model.geo.addPoint(offset + d_x * i, 0.0, 0.0, dl)
-        line = gmsh.model.geo.addLine(point_prev, point)
-        lines_tl.append(line)
+        # Top left
+        point_sim_tl = gmsh.model.geo.addPoint(0.0, 0.0, 0.0, dl)
+        point_prev = point_sim_tl
+        offset = d_x
+        for i in range(surface_count):
+            point = gmsh.model.geo.addPoint(offset + d_x * i, 0.0, 0.0, dl)
+            line = gmsh.model.geo.addLine(point_prev, point)
+            lines_tl.append(line)
+            gmsh.model.geo.synchronize()
+            gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line]), f"LeftTopSegment_{i}")
+            point_prev = point
+
+        # Plant
+        point_plant_tl = point_prev
+        point_watering_tl = gmsh.model.geo.addPoint(
+            d_x * surface_count + plant_width / 2 - watering_width / 2, 0.0, 0.0, dl
+        )
+        point_watering_tr = gmsh.model.geo.addPoint(
+            d_x * surface_count + plant_width / 2 + watering_width / 2, 0.0, 0.0, dl
+        )
+        point_plant_tr = gmsh.model.geo.addPoint(d_x * surface_count + plant_width, 0.0, 0.0, dl)
+        point_plant_bl = gmsh.model.geo.addPoint(d_x * surface_count, -plant_height, 0.0, dl)
+        point_plant_br = gmsh.model.geo.addPoint(d_x * surface_count + plant_width, -plant_height, 0.0, dl)
+
+        line_plant_top_1 = gmsh.model.geo.addLine(point_plant_tl, point_watering_tl)
+        line_plant_top_2 = gmsh.model.geo.addLine(point_watering_tl, point_watering_tr)
+        line_plant_top_3 = gmsh.model.geo.addLine(point_watering_tr, point_plant_tr)
+        line_plant_right = gmsh.model.geo.addLine(point_plant_tr, point_plant_br)
+        line_plant_bottom = gmsh.model.geo.addLine(point_plant_br, point_plant_bl)
+        line_plant_left = gmsh.model.geo.addLine(point_plant_bl, point_plant_tl)
+
+        loop_plant = gmsh.model.geo.addCurveLoop(
+            [
+                line_plant_top_1,
+                line_plant_top_2,
+                line_plant_top_3,
+                line_plant_right,
+                line_plant_bottom,
+                line_plant_left,
+            ]
+        )
+        surface_plant = gmsh.model.geo.addPlaneSurface([loop_plant])
         gmsh.model.geo.synchronize()
-        gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line]), f"LeftTopSegment_{i}")
-        point_prev = point
+        gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line_plant_top_1]), "PlantTopLeftSegment")
+        gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line_plant_top_2]), "WateringTopSegment")
+        gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line_plant_top_3]), "PlantTopRightSegment")
+        gmsh.model.setPhysicalName(2, gmsh.model.addPhysicalGroup(2, [surface_plant]), "PlantSurface")
 
-    # Plant
-    point_plant_tl = point_prev
-    point_watering_tl = gmsh.model.geo.addPoint(
-        d_x * surface_count + plant_width / 2 - watering_width / 2, 0.0, 0.0, dl
-    )
-    point_watering_tr = gmsh.model.geo.addPoint(
-        d_x * surface_count + plant_width / 2 + watering_width / 2, 0.0, 0.0, dl
-    )
-    point_plant_tr = gmsh.model.geo.addPoint(d_x * surface_count + plant_width, 0.0, 0.0, dl)
-    point_plant_bl = gmsh.model.geo.addPoint(d_x * surface_count, -plant_height, 0.0, dl)
-    point_plant_br = gmsh.model.geo.addPoint(d_x * surface_count + plant_width, -plant_height, 0.0, dl)
+        # Top right
+        point_prev = point_plant_tr
+        offset = d_x * surface_count + plant_width + d_x
+        for i in range(surface_count):
+            point = gmsh.model.geo.addPoint(offset + d_x * i, 0.0, 0.0, dl)
+            line = gmsh.model.geo.addLine(point_prev, point)
+            lines_tr.append(line)
+            gmsh.model.geo.synchronize()
+            gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line]), f"RightTopSegment_{i}")
+            point_prev = point
+        upper_right_point = point_prev
 
-    line_plant_top_1 = gmsh.model.geo.addLine(point_plant_tl, point_watering_tl)
-    line_plant_top_2 = gmsh.model.geo.addLine(point_watering_tl, point_watering_tr)
-    line_plant_top_3 = gmsh.model.geo.addLine(point_watering_tr, point_plant_tr)
-    line_plant_right = gmsh.model.geo.addLine(point_plant_tr, point_plant_br)
-    line_plant_bottom = gmsh.model.geo.addLine(point_plant_br, point_plant_bl)
-    line_plant_left = gmsh.model.geo.addLine(point_plant_bl, point_plant_tl)
+        # Ground layer
+        point_sim_bl = gmsh.model.geo.addPoint(0.0, -height, 0.0, dl)
+        point_sim_br = gmsh.model.geo.addPoint(width, -height, 0.0, dl)
 
-    loop_plant = gmsh.model.geo.addCurveLoop(
-        [line_plant_top_1, line_plant_top_2, line_plant_top_3, line_plant_right, line_plant_bottom, line_plant_left]
-    )
-    surface_plant = gmsh.model.geo.addPlaneSurface([loop_plant])
-    gmsh.model.geo.synchronize()
-    gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line_plant_top_1]), "PlantTopLeftSegment")
-    gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line_plant_top_2]), "WateringTopSegment")
-    gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line_plant_top_3]), "PlantTopRightSegment")
-    gmsh.model.setPhysicalName(2, gmsh.model.addPhysicalGroup(2, [surface_plant]), "PlantSurface")
+        line_sim_right = gmsh.model.geo.addLine(upper_right_point, point_sim_br)
+        line_sim_bottom = gmsh.model.geo.addLine(point_sim_br, point_sim_bl)
+        line_sim_left = gmsh.model.geo.addLine(point_sim_bl, point_sim_tl)
 
-    # Top right
-    point_prev = point_plant_tr
-    offset = d_x * surface_count + plant_width + d_x
-    for i in range(surface_count):
-        point = gmsh.model.geo.addPoint(offset + d_x * i, 0.0, 0.0, dl)
-        line = gmsh.model.geo.addLine(point_prev, point)
-        lines_tr.append(line)
+        loop_sim = gmsh.model.geo.addCurveLoop(
+            [
+                *lines_tl,
+                -line_plant_left,
+                -line_plant_bottom,
+                -line_plant_right,
+                *lines_tr,
+                line_sim_right,
+                line_sim_bottom,
+                line_sim_left,
+            ]
+        )
+        surface_sim = gmsh.model.geo.addPlaneSurface([loop_sim])
         gmsh.model.geo.synchronize()
-        gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line]), f"RightTopSegment_{i}")
-        point_prev = point
-    upper_right_point = point_prev
+        gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line_sim_bottom]), "GroundBottomSegment")
+        gmsh.model.setPhysicalName(2, gmsh.model.addPhysicalGroup(2, [surface_sim]), "GroundSurface")
 
-    # Ground layer
-    point_sim_bl = gmsh.model.geo.addPoint(0.0, -height, 0.0, dl)
-    point_sim_br = gmsh.model.geo.addPoint(width, -height, 0.0, dl)
+        gmsh.model.geo.synchronize()
+        gmsh.model.mesh.generate(2)
+        gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
 
-    line_sim_right = gmsh.model.geo.addLine(upper_right_point, point_sim_br)
-    line_sim_bottom = gmsh.model.geo.addLine(point_sim_br, point_sim_bl)
-    line_sim_left = gmsh.model.geo.addLine(point_sim_bl, point_sim_tl)
-
-    loop_sim = gmsh.model.geo.addCurveLoop(
-        [
-            *lines_tl,
-            -line_plant_left,
-            -line_plant_bottom,
-            -line_plant_right,
-            *lines_tr,
-            line_sim_right,
-            line_sim_bottom,
-            line_sim_left,
-        ]
-    )
-    surface_sim = gmsh.model.geo.addPlaneSurface([loop_sim])
-    gmsh.model.geo.synchronize()
-    gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line_sim_bottom]), "GroundBottomSegment")
-    gmsh.model.setPhysicalName(2, gmsh.model.addPhysicalGroup(2, [surface_sim]), "GroundSurface")
-
-    gmsh.model.geo.synchronize()
-    gmsh.model.mesh.generate(2)
-    gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
-
-    gmsh.write(mesh_config.filename)
+        gmsh.write(mesh_config.filename)
+    finally:
+        gmsh.finalize()
 
 
 def ensure_mesh(mesh_config: MeshConfig) -> None:

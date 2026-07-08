@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-sparcs.components.agriculture.soil_simulation
+sparcs.components.agriculture.simulation.soil
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-
+Live Richards-equation soil solver: advances on weather ticks, publishes
+flux diagnostics and probe tensions, and anchors to tensiometer readings.
 """
 
 from __future__ import annotations
@@ -28,32 +29,23 @@ from lories.util import to_timedelta
 
 from . import plot_render
 from ._anchor import AnchorConfig, AnchorSensor, SensorOverrides, anchor_update
-
-logging.getLogger("fipy").setLevel(logging.WARNING)
-np.seterr(all="ignore")
-
-from ._soil import (  # noqa: E402, F401
-    RHO_W,
+from ._soil import (
     SE_MAX,
     SE_MIN,
     ClipDiagnostics,
-    FeddesConfig,
     FluxRates,
     MeshConfig,
     PDEConfig,
     PlotConfig,
-    PondingConfig,
     ProbeSpec,
     SoilBase,
-    SoilPDECore,
-    SolveResult,
     apply_surface_forcing,
-    create_mesh,
     ensure_mesh,
     resolve_probe_from_sensor,
     resolve_probes,
-    top_segment_names_from_mesh,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _walk_components(root) -> list:
@@ -190,7 +182,7 @@ class SoilSimulation(SoilBase):
         # Retention params from [model]; [pde] carries only solver/IC/timestep knobs.
         model_block = configs.get_member("model", defaults={})
         if not any(k in model_block for k in ("theta_r", "theta_s", "alpha", "n", "k_s")):
-            logging.warning(
+            logger.warning(
                 "%s: no [model] retention params found (field-level [model] not "
                 "inherited?). Using built-in van Genuchten defaults; any retention "
                 "params under [pde] are ignored; move them into a [model] block.",
@@ -224,12 +216,6 @@ class SoilSimulation(SoilBase):
             self._plot_mesh(os.path.join(structure_dir, "mesh.png"))
 
         self._plot_progress = configs.get_bool("plot_progress", default=True)
-        logging.info(
-            "%s: plot_progress=%s (configs keys: %s)",
-            self.name,
-            self._plot_progress,
-            sorted(k for k in configs),
-        )
         if self._plot_progress:
             default_plot_dir = str(configs.dirs.data.joinpath("soil_simulation"))
             self._plot_config = PlotConfig(
@@ -244,7 +230,7 @@ class SoilSimulation(SoilBase):
             self.data.add(SoilSimulation.SOIL_PROGRESS_IMAGE, aggregate="last", logger={"enabled": True})
 
         self._pde = self._build_pde()
-        logging.info(
+        logger.info(
             "%s: soil model = %s (k_s=%.3e m/s, theta_r=%.3f, theta_s=%.3f)",
             self.name,
             self._soil_model.__class__.__name__,
@@ -262,7 +248,7 @@ class SoilSimulation(SoilBase):
         seg_et: dict[str, pd.DataFrame],
     ) -> dict[str, float]:
         if self._simulating:
-            logging.warning("%s: solve still running, skipping interval at %s", self.name, now)
+            logger.warning("%s: solve still running, skipping interval at %s", self.name, now)
             return {}
 
         self._simulating = True
@@ -274,11 +260,11 @@ class SoilSimulation(SoilBase):
                     # Discovery is dormant infra for the anchor; never let it
                     # break the live solve tick. Mark ready so it does not retry.
                     self._sensor_probes_ready = True
-                    logging.exception("%s: sensor-probe discovery failed; continuing", self.name)
+                    logger.exception("%s: sensor-probe discovery failed; continuing", self.name)
             # Cold start: spin up with current weather to approximate steady state.
             if self._last_simulated_at is None:
                 elapsed = self._ode_config.cold_start
-                logging.info(
+                logger.info(
                     "%s: cold start spin-up: %s with weather at %s",
                     self.name,
                     elapsed,
@@ -288,9 +274,9 @@ class SoilSimulation(SoilBase):
                 elapsed = now - self._last_simulated_at
 
             if not elapsed:
-                return
+                return {}
 
-            logging.debug("%s: advance dt=%s now=%s", self.name, elapsed, now)
+            logger.debug("%s: advance dt=%s now=%s", self.name, elapsed, now)
             elapsed_s = float(elapsed.total_seconds())
 
             rates = self._compute_flux_rates(et_data, seg_et, elapsed_s)
@@ -300,7 +286,7 @@ class SoilSimulation(SoilBase):
             storage_before = self._total_water() + self._pde.surface_water()
             interval = self._plot_config.interval if self._plot_progress else None
             clip_total = ClipDiagnostics()
-            elapsed_s = self._walk(
+            self._walk(
                 rates=rates,
                 window_s=elapsed_s,
                 clip_total=clip_total,
@@ -382,9 +368,15 @@ class SoilSimulation(SoilBase):
     def apply_state_blob(self, raw: bytes, timestamp: pd.Timestamp) -> None:
         if raw is None or len(raw) == 0:
             return
-        self._pde.load_state_blob(raw)
+        try:
+            self._pde.load_state_blob(raw)
+        except Exception:  # noqa: BLE001
+            # A blob from a different mesh (config changed between runs) must not
+            # kill the state-restore callback; cold-start instead.
+            logger.exception("%s: ignoring incompatible soil state blob from %s", self.name, timestamp)
+            return
         self._last_simulated_at = timestamp
-        logging.info("%s: restored soil state from %s", self.name, timestamp)
+        logger.info("%s: restored soil state from %s", self.name, timestamp)
 
     def _save_state(self, timestamp: pd.Timestamp) -> None:
         self.data[SoilSimulation.SIMULATION_STATE].set(timestamp, self._pde.save_state_blob())
@@ -438,7 +430,7 @@ class SoilSimulation(SoilBase):
         strip_mm_h = flow_m3s / watering_width * 3.6e6
         if strip_mm_h > SoilSimulation.STRIP_FLUX_WARN_MM_H:
             self._strip_flux_warned = True
-            logging.warning(
+            logger.warning(
                 "%s: irrigation strip flux %.0f mm/h exceeds %.0f mm/h. Check the "
                 "irrigation_flow values (must be true l/min, whole-field total) and "
                 "total_drip_line_length_m (%.1f m; must be n_rows * row_length).",
@@ -456,7 +448,7 @@ class SoilSimulation(SoilBase):
         clip_total: ClipDiagnostics,
         sim_t0: pd.Timestamp,
         plot_interval: Optional[pd.Timedelta],
-    ) -> float:
+    ) -> None:
         """Adaptive-dt walk over ``window_s``.
 
         Under-converged substeps at ``dt_min`` are accepted; non-finite ones are skipped.
@@ -479,22 +471,21 @@ class SoilSimulation(SoilBase):
         clip_total.add(result.clip)
 
         if result.skipped_s > 0:
-            logging.warning(
+            logger.warning(
                 "%s: held state through %.1fs of a %.1fs window (substeps "
-                "unsolvable at dt_min); mass-balance diagnostics exclude "
-                "the skipped slices.",
+                "unsolvable at dt_min); flux diagnostics assume forcing over "
+                "the full window, so drainage is misstated for the skipped slices.",
                 self.name,
                 result.skipped_s,
                 window_s,
             )
         if result.retries:
-            logging.debug(
+            logger.debug(
                 "%s: adaptive walk completed window=%.1fs with %d retry(s)",
                 self.name,
                 window_s,
                 result.retries,
             )
-        return window_s
 
     def _record_diagnostics(
         self,
@@ -537,7 +528,7 @@ class SoilSimulation(SoilBase):
             self._probes.append(probe)
 
         if self._probes:
-            logging.info(
+            logger.info(
                 "%s: registered %d tension probe(s)",
                 self.name,
                 len(self._probes),
@@ -598,7 +589,7 @@ class SoilSimulation(SoilBase):
                 anchor_sensors.append(AnchorSensor(key=comp.key, x_offset_cm=comp.x_offset, depth_cm=comp.depth))
                 anchor_channels[comp.key] = comp.data[SoilMoisture.WATER_TENSION]
             except Exception:
-                logging.exception(
+                logger.exception(
                     "%s: failed to derive probe from sensor %s",
                     self.name,
                     getattr(comp, "key", "?"),
@@ -607,13 +598,13 @@ class SoilSimulation(SoilBase):
         self._anchor_sensors = anchor_sensors
         self._anchor_channels = anchor_channels
         if found:
-            logging.info("%s: discovered %d sensor probe(s) for anchoring", self.name, len(found))
+            logger.info("%s: discovered %d sensor probe(s) for anchoring", self.name, len(found))
 
     def _read_live_tension(self, sensor: AnchorSensor) -> tuple[Optional[pd.Timestamp], float]:
         """Live backend for anchor_update: the sensor's latest valid water-tension
         reading as ``(timestamp, hPa)``, or ``(None, nan)`` when it has none."""
         channel = self._anchor_channels.get(sensor.key)
-        if channel is None or not channel.is_valid:
+        if channel is None or not channel.is_valid():
             return None, float("nan")
         return channel.timestamp, float(channel.value)
 
@@ -647,7 +638,7 @@ class SoilSimulation(SoilBase):
         self._last_anchored.update(result.anchored_at)
         self.data[SoilSimulation.WATER_ANCHOR].set(now, self._total_water() - water_after_walk)
         for key, innovation in result.innovations.items():
-            logging.debug("%s: anchor innovation %s = %+.4f Se", self.name, key, innovation)
+            logger.debug("%s: anchor innovation %s = %+.4f Se", self.name, key, innovation)
 
     def _plot_mesh(self, save_path: Optional[str] = None):
         mesh = meshio.read(self._mesh_config.filename)
@@ -708,7 +699,7 @@ class SoilSimulation(SoilBase):
         fig.tight_layout()
         if save_path:
             fig.savefig(save_path, dpi=200)
-            logging.info("%s: wrote mesh structure to %s", self.name, save_path)
+            logger.info("%s: wrote mesh structure to %s", self.name, save_path)
         plt.close(fig)
 
     def _render_progress_safe(self, sim_t: pd.Timestamp) -> None:
@@ -719,7 +710,7 @@ class SoilSimulation(SoilBase):
         try:
             self._render_progress(sim_t)
         except Exception:  # noqa: BLE001
-            logging.exception("%s: progress-plot render failed; disabling.", self.name)
+            logger.exception("%s: progress-plot render failed; disabling.", self.name)
             self._plot_progress = False
 
     def _init_progress_figure(self) -> None:
@@ -729,7 +720,7 @@ class SoilSimulation(SoilBase):
 
         if self._plot_config.show and not can_show:
             reason = "solver runs on a worker thread" if not on_main_thread else "no GUI display available"
-            logging.warning(
+            logger.warning(
                 "%s: progress plot 'show' disabled (%s). Use 'live = true' and "
                 "open progress.html in a browser for a live view.",
                 self.name,
@@ -755,7 +746,7 @@ class SoilSimulation(SoilBase):
 
         if self._plot_config.live:
             self._write_progress_html()
-            logging.info(
+            logger.info(
                 "%s: live progress at file://%s/progress.html (refreshes every 2s)",
                 self.name,
                 self._plot_config.dir,
