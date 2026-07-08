@@ -3,11 +3,13 @@
 sparcs.components.agriculture.simulation.soil_predictor
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Forecast-driven horizon predictor. Integrates the Richards-equation soil
-PDE over the available weather forecast with no irrigation applied and
-publishes the predicted relative saturation at every configured probe.
-Optionally archives saturation-field snapshots at ``save_freq`` cadence
-as npz blobs (``predict_state``) and PNGs (``predict_plot``).
+Forecast-driven horizon predictor. Rolls the Richards-equation soil PDE
+over the available weather forecast for every watering candidate on the
+configured ladder, publishes the recommended candidate's forecast as signed
+water tension (hPa) at every configured probe, and persists the
+recommendation row plus the all-candidate trajectory table. Optionally
+archives saturation-field snapshots at ``save_freq`` cadence as npz blobs
+(``predict_state``) and PNGs (``predict_plot``).
 """
 
 from __future__ import annotations
@@ -27,16 +29,23 @@ import pandas as pd
 from lories.components.weather import Weather
 from lories.typing import Configurations
 from lories.util import floor_date, to_timedelta
-from sparcs.components.agriculture.simulation.soil import (
+from sparcs.components.agriculture.simulation.soil import SoilSimulation
+
+from . import plot_render
+from ._soil import (
+    ClipDiagnostics,
+    FluxRates,
+    MeshConfig,
     PDEConfig,
     ProbeSpec,
+    SoilBase,
     SoilPDECore,
-    SoilSimulation,
+    apply_surface_forcing,
+    ensure_mesh,
     resolve_probes,
 )
 
-from . import plot_render
-from ._soil import ClipDiagnostics, FluxRates, MeshConfig, SoilBase, apply_surface_forcing, ensure_mesh
+logger = logging.getLogger(__name__)
 
 _DEFAULT_HORIZON: str = "24h"
 _DEFAULT_SAVE_FREQ: str = "1h"
@@ -52,8 +61,8 @@ _DEFAULT_OFFSET_MIN: int = 60
 _DEFAULT_COOLDOWN_MIN: int = 60
 
 # Drip-flow derivation defaults; mirrors the [soil_simulation] default of a
-# single already-per-metre line (see soil.py:186) when a field has no
-# [soil_predictor.drip] block of its own.
+# single already-per-metre line (SoilSimulation.configure's
+# total_drip_line_length_m) when a field has no [soil_predictor.drip] block.
 _DEFAULT_NOZZLE_FLOW_LPH: float = 1.0
 _DEFAULT_NOZZLE_COUNT: int = 1
 _DEFAULT_DRIP_LINE_LENGTH_M: float = 1.0
@@ -122,9 +131,10 @@ class SoilPredictor(SoilBase):
     _RECOMMEND_TABLE_NAME: str = "soil_predictor_recommendation"
 
     # Trajectory-table channels (direct connector write). Distinct-key scheme:
-    # every trajectory column uses a `traj_`/`w{i}_min` prefix so it can never
-    # collide with a legacy auto-logged channel key (`predict_<probe>`,
-    # `timestamp_creation`, ...) -- see the module docstring / configure().
+    # the timestamp/probe columns carry a `traj_` prefix and the PK columns are
+    # `w{i}_min`, so none can collide with a legacy auto-logged channel key
+    # (`predict_<probe>`, `timestamp_creation`, ...); `is_recommended` has no
+    # legacy counterpart -- see the module docstring / configure().
     _TRAJ_TIMESTAMP_CREATION_KEY: str = "traj_timestamp_creation"
     _TRAJ_IS_RECOMMENDED_KEY: str = "is_recommended"
     _TRAJ_TABLE_NAME: str = "soil_predictor_trajectory"
@@ -334,7 +344,7 @@ class SoilPredictor(SoilBase):
         if self._logger_id is not None:
             self._logger_id = str(self._logger_id)
         else:
-            logging.warning(
+            logger.warning(
                 "%s: [soil_predictor].logger not configured; the all-candidate "
                 "trajectory table will not be written (the recommendation channels "
                 "still log normally).",
@@ -359,7 +369,7 @@ class SoilPredictor(SoilBase):
         decision_probes_cfg = configs.get("decision_probes", default=None)
         if not decision_probes_cfg:
             self._decision_probes = list(all_probe_ids)
-            logging.warning(
+            logger.warning(
                 "%s: decision_probes not configured; using ALL probes (%s) for the "
                 "tension decision -- surface and deep probes may distort the result.",
                 self.name,
@@ -380,7 +390,7 @@ class SoilPredictor(SoilBase):
                     "would have no probe to evaluate. Fix the decision_probes ids."
                 )
             if unknown:
-                logging.warning(
+                logger.warning(
                     "%s: decision_probes %s not found among resolved probe channel-ids "
                     "%s; unknown ids are kept as configured but will never contribute "
                     "a tension sample.",
@@ -438,7 +448,7 @@ class SoilPredictor(SoilBase):
             self.data.add(c, aggregate="last", logger={"enabled": True})
 
         if not self._probes:
-            logging.warning(
+            logger.warning(
                 "%s: no probes resolved from [soil_simulation.probes]; "
                 "predictor will still run but has no per-probe channels to "
                 "publish.",
@@ -558,9 +568,9 @@ class SoilPredictor(SoilBase):
     @staticmethod
     def _current_boundary(now: pd.Timestamp, tz, interval_min: int, offset_min: int) -> pd.Timestamp:
         """Most-recent run boundary at or before ``now``, site-local. Mirrors the
-        WeatherForecast pattern (lories ``forecast.py:98-101``).
+        interval/offset pattern of lories ``WeatherForecast`` (forecast.py).
         """
-        boundary = floor_date(now, tz, freq=f"{interval_min}T") + pd.Timedelta(minutes=offset_min)
+        boundary = floor_date(now, tz, freq=f"{interval_min}min") + pd.Timedelta(minutes=offset_min)
         if boundary > now:
             boundary -= pd.Timedelta(minutes=interval_min)
         return boundary
@@ -575,7 +585,7 @@ class SoilPredictor(SoilBase):
         always emits a non-null value.
         """
         if forecast_creation is None:
-            logging.debug(
+            logger.debug(
                 "%s: forecast_creation unavailable (upstream "
                 "weather.forecast.timestamp_creation not valid yet); "
                 "falling back to now=%s for the PK column.",
@@ -587,7 +597,7 @@ class SoilPredictor(SoilBase):
         tz = self.context.location.timezone
         boundary = self._current_boundary(now, tz, self._interval_min, self._offset_min)
         if boundary == self._last_boundary_run:
-            logging.debug(
+            logger.debug(
                 "%s: predict skipped (no new %d-min boundary since %s).",
                 self.name,
                 self._interval_min,
@@ -597,7 +607,7 @@ class SoilPredictor(SoilBase):
 
         key = (now, forecast_creation)
         if self._last_predicted_key == key:
-            logging.debug(
+            logger.debug(
                 "%s: predict skipped (already published for now=%s, creation=%s).",
                 self.name,
                 now,
@@ -607,7 +617,7 @@ class SoilPredictor(SoilBase):
 
         forecast = self._fetch_forecast(now)
         if forecast is None or forecast.empty:
-            logging.info(
+            logger.info(
                 "%s: predict skipped: no forecast rows in [%s, %s].",
                 self.name,
                 now,
@@ -618,11 +628,11 @@ class SoilPredictor(SoilBase):
         field = self.context
         soil = getattr(field, "soil_simulation", None)
         if soil is None:
-            logging.info("%s: predict skipped: no soil_simulation sibling.", self.name)
+            logger.info("%s: predict skipped: no soil_simulation sibling.", self.name)
             return
 
         if getattr(soil, "_last_simulated_at", None) is None:
-            logging.debug(
+            logger.debug(
                 "%s: predict skipped: live solver has no state yet (cold-start still running) at %s.",
                 self.name,
                 now,
@@ -639,10 +649,10 @@ class SoilPredictor(SoilBase):
         try:
             et_data, seg_et = field._run_chain(forecast, publish=False)
         except Exception:  # noqa: BLE001
-            logging.exception("%s: chain replay on forecast failed; skipping tick.", self.name)
+            logger.exception("%s: chain replay on forecast failed; skipping tick.", self.name)
             return
         if et_data.empty or et_data.shape[0] < 2:
-            logging.info(
+            logger.info(
                 "%s: predict skipped: chain replay returned %d row(s), need ≥ 2.",
                 self.name,
                 et_data.shape[0],
@@ -653,7 +663,7 @@ class SoilPredictor(SoilBase):
         try:
             zf_timestamps, zf_trajectories, zf_snapshots, zf_diagnostics = self._solve(ic_rel_sat, et_data, seg_et)
         except Exception:  # noqa: BLE001
-            logging.exception("%s: integration failed; skipping tick.", self.name)
+            logger.exception("%s: integration failed; skipping tick.", self.name)
             return
 
         # Se -> tension at the roll->publish boundary: the roll stays in Se (so the
@@ -713,7 +723,7 @@ class SoilPredictor(SoilBase):
                 )
                 published = True
             except Exception:  # noqa: BLE001
-                logging.exception(
+                logger.exception(
                     "%s: watering-grid roll-out/selection/publish failed "
                     "(now=%s, creation=%s); falling back to the zero-flow forecast.",
                     self.name,
@@ -732,7 +742,7 @@ class SoilPredictor(SoilBase):
                     forecast_creation,
                 )
             except Exception:  # noqa: BLE001
-                logging.exception(
+                logger.exception(
                     "%s: publishing results failed; predictor channels stay stale this tick (now=%s, creation=%s).",
                     self.name,
                     now,
@@ -741,7 +751,7 @@ class SoilPredictor(SoilBase):
                 return
 
         self._last_predicted_key = key
-        logging.info(
+        logger.info(
             "%s: predict OK: %d probes, %d rows emitted (now=%s, creation=%s).",
             self.name,
             len(self._probes),
@@ -761,7 +771,7 @@ class SoilPredictor(SoilBase):
                 self._write_trajectory_table(trajectory_frame)
                 self._write_trajectory_fields(ic_rel_sat, et_data, seg_et, horizon_start, horizon_end, chosen, now)
             except Exception:  # noqa: BLE001
-                logging.exception(
+                logger.exception(
                     "%s: recommendation/trajectory-write failed (now=%s, creation=%s); "
                     "the forecast published on the main channels is unaffected.",
                     self.name,
@@ -829,8 +839,8 @@ class SoilPredictor(SoilBase):
         """Fixed design flow from the drip layout: nozzle output x count, normalized
         per out-of-plane metre of row.
 
-        Mirrors the live sim's inline arithmetic at ``soil.py:412``
-        (``SoilSimulation._compute_flux_rates``), but the meter is DERIVED from the
+        Mirrors the live sim's inline arithmetic in
+        ``SoilSimulation._compute_flux_rates``, but the meter is DERIVED from the
         layout here instead of read from the live flow meter.
         """
         flow_lpm = nozzle_count * nozzle_flow_lph / 60.0
@@ -1115,7 +1125,7 @@ class SoilPredictor(SoilBase):
         # the segment-based save/restore would silently drop or misattribute a
         # window's water, so fall back to correct (unshared) independent rolls.
         if not all(segment_bounds[k] < segment_bounds[k + 1] for k in range(len(segment_bounds) - 1)):
-            logging.debug(
+            logger.debug(
                 "%s: caterpillar segment bounds not strictly increasing (%s); "
                 "falling back to independent per-candidate rolls.",
                 self.name,
@@ -1167,6 +1177,18 @@ class SoilPredictor(SoilBase):
                     )
                     prev_blob = self._pde.save_state_blob()
 
+            if not sweep and i + 1 < len(windows):
+                # A window whose durations are only 0min contributes no rungs, so the
+                # max-branch save above never ran; still advance the shared prefix
+                # across its segment, or every later window's roll would silently
+                # skip the weather in [bounds[i], bounds[i+1]].
+                self._pde.load_state_blob(prev_blob)
+                seg_timestamps, seg_trajectories = self._roll_segment(seg_idx, et_data, seg_et, [])
+                prefix_timestamps, prefix_trajectories = self._extend_trajectory(
+                    prefix_timestamps, prefix_trajectories, seg_timestamps, seg_trajectories
+                )
+                prev_blob = self._pde.save_state_blob()
+
         return results
 
     def _rollout_independent(
@@ -1209,7 +1231,7 @@ class SoilPredictor(SoilBase):
             try:
                 return self._rollout_parallel(ic_rel_sat, et_data, seg_et, horizon_start, horizon_end)
             except Exception:  # noqa: BLE001
-                logging.exception(
+                logger.exception(
                     "%s: parallel roll-out failed; falling back to the sequential caterpillar for this run.",
                     self.name,
                 )
@@ -1240,6 +1262,13 @@ class SoilPredictor(SoilBase):
         ladder = self._ladder
         # No point spawning more workers than candidates; always at least one.
         n_workers = max(1, min(self._max_workers, len(ladder)))
+        # Cap per-worker threading BEFORE the pool exists: spawn children inherit
+        # the parent's environment, and OpenMP/OpenBLAS read these at numpy import
+        # time -- which in a spawn child happens before the initializer runs, so
+        # setting them only in _worker_init is too late. The parent's own numpy is
+        # already initialized, so this does not throttle the live process.
+        os.environ["OMP_NUM_THREADS"] = "1"
+        os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
         ctx = multiprocessing.get_context("spawn")
         # The chain-replay frames carry lories Constant column labels (e.g.
         # Weather.PRECIPITATION). Constant is a str subclass whose __new__ takes
@@ -1277,7 +1306,7 @@ class SoilPredictor(SoilBase):
             for fut in as_completed(futures):
                 candidate, result = fut.result()
                 results[candidate] = result
-        logging.debug(
+        logger.debug(
             "%s: parallel roll-out complete: %d candidates across %d workers.",
             self.name,
             len(results),
@@ -1419,7 +1448,7 @@ class SoilPredictor(SoilBase):
         try:
             df = forecast_sub.data.to_frame(unique=False)
         except Exception as e:  # noqa: BLE001
-            logging.warning("%s: forecast read failed: %s", self.name, e)
+            logger.warning("%s: forecast read failed: %s", self.name, e)
             return None
         if df.empty:
             return None
@@ -1625,7 +1654,7 @@ class SoilPredictor(SoilBase):
                 try:
                     plot_values.append(self._render_snapshot_png(snapshots[t], t))
                 except Exception:  # noqa: BLE001
-                    logging.exception(
+                    logger.exception(
                         "%s: predict_plot render failed at %s; skipping remaining plot snapshots this tick.",
                         self.name,
                         t,
@@ -1653,13 +1682,13 @@ class SoilPredictor(SoilBase):
         recommendation history accumulates through the auto-logger -- no PK partner
         to keep in sync, unlike the forecast table.
 
-        Per-window minutes (unused windows -- i.e. ``chosen`` shorter than
-        ``_max_windows``, which cannot happen given the configure()-time length
-        check, but the fill below is defensive -- get ``0.0``, not the trajectory
-        table's ``-1`` sentinel; a "no window configured" reading of 0 minutes is
-        unambiguous on the advisory channel, whereas the sentinel is only meaningful
-        alongside the trajectory table's fixed-arity PK columns) and the total
-        watering minutes. A ``recommend_total_min`` of ``0`` is the "do nothing"
+        Per-window minutes: window indices beyond ``len(chosen)`` get ``0.0``
+        (deployments normally configure fewer windows than the fixed
+        ``_max_windows`` PK arity), not the trajectory table's ``-1`` sentinel --
+        a "no window configured" reading of 0 minutes is unambiguous on the
+        advisory channel, whereas the sentinel is only meaningful alongside the
+        trajectory table's fixed-arity PK columns. Plus the total watering
+        minutes: a ``recommend_total_min`` of ``0`` is the "do nothing"
         recommendation; there is no separate status channel.
 
         ``forecast_creation`` is accepted for call-site symmetry with the trajectory
@@ -1673,7 +1702,7 @@ class SoilPredictor(SoilBase):
             self.data[key].set(run_timestamp, minutes)
 
         self.data[self._RECOMMEND_TOTAL_KEY].set(run_timestamp, total_minutes)
-        logging.debug(
+        logger.debug(
             "%s: recommendation published: total=%.1fmin (now=%s).",
             self.name,
             total_minutes,
@@ -1743,19 +1772,19 @@ class SoilPredictor(SoilBase):
         if self._logger_id is None:
             return
         if frame.empty:
-            logging.debug("%s: trajectory frame empty; skipping direct write.", self.name)
+            logger.debug("%s: trajectory frame empty; skipping direct write.", self.name)
             return
 
         connector = self._resolve_logger_connector(self._logger_id)
         if connector is None:
-            logging.warning(
+            logger.warning(
                 "%s: logger connector '%s' not found; skipping the trajectory-table direct write.",
                 self.name,
                 self._logger_id,
             )
             return
         if not hasattr(connector, "write"):
-            logging.warning(
+            logger.warning(
                 "%s: logger connector '%s' (%s) has no write(); skipping the trajectory-table direct write.",
                 self.name,
                 self._logger_id,
@@ -1776,13 +1805,13 @@ class SoilPredictor(SoilBase):
         try:
             connector.write(write_frame)
         except Exception:  # noqa: BLE001
-            logging.exception(
+            logger.exception(
                 "%s: direct write of the trajectory table to logger '%s' failed.",
                 self.name,
                 self._logger_id,
             )
             return
-        logging.info(
+        logger.info(
             "%s: trajectory table written: %d rows to logger '%s'.",
             self.name,
             len(write_frame),
@@ -1865,7 +1894,7 @@ class SoilPredictor(SoilBase):
         try:
             os.makedirs(run_dir, exist_ok=True)
         except OSError:
-            logging.exception("%s: creating the trajectory field-plot dir '%s' failed.", self.name, run_dir)
+            logger.exception("%s: creating the trajectory field-plot dir '%s' failed.", self.name, run_dir)
             return
 
         idx = et_data.index
@@ -1891,10 +1920,10 @@ class SoilPredictor(SoilBase):
                 )
                 self._roll_segment(idx, et_data, seg_et, on_intervals, snapshot_sink=_sink)
             except Exception:  # noqa: BLE001
-                logging.exception("%s: field-plot re-roll for candidate %s failed; skipping it.", self.name, slug)
+                logger.exception("%s: field-plot re-roll for candidate %s failed; skipping it.", self.name, slug)
                 continue
 
-        logging.debug(
+        logger.debug(
             "%s: trajectory field plots written: %d PNGs across %d candidates in %s.",
             self.name,
             written,
@@ -1970,9 +1999,10 @@ def _worker_init(
     core, rebuild the PDE from config (spawn-safe -- no fork-inherited state), and
     stash the shared per-run inputs as worker globals.
     """
-    # Pin one core per worker BEFORE building/solving the PDE: OMP_NUM_THREADS=1
-    # avoids OpenMP oversubscription across the pool, and KMP_DUPLICATE_LIB_OK=TRUE
-    # avoids the duplicate-runtime abort (OMP #15) that otherwise crashes FiPy.
+    # Belt-and-braces: _rollout_parallel already exported these in the parent
+    # before spawning (they must be in the environment before the child's numpy
+    # import for OpenMP/OpenBLAS to honor them); restated here for any caller
+    # that builds a pool without going through _rollout_parallel.
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
