@@ -9,14 +9,15 @@ sparcs.application.view.agriculture.field
 from __future__ import annotations
 
 import base64
-from typing import Optional, Sequence
+import logging
+from typing import Optional
 
 import dash_bootstrap_components as dbc
 from dash import Input, Output, State, callback, dcc, html, no_update
 
 import pandas as pd
 from lories.application.view.pages import ComponentGroup, PageLayout, register_component_page
-from sparcs.components.agriculture import AgriculturalField, Irrigation, SoilMoisture
+from sparcs.components.agriculture import AgriculturalField, Irrigation
 from sparcs.components.agriculture.simulation import (
     Evapotranspiration,
     FieldSimulation,
@@ -24,13 +25,13 @@ from sparcs.components.agriculture.simulation import (
     SoilSimulation,
 )
 
+from .field_simulation import progress_image_channel
+
+logger = logging.getLogger(__name__)
+
 
 @register_component_page(AgriculturalField)
 class AgriculturalFieldPage(ComponentGroup[AgriculturalField]):
-    @property
-    def soil(self) -> Sequence[SoilMoisture]:
-        return self._component.soil
-
     @property
     def irrigation(self) -> Irrigation:
         return self._component.irrigation
@@ -92,7 +93,8 @@ class AgriculturalFieldPage(ComponentGroup[AgriculturalField]):
         soil = sim.soil_simulation
         shading = sim.ground_shading
         et = sim.evapotranspiration
-        image_channel = soil.data[SoilSimulation.SOIL_PROGRESS_IMAGE.key] if soil is not None else None
+        # None when plot_progress = false: the component never registers the channel.
+        image_channel = progress_image_channel(soil, SoilSimulation.SOIL_PROGRESS_IMAGE)
         et_channel = et.data[Evapotranspiration.EVAPOTRANSPIRATION.key] if et is not None else None
         drainage_channel = soil.data[SoilSimulation.WATER_BOTTOM.key] if soil is not None else None
         shading_channel = shading.data[GroundShading.SHADING_FACTOR.key] if shading is not None else None
@@ -164,6 +166,7 @@ def _scalar_block(label: str, channel, color: str) -> dbc.Col:
         try:
             text = f"{round(float(channel.value), 2)}"
         except (TypeError, ValueError):
+            logger.debug("Channel %s value %r is not numeric; displaying raw.", channel.id, channel.value)
             text = str(channel.value)
         unit = channel.unit or ""
         body = html.Div(

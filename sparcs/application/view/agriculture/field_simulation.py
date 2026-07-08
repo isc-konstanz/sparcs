@@ -20,7 +20,7 @@ import dash_bootstrap_components as dbc
 from dash import Input, Output, State, callback, dcc, html, no_update
 
 import pandas as pd
-from lories import Channel
+from lories import Channel, Constant
 from lories.application.view.pages import ComponentPage, PageLayout, register_component_page
 from sparcs.components.agriculture.simulation import (
     FieldSimulation,
@@ -31,6 +31,17 @@ from sparcs.components.agriculture.simulation import (
 
 def _png_data_uri(data: bytes) -> str:
     return f"data:image/png;base64,{base64.b64encode(data).decode('ascii')}"
+
+
+def progress_image_channel(component, constant: Constant) -> Optional[Channel]:
+    """The component's progress-image channel, or None when it was never
+    registered (the channel only exists when ``plot_progress`` is enabled)."""
+    if component is None:
+        return None
+    try:
+        return component.data[constant.key]
+    except KeyError:
+        return None
 
 
 def _channel_ts(channel: Channel) -> Optional[str]:
@@ -45,14 +56,19 @@ class FieldSimulationPage(ComponentPage[FieldSimulation]):
     def create_layout(self, layout: PageLayout) -> None:
         super().create_layout(layout)
 
+        # Cards are pure image panels, so gate on the progress-image channel:
+        # with plot_progress = false the component never registers it.
+        shading_image = progress_image_channel(self._component.ground_shading, GroundShading.SHADING_PROGRESS_IMAGE)
+        soil_image = progress_image_channel(self._component.soil_simulation, SoilSimulation.SOIL_PROGRESS_IMAGE)
+
         cards = []
-        if self._has_ground_shading():
-            card = self._build_shading_card()
+        if shading_image is not None:
+            card = self._build_shading_card(shading_image)
             layout.card.append(card)
             cards.append(card)
 
-        if self._has_soil_simulation():
-            card = self._build_soil_card()
+        if soil_image is not None:
+            card = self._build_soil_card(soil_image)
             layout.card.append(card, focus=True)
             cards.append(card)
 
@@ -68,22 +84,11 @@ class FieldSimulationPage(ComponentPage[FieldSimulation]):
             for card in cards:
                 layout.append(card)
 
-    # ------------------------------------------------------------------ chain
-
-    def _has_soil_simulation(self) -> bool:
-        return self._component.soil_simulation is not None
-
-    def _has_ground_shading(self) -> bool:
-        return self._component.ground_shading is not None
-
     # ------------------------------------------------------------------ soil
 
-    def _build_soil_card(self) -> html.Div:
+    def _build_soil_card(self, image_channel: Channel) -> html.Div:
         image_id = f"{self.id}-soil-image"
         image_store_id = f"{image_id}-store"
-
-        soil = self._component.soil_simulation
-        image_channel = soil.data[SoilSimulation.SOIL_PROGRESS_IMAGE.key]
 
         @callback(
             Output(image_id, "src"),
@@ -125,12 +130,9 @@ class FieldSimulationPage(ComponentPage[FieldSimulation]):
 
     # --------------------------------------------------------------- shading
 
-    def _build_shading_card(self) -> html.Div:
+    def _build_shading_card(self, image_channel: Channel) -> html.Div:
         image_id = f"{self.id}-shading-image"
         image_store_id = f"{image_id}-store"
-
-        shading = self._component.ground_shading
-        image_channel = shading.data[GroundShading.SHADING_PROGRESS_IMAGE.key]
 
         @callback(
             Output(image_id, "src"),
