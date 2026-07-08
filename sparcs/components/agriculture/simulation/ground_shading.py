@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-sparcs.components.agriculture.ground_shading
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+sparcs.components.agriculture.simulation.ground_shading
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Per-segment ground shading from a PV array using ``solarfactors``.
 Publishes a shade factor in ``[0, 1]`` (1 = open sky) and time-mean
@@ -81,6 +81,8 @@ from lories.components.weather import Weather
 from lories.typing import Configurations
 
 from . import plot_style
+
+logger = logging.getLogger(__name__)
 
 # 1. Constants
 
@@ -660,11 +662,10 @@ class GroundShading(Component):
                 per_setup_pv_rows.append(list(report["pv_rows"].values))
         except Exception:  # noqa: BLE001
             # pvfactors/numpy>=2 compat: collapsed zero-area surfaces can raise
-            # inhomogeneous-shape ValueError. Fall back to open-sky; retry next tick.
-            logging.warning(
-                "%s: pvfactors raised; falling back to open-sky for this "
-                "tick. Underlying cause is usually a pvfactors/numpy>=2 "
-                "compat bug; pin numpy<2 to restore real shading.",
+            # inhomogeneous-shape ValueError even with the import-time patch
+            # above. Fall back to open-sky; retry next tick.
+            logger.warning(
+                "%s: pvfactors raised; falling back to open-sky for this tick.",
                 self.name,
                 exc_info=True,
             )
@@ -827,10 +828,11 @@ class GroundShading(Component):
             return []
         rows: list[tuple] = []
         for setup in self._pv_setups:
-            # Match pvfactors' geometry: the drawn lean follows the signed
-            # rotation, which negates the stored surface_tilt when the array is
-            # not "pointing right". Without this the night render disagrees with
-            # the daytime pvfactors render for some axis_azimuth (e.g. 180).
+            # Match pvfactors' drawn geometry: rotation = tilt when "pointing
+            # right" draws "/" (high edge right), while a positive lean in the
+            # endpoint math below draws "\" (high edge left) -- so the sign
+            # flips when pointing right. Without this the night render disagrees
+            # with the daytime pvfactors render for some axis_azimuth (e.g. 180).
             lean = (
                 -setup.surface_tilt
                 if _pvfactors_is_pointing_right(setup.surface_azimuth, setup.axis_azimuth)
@@ -861,7 +863,7 @@ class GroundShading(Component):
                 cleaned[name] = float("nan")
                 missing.append(name)
         if missing:
-            logging.warning(
+            logger.warning(
                 "%s: SEG_GHI has no value for segment(s) %s at %s; writing NaN placeholder.",
                 self.name,
                 sorted(missing),
@@ -917,7 +919,7 @@ class GroundShading(Component):
         try:
             self._render_progress(ts, ground, pv_rows, sun_state)
         except Exception:  # noqa: BLE001
-            logging.exception("%s: progress-plot render failed; disabling.", self.name)
+            logger.exception("%s: progress-plot render failed; disabling.", self.name)
             self._plot_progress = False
 
     def _init_progress_figure(self) -> None:
@@ -927,7 +929,7 @@ class GroundShading(Component):
         on_main_thread = threading.current_thread() is threading.main_thread()
         if not on_main_thread:
             if self._plot_config.show:
-                logging.warning(
+                logger.warning(
                     "%s: progress plot 'show' disabled; runs on a worker "
                     "thread (matplotlib GUI requires the main thread). Use "
                     "'live = true' to view ground_shading.png in a browser.",
@@ -1083,7 +1085,7 @@ class GroundShading(Component):
                 pass
 
         buf = io.BytesIO()
-        self._plot_fig.savefig(buf, dpi=120, format="png")
+        self._plot_fig.savefig(buf, dpi=plot_style.DPI, format="png")
         png_bytes = buf.getvalue()
 
         self.data[GroundShading.SHADING_PROGRESS_IMAGE].set(ts, png_bytes)

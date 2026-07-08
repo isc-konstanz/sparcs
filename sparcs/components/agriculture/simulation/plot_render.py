@@ -102,5 +102,5 @@ def render_rel_sat_png(
     ax.set_title(plot_style.format_progress_title(title, sim_t))
 
     buf = io.BytesIO()
-    fig.savefig(buf, dpi=120, format="png")
+    fig.savefig(buf, dpi=plot_style.DPI, format="png")
     return buf.getvalue()

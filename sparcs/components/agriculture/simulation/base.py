@@ -16,15 +16,18 @@ import pandas as pd
 from lories import Component, Constant
 from lories.components.weather import Weather
 from lories.data import Channels
-from lories.typing import Configurations
+from lories.typing import Configurations, Timestamp
 from lories.util import to_timedelta
 from sparcs.components.agriculture.irrigation import Irrigation
 from sparcs.components.weather import validate_meteo_inputs
 
+from ._soil import MeshConfig, top_segment_names_from_mesh
 from .evapotranspiration import Evapotranspiration, SegmentProperties
 from .ground_shading import GroundShading
-from .soil import MeshConfig, SoilSimulation, top_segment_names_from_mesh
+from .soil import SoilSimulation
 from .soil_predictor import SoilPredictor
+
+logger = logging.getLogger(__name__)
 
 _C = TypeVar("_C", bound=Component)
 
@@ -89,12 +92,6 @@ class FieldSimulation(Component):
     # Latest per-segment shade factors from GroundShading; {} = no data yet (treated as 1.0).
     _segment_shade: dict[str, float]
 
-    # Bare-soil sentinels for non-canopy top segments. LAI=1.0 keeps PM surface-resistance
-    # finite; small height/roughness reflects bare-soil micro-roughness.
-    _BARE_LAI: float = 1.0
-    _BARE_PLANT_HEIGHT: float = 0.05
-    _BARE_NDVI: float = 0.10
-    _BARE_ROUGHNESS: float = 0.002
     _CANOPY_SEGMENT_NAMES = ("PlantTopLeftSegment", "PlantTopRightSegment")
 
     def configure(self, configs: Configurations) -> None:
@@ -223,7 +220,7 @@ class FieldSimulation(Component):
             return
 
         if self.weather is None:
-            logging.warning("%s: no Weather component resolved; chain will never tick.", self.name)
+            logger.warning("%s: no Weather component resolved; chain will never tick.", self.name)
             return
 
         self._weather_channels = Channels(list(self.weather.data.values()))
@@ -232,7 +229,7 @@ class FieldSimulation(Component):
 
         soil_data = self.soil_simulation.data
         if not soil_data.simulation_state.has_logger():
-            logging.warning(
+            logger.warning(
                 "%s: SIMULATION_STATE has no logger configured; soil state will not "
                 "persist across restarts. Configure a logger on the channel to enable "
                 "warm starts.",
@@ -372,7 +369,7 @@ class FieldSimulation(Component):
             if k not in self._OPTIONAL_WEATHER_KEYS and (k not in by_key or not by_key[k].is_valid())
         ]
         if missing:
-            logging.debug(
+            logger.debug(
                 "%s: skipping advance; weather channels not valid: %s",
                 self.name,
                 missing,
@@ -405,8 +402,8 @@ class FieldSimulation(Component):
     def _build_segments(self, df: pd.DataFrame) -> list[SegmentProperties]:
         """Build the per-segment property list for ET evaluation.
 
-        Canopy segments use bulk vegetation state; bare-soil segments use
-        ``_BARE_*`` sentinels. Returns a single ``_bulk`` segment when no
+        Canopy segments use bulk vegetation state; bare-soil segments use the
+        ``bare_*`` config values. Returns a single ``_bulk`` segment when no
         soil mesh is attached.
         """
         canopy_lai = float(df[self.LAI].iloc[-1])
@@ -449,13 +446,16 @@ class FieldSimulation(Component):
     def _populate_vegetation(self, df: pd.DataFrame, *, publish: bool = True) -> pd.DataFrame:
         # TEMP_GROUND is derived per-segment by Evapotranspiration, not set here.
         if not self._vegetation_placeholder_warned:
-            logging.warning(
+            logger.warning(
                 "%s: using placeholder vegetation state (LAI from monthly table '%s', "
-                "ROUGHNESS=0.002, PLANT_HEIGHT=0.1, NDVI=0.25); "
+                "ROUGHNESS=%s, PLANT_HEIGHT=%s, NDVI=%s); "
                 "no Crop subcomponent or field-level sensors are publishing these "
                 "channels yet. Values are still written for debugging visibility.",
                 self.name,
                 self._lai_type,
+                self.roughness,
+                self.plant_height,
+                self.ndvi,
             )
             self._vegetation_placeholder_warned = True
         df[self.LAI] = pd.array(_LAI_BY_TYPE[self._lai_type])[df.index.month - 1].astype(float)
@@ -466,7 +466,7 @@ class FieldSimulation(Component):
         for key, default in self._WEATHER_DEFAULTS.items():
             if key not in df.columns or df[key].isna().all():
                 if key not in self._weather_default_warned:
-                    logging.warning(
+                    logger.warning(
                         "%s: weather feed does not supply '%s'; defaulting to %s.",
                         self.name,
                         key,
@@ -506,10 +506,19 @@ class FieldSimulation(Component):
     def simulate(
         self,
         weather: pd.DataFrame,
+        start: Optional[Timestamp] = None,
+        end: Optional[Timestamp] = None,
         prior: Optional[pd.DataFrame] = None,
         **kwargs: Any,
     ) -> pd.DataFrame:
         if not self.has_soil_simulation() or self.evapotranspiration is None:
+            return pd.DataFrame()
+
+        if start is not None:
+            weather = weather.loc[weather.index >= start]
+        if end is not None:
+            weather = weather.loc[weather.index <= end]
+        if weather.empty:
             return pd.DataFrame()
 
         self._restore_prior_state(prior)
