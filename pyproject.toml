@@ -44,12 +44,23 @@ dependencies = [
     "solarfactors",
     "bifacial-radiance",
     "scipy",
+    # Soil-PDE simulation stack (sparcs.components.agriculture.simulation).
+    # FiPy's Gmsh2D additionally shells out to a `gmsh` CLI, which must be on
+    # PATH; the pip gmsh wheel needs system OpenGL libraries, so gmsh itself is
+    # left to the environment (e.g. conda-forge `gmsh` + `python-gmsh`).
+    "fipy",
+    "meshio",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pre-commit",
     "ruff"
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: heavy or integration tests (deselect with '-m \"not slow\"')",
 ]
 
 [tool.setuptools.package-data]

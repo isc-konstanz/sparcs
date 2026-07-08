@@ -501,16 +501,16 @@ actuate irrigation.
 - **Decision rule.** At a configured root-zone subset of probes
   (`decision_probes`), each candidate's `Se` trajectory is converted to
   soil tension (`model.psi_from_se`, signed matric potential in negative
-  hPa; the scorer compares its magnitude to `threshold_hpa`), and the
-  candidate is feasible if the peak tension over the whole horizon stays
-  at or below `threshold_hpa`. On the `fill_order` ladder feasibility is
-  monotone, so the recommendation is the first feasible rung (status
-  `ok`); `none_needed` if the all-`0min` rung is already feasible;
-  `infeasible` (best-effort top rung) if even maximum watering cannot
-  hold the threshold.
+  hPa) and scored by the RMS distance of its suction **magnitude** from the
+  `threshold_hpa` **setpoint**, pooled over the whole horizon and all
+  decision probes (`_score_candidate`). The recommendation is the argmin
+  (ties broken by least total watering). There is no feasibility test and
+  no status channel; tension above OR below the setpoint both add to the
+  score, so the pick is the candidate that tracks the setpoint most
+  closely.
 - **Outputs.** The recommendation goes out on dedicated auto-logged
-  channels (`recommend_w{i}_min`, `recommend_total_min`,
-  `recommend_status`) written to their own table
+  channels (`recommend_w{i}_min`, `recommend_total_min`)
+  written to their own table
   (`soil_predictor_recommendation`), one row per run keyed by run time
   only — so the recommendation history accumulates through the normal
   auto-logger with no `timestamp_creation` composite-PK partner to keep in
@@ -639,8 +639,10 @@ root_decay_length  = 0.3         # m, used by "exponential"
 omega_c            = 1.0         # Šimůnek threshold; < 1 enables compensation
 
 [ponding]
-enabled  = false
-h_max_mm = 5.0
+enabled           = false
+h_max_mm          = 5.0    # rain-pond overflow depth on open-sky segments
+watering_h_max_mm = 5.0    # emitter-pond cap on the watering strip; defaults to h_max_mm.
+                           # Irrigation ALWAYS ponds on the strip, even with enabled=false.
 ```
 
 The `SoilPredictor` grid roll-out (§11.1) adds its own block. It reuses
@@ -653,7 +655,7 @@ horizon         = "24h"          # forecast roll-out horizon
 interval        = 1440           # run cadence, minutes (daily); own default
 offset          = 60             # minutes past local midnight -> ~01:00 local
 cooldown        = 60             # per-listener backpressure floor, minutes
-threshold_hpa   = 300            # dryness ceiling, positive hPa magnitude
+threshold_hpa   = 300            # target tension SETPOINT (RMS scoring), positive hPa magnitude
 combo_cap       = 16             # max ladder rungs; FAILS AT CONFIG if exceeded
 grid_mode       = "fill_order"   # candidate SET: "fill_order" ladder (default) | "full" product
 parallel        = false          # EXECUTION: roll candidates independently across cores (opt-in)
@@ -717,14 +719,14 @@ Three known gaps remain:
    liquid-water modelling in temperate conditions; insufficient for
    freeze/thaw or hot, dry near-surface evaporation.
 3. **Front-load dominance in the watering recommendation** (§11.1). The
-   `fill_order` ladder assumes that at equal total water, watering
-   earlier holds the horizon-maximum tension at least as low as watering
-   later. It can over-recommend on days whose binding dryness peak is the
-   pre-dawn end of the horizon rather than the midday ET peak. Set
-   `grid_mode = "full"` on fields where that regime is common. The
-   recommendation is also advisory only: it constrains a dryness ceiling,
-   not a waterlogging upper bound, and drives from a single deterministic
-   forecast (no ensemble).
+   `fill_order` ladder is an approximate search: it scores only the
+   front-loaded subset of the full duration grid, and the RMS-to-setpoint
+   score is not monotone in total water, so the true optimum can be an
+   interior combination the ladder never visits. Set `grid_mode = "full"`
+   on fields where the recommendation must be exact. The recommendation is
+   also advisory only: it tracks a single target setpoint (deviations wet
+   and dry weigh equally) and drives from one deterministic forecast (no
+   ensemble).
 
 ---
 

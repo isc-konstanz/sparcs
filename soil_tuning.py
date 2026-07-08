@@ -40,7 +40,11 @@ except ImportError as e:  # pragma: no cover - friendly bail-out
         "  pip install 'dash>=2.16' dash-bootstrap-components plotly\n"
         f"(import failed: {e})\n"
     )
-    sys.exit(1)
+    # Exit only when run as a script: an importer (pytest.importorskip) must see
+    # the ImportError -- a module-level SystemExit aborts pytest collection.
+    if __name__ == "__main__":
+        sys.exit(1)
+    raise
 
 import sparcs
 from lories.application.settings import Settings
