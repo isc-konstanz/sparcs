@@ -42,7 +42,6 @@ class AgriculturalArea(Component):
             includes=AgriculturalField.INCLUDES,
             defaults=defaults,
         )
-        # TODO: Decide if water storage should
         if configs.has_member(WaterStorage.TYPE, includes=True):
             water_storage = WaterStorage(self, configs.get_member(WaterStorage.TYPE, defaults=defaults))
             self.components.add(water_storage)
@@ -62,7 +61,7 @@ class AgriculturalArea(Component):
     def _water_supply_callback(self, data: pd.DataFrame) -> None:
         water_supply = data[[c for c in data.columns if AgriculturalField.WATER_SUPPLY_MEAN in c]]
         if not water_supply.empty:
-            water_supply.ffill().dropna(axis="index", how="any", inplace=True)
+            water_supply = water_supply.ffill().dropna(axis="index", how="any")
             water_supply_mean = water_supply.apply(AgriculturalField._water_supply_mean_geometric, axis="columns")
             if len(water_supply_mean) == 1:
                 water_supply_mean = water_supply_mean.iloc[0]
