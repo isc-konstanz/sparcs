@@ -89,8 +89,8 @@ def test_register_probe_uses_hpa_unit(monkeypatch):
 
 
 def test_sample_probes_publishes_tension_not_se(monkeypatch):
-    """A known Se is published as ``psi_from_se(Se)`` (positive hPa), not the raw
-    Se in [0, 1]."""
+    """A known Se is published as the signed matric potential ``psi_from_se(Se)``
+    (negative hPa, matching the DB / tensiometer), not the raw Se in [0, 1]."""
     probe = _probe("soil_30cm", "Soil 30cm")
     sim, fake = _bare_sim(monkeypatch, probes=[probe], sample_by_id={"soil_30cm": 0.3})
 
@@ -100,11 +100,12 @@ def test_sample_probes_publishes_tension_not_se(monkeypatch):
     assert len(calls) == 1
     published = calls[0][1]
     assert published == pytest.approx(float(_MODEL.psi_from_se(0.3)))
-    assert published > 1.0  # hPa magnitude, out of the [0, 1] saturation range
+    assert published < -1.0  # signed hPa, out of the [0, 1] saturation range
 
 
 def test_sample_probes_drier_probe_yields_larger_tension(monkeypatch):
-    """A drier probe (lower Se) must publish a LARGER tension -- the sign contract."""
+    """A drier probe (lower Se) must publish a MORE NEGATIVE matric potential
+    (larger tension magnitude) -- the sign contract."""
     dry = _probe("soil_30cm", "Soil 30cm")  # Se 0.3 (drier)
     wet = _probe("soil_60cm", "Soil 60cm")  # Se 0.8 (wetter)
     sim, fake = _bare_sim(
@@ -117,4 +118,4 @@ def test_sample_probes_drier_probe_yields_larger_tension(monkeypatch):
 
     dry_tension = fake["soil_30cm"].calls[0][1]
     wet_tension = fake["soil_60cm"].calls[0][1]
-    assert dry_tension > wet_tension > 0.0
+    assert dry_tension < wet_tension < 0.0

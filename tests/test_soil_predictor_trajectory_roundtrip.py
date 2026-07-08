@@ -54,10 +54,14 @@ import pandas as pd
 pytestmark = pytest.mark.slow
 
 lories = pytest.importorskip("lories")
-core_typing = pytest.importorskip("lories.typing")
+# NOTE: lories.typing.Resource/Resources are TypeVars, not constructable classes;
+# the concrete dataclasses live in lories.core. Importing the TypeVars here is what
+# made this box-pending test error at _build_resources() before it could connect.
+_resource_mod = pytest.importorskip("lories.core.resource")
+_resources_mod = pytest.importorskip("lories.core.resources")
 
-Resource = core_typing.Resource
-Resources = core_typing.Resources
+Resource = _resource_mod.Resource
+Resources = _resources_mod.Resources
 
 _ENV_HOST = "SPARCS_TEST_SQL_HOST"
 _ENV_PORT = "SPARCS_TEST_SQL_PORT"
@@ -209,10 +213,22 @@ def test_duplicate_timestamp_distinct_w0_min_survive_as_distinct_rows(sql_connec
 
     connector.write(frame)
 
-    result = connector.read(resources)
+    # The trajectory table cannot be read back through connector.read(): its whole
+    # point is multiple rows per timestamp (one per candidate), but lories' read
+    # path rejects a non-unique DatetimeIndex (validate_index in
+    # lories/data/validation.py raises "Invalid series with non unique index"), and
+    # an unbounded read additionally applies .limit(1). Offline analysis therefore
+    # reads this table with direct SQL -- which is what proves the composite-PK
+    # persistence here: both rows physically survive as DISTINCT PK tuples.
+    from sqlalchemy import text
 
-    assert len(result) == 2, (
+    rows = connector.connection.execute(
+        text(f"SELECT w0_min, traj_root_20 FROM {TABLE_NAME} ORDER BY w0_min")
+    ).fetchall()
+
+    assert len(rows) == 2, (
         "two rows sharing `timestamp` but differing in `w0_min` must survive as "
         "two DISTINCT rows keyed on the full composite PK, not collapsed to one"
     )
-    assert sorted(result[W0_ID].tolist()) == [0.0, 30.0]
+    assert sorted(float(r[0]) for r in rows) == [0.0, 30.0]
+    assert sorted(float(r[1]) for r in rows) == [0.8, 0.9]  # each row keeps its own Se

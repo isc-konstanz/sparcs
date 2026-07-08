@@ -500,7 +500,8 @@ actuate irrigation.
   in `docs/adr/0005-parallel-independent-rolls-over-caterpillar.md`.
 - **Decision rule.** At a configured root-zone subset of probes
   (`decision_probes`), each candidate's `Se` trajectory is converted to
-  soil tension (`model.psi_from_se`, a positive hPa magnitude), and the
+  soil tension (`model.psi_from_se`, signed matric potential in negative
+  hPa; the scorer compares its magnitude to `threshold_hpa`), and the
   candidate is feasible if the peak tension over the whole horizon stays
   at or below `threshold_hpa`. On the `fill_order` ladder feasibility is
   monotone, so the recommendation is the first feasible rung (status
@@ -539,6 +540,18 @@ zero-irrigation forecast. A dashboard reading the current
 `predict_<probe>` channels should move to the trajectory table filtered
 by the all-`0min` PK row (or the `is_recommended` column), so no consumer
 silently reads a mix of candidates.
+
+**Units / sign convention.** The retention model's `psi_from_se` returns the
+**signed matric potential (negative hPa**, 0 at saturation and more negative as
+the soil dries), the convention the real SDI-12 tensiometer and the DB store. So
+the published probe channels — the live sim `soil_<depth>`, the forecast
+`predict_<probe>`, and the trajectory-table `traj_<probe>` columns — carry that
+signed value straight through: the sim and predictor publish `psi_from_se`
+unchanged. The decision scorer (`_score_candidate`) compares the suction
+**magnitude** (`abs(ψ)`) against the positive `threshold_hpa` setpoint, so the
+recommendation and the config stay in positive-magnitude terms and are unaffected
+by the sign. Grafana axes and any alert thresholds on these channels must read
+negative hPa.
 
 **Grafana consumption (out-of-app).** All candidates are already in
 `soil_predictor_trajectory`; there is no in-app comparison view. Grafana

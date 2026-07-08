@@ -679,8 +679,8 @@ def _sample_probe_row(
         se = float(pde.sample(probe))
         # Key by channel_id (stable) rather than the collision-prone probe.name.
         row[f"{probe.channel_id}__se"] = se
-        # ψ is negative (0 at saturation); psi_from_se returns magnitude, so flip.
-        row[f"{probe.channel_id}__tension"] = -abs(float(pde.soil_model.psi_from_se(se)))
+        # psi_from_se is the signed matric potential (negative, 0 at saturation).
+        row[f"{probe.channel_id}__tension"] = float(pde.soil_model.psi_from_se(se))
     return row
 
 

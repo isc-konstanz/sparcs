@@ -68,9 +68,10 @@ _GRID_MODES = ("fill_order", "full")
 # unchanged until they set parallel=true (see docs/adr/0005-...).
 _DEFAULT_PARALLEL: bool = False
 
-# Tension-feasibility decision defaults. `threshold_hpa` is a positive hPa
-# magnitude dryness ceiling; an operator calibration input, not a physical
-# constant, so this default is a placeholder, not a validated field value.
+# Recommendation-scoring defaults. `threshold_hpa` is a positive hPa magnitude
+# target tension (setpoint) the RMS score is measured against; an operator
+# calibration input, not a physical constant, so this default is a placeholder,
+# not a validated field value.
 _DEFAULT_THRESHOLD_HPA: float = 300.0
 
 # Trajectory table: fixed PK arity (unused window columns filled with the
@@ -113,7 +114,6 @@ class SoilPredictor(SoilBase):
 
     # Recommendation channels (normal auto-logged path, one row per run).
     _RECOMMEND_TOTAL_KEY: str = "recommend_total_min"
-    _RECOMMEND_STATUS_KEY: str = "recommend_status"
     # The recommendation lives in its own table keyed by run time only (no
     # timestamp_creation composite PK), so each run appends one row and the
     # recommendation history accumulates through the normal auto-logger. Keeping it
@@ -170,8 +170,8 @@ class SoilPredictor(SoilBase):
     _parallel: bool
     _max_workers: int
 
-    # Tension-feasibility decision: dryness ceiling and the probe subset it is
-    # evaluated over; see _peak_tension / _feasible / _select.
+    # Recommendation scoring: the target tension (setpoint) and the probe subset
+    # the RMS-to-setpoint score is evaluated over; see _score_candidate / _select.
     _threshold_hpa: float
     _decision_probes: list[str]
 
@@ -370,10 +370,10 @@ class SoilPredictor(SoilBase):
             known = [p for p in decision_probes if p in all_probe_ids]
             unknown = [p for p in decision_probes if p not in all_probe_ids]
             if not known:
-                # An all-unknown decision set can never yield a tension sample, so the
-                # feasibility test would be vacuous (every rung "feasible" -> a silent
-                # none_needed). Fail fast at configure() instead of shipping a
-                # miscalibrated recommender.
+                # An all-unknown decision set can never yield a tension sample, so
+                # every candidate would score +inf and the argmin would be an
+                # arbitrary tie-break over garbage. Fail fast at configure() instead
+                # of shipping a miscalibrated recommender.
                 raise ValueError(
                     f"{self.id}: decision_probes {decision_probes} match none of the "
                     f"resolved probe channel-ids {all_probe_ids}; the tension decision "
@@ -448,7 +448,7 @@ class SoilPredictor(SoilBase):
         # --- Recommendation channels (normal auto-logged path) ---------------
         # One row per run in the dedicated _RECOMMEND_TABLE_NAME table, keyed by run
         # time only: recommend_w0_min ... recommend_w{max_windows-1}_min,
-        # recommend_total_min, recommend_status. Its own table (no timestamp_creation
+        # recommend_total_min. Its own table (no timestamp_creation
         # composite PK) lets the recommendation history accumulate through the normal
         # auto-logger. Distinct keys from the trajectory table's w{i}_min PK columns
         # below (different channels, different table).
@@ -470,13 +470,6 @@ class SoilPredictor(SoilBase):
             type=float,
             name="Recommended total watering duration",
             unit="min",
-            aggregate="last",
-            logger={"enabled": True, "table": self._RECOMMEND_TABLE_NAME},
-        )
-        self.data.add(
-            self._RECOMMEND_STATUS_KEY,
-            type=str,
-            name="Recommendation status",
             aggregate="last",
             logger={"enabled": True, "table": self._RECOMMEND_TABLE_NAME},
         )
@@ -658,75 +651,119 @@ class SoilPredictor(SoilBase):
 
         ic_rel_sat = soil.get_rel_sat_snapshot()
         try:
-            timestamps, trajectories, snapshots, diagnostics = self._solve(ic_rel_sat, et_data, seg_et)
+            zf_timestamps, zf_trajectories, zf_snapshots, zf_diagnostics = self._solve(ic_rel_sat, et_data, seg_et)
         except Exception:  # noqa: BLE001
             logging.exception("%s: integration failed; skipping tick.", self.name)
             return
 
         # Se -> tension at the roll->publish boundary: the roll stays in Se (so the
-        # roll-mechanics tests hold), everything downstream is hPa.
-        trajectories = self._trajectories_to_tension(trajectories)
+        # roll-mechanics tests hold), everything downstream is hPa. The zero-flow
+        # roll is computed every tick but HELD, not published here: it is the
+        # fallback that keeps a forecast on the main channels if the watering-grid
+        # block below throws, and the forecast for deployments with no windows.
+        zf_trajectories = self._trajectories_to_tension(zf_trajectories)
 
-        try:
-            self._publish_results(
-                trajectories,
-                self._probes,
-                timestamps,
-                snapshots,
-                diagnostics,
-                forecast_creation,
-            )
-        except Exception:  # noqa: BLE001
-            logging.exception(
-                "%s: publishing results failed; predictor channels stay stale this tick (now=%s, creation=%s).",
-                self.name,
-                now,
-                forecast_creation,
-            )
-            return
-        self._last_predicted_key = key
-        logging.info(
-            "%s: predict OK: %d probes, %d rows emitted (now=%s, creation=%s).",
-            self.name,
-            len(self._probes),
-            len(timestamps),
-            now,
-            forecast_creation,
-        )
+        published = False
+        chosen: Optional[tuple[pd.Timedelta, ...]] = None
+        ladder_traj: dict = {}
+        horizon_start = et_data.index[0]
+        horizon_end = et_data.index[-1]
 
-        # Watering-grid roll-out: the ladder, recommendation, and all-candidate
-        # trajectory table. Only when windows are configured -- otherwise the
-        # predictor stays a pure zero-flow forecaster (the legacy path above
-        # already published the all-0min "do nothing" forecast unconditionally,
-        # so nothing here can regress it; see PRD User Story 11). Isolated in
-        # its own try/except: a grid/DB failure must never abort the legacy
-        # forecast, which has already been published above by this point.
+        # Watering-grid roll-out: pick the recommended candidate and publish ITS
+        # roll on the main channels (not the zero-flow roll). Only when windows are
+        # configured. Isolated in its own try/except so any roll-out/select/re-solve
+        # failure falls through to the zero-flow fallback publish below -- a ready
+        # tick always lands one complete, self-consistent forecast.
         if self._windows:
             try:
-                horizon_start = et_data.index[0]
-                horizon_end = et_data.index[-1]
                 ladder_traj = self._rollout_dispatch(ic_rel_sat, et_data, seg_et, horizon_start, horizon_end)
-                # Same Se -> tension boundary as the legacy roll above, per candidate.
+                # Same Se -> tension boundary as the zero-flow roll, per candidate.
                 ladder_traj = {
                     candidate: (candidate_ts, self._trajectories_to_tension(probe_series))
                     for candidate, (candidate_ts, probe_series) in ladder_traj.items()
                 }
-                chosen, status = self._select(
+                chosen = self._select(
                     self._ladder,
                     ladder_traj,
                     self._decision_probes,
                     self._threshold_hpa,
                     self._grid_mode,
                 )
-                self._publish_recommendation(chosen, status, now, forecast_creation)
 
+                # Recover the chosen candidate's snapshots + diagnostics for the main
+                # channels: the ladder roll keeps only trajectories, so re-solve the
+                # single chosen candidate. When it is the all-0min rung the zero-flow
+                # solve already IS that roll -- reuse it, no re-solve.
+                if chosen == tuple(pd.Timedelta(0) for _ in chosen):
+                    ch_timestamps, ch_trajectories = zf_timestamps, zf_trajectories
+                    ch_snapshots, ch_diagnostics = zf_snapshots, zf_diagnostics
+                else:
+                    ch_timestamps, ch_trajectories, ch_snapshots, ch_diagnostics = self._solve_candidate(
+                        ic_rel_sat, chosen, et_data, seg_et, horizon_start, horizon_end
+                    )
+                    ch_trajectories = self._trajectories_to_tension(ch_trajectories)
+
+                self._publish_results(
+                    ch_trajectories,
+                    self._probes,
+                    ch_timestamps,
+                    ch_snapshots,
+                    ch_diagnostics,
+                    forecast_creation,
+                )
+                published = True
+            except Exception:  # noqa: BLE001
+                logging.exception(
+                    "%s: watering-grid roll-out/selection/publish failed "
+                    "(now=%s, creation=%s); falling back to the zero-flow forecast.",
+                    self.name,
+                    now,
+                    forecast_creation,
+                )
+
+        if not published:
+            try:
+                self._publish_results(
+                    zf_trajectories,
+                    self._probes,
+                    zf_timestamps,
+                    zf_snapshots,
+                    zf_diagnostics,
+                    forecast_creation,
+                )
+            except Exception:  # noqa: BLE001
+                logging.exception(
+                    "%s: publishing results failed; predictor channels stay stale this tick (now=%s, creation=%s).",
+                    self.name,
+                    now,
+                    forecast_creation,
+                )
+                return
+
+        self._last_predicted_key = key
+        logging.info(
+            "%s: predict OK: %d probes, %d rows emitted (now=%s, creation=%s).",
+            self.name,
+            len(self._probes),
+            len(zf_timestamps),
+            now,
+            forecast_creation,
+        )
+
+        # Secondary watering-grid writes -- the recommendation table, the
+        # all-candidate trajectory table, and the debug field plots. Best-effort and
+        # only when the grid path produced a recommendation: a failure here never
+        # affects the forecast already published on the main channels above.
+        if published and chosen is not None:
+            try:
+                self._publish_recommendation(chosen, now, forecast_creation)
                 trajectory_frame = self._build_trajectory_frame(ladder_traj, chosen, forecast_creation)
                 self._write_trajectory_table(trajectory_frame)
                 self._write_trajectory_fields(ic_rel_sat, et_data, seg_et, horizon_start, horizon_end, chosen, now)
             except Exception:  # noqa: BLE001
                 logging.exception(
-                    "%s: watering-grid roll-out/recommendation/trajectory-write failed "
-                    "(now=%s, creation=%s); the legacy zero-flow forecast published above is unaffected.",
+                    "%s: recommendation/trajectory-write failed (now=%s, creation=%s); "
+                    "the forecast published on the main channels is unaffected.",
                     self.name,
                     now,
                     forecast_creation,
@@ -752,6 +789,34 @@ class SoilPredictor(SoilBase):
         """
         self._pde.set_state(ic_rel_sat)
         return self._integrate_horizon(et_data, seg_et)
+
+    def _solve_candidate(
+        self,
+        ic_rel_sat: np.ndarray,
+        candidate: tuple[pd.Timedelta, ...],
+        et_data: pd.DataFrame,
+        seg_et: dict[str, pd.DataFrame],
+        horizon_start: pd.Timestamp,
+        horizon_end: pd.Timestamp,
+    ) -> tuple[
+        list[pd.Timestamp],
+        dict[str, list[float]],
+        dict[pd.Timestamp, np.ndarray],
+        dict[str, list[float]],
+    ]:
+        """Full-capture solve of ONE watering candidate: load the IC and integrate
+        the horizon under ``candidate``'s flow schedule, returning the same
+        ``(timestamps, trajectories, snapshots, diagnostics)`` 4-tuple as ``_solve``
+        so ``_publish_results`` consumes it unchanged.
+
+        The ladder roll-out keeps only trajectories per candidate; this recovers the
+        chosen candidate's snapshots and diagnostics for the main forecast channels
+        (see ``predict``). ``set_state`` resets the PDE, so this is independent of
+        whatever state the zero-flow solve or the ladder roll left behind.
+        """
+        schedule = self._build_flow_schedule(self._windows, list(candidate), self._flow_m3s, horizon_start, horizon_end)
+        self._pde.set_state(ic_rel_sat)
+        return self._integrate_horizon(et_data, seg_et, flow_schedule=schedule)
 
     # Watering schedule (pure)
 
@@ -810,8 +875,8 @@ class SoilPredictor(SoilBase):
         ``(ts_next - ts_prev).total_seconds()``; flow is ``flow_m3s`` where the
         sub-window lies inside an on-interval, else ``0.0``. Empty ``on_intervals``
         (the all-``0min`` schedule) returns a single segment covering the whole
-        interval at zero flow -- the behavior-identity guard for the current
-        zero-flow roll.
+        interval at zero flow, so the zero-flow roll integrates identically whether
+        it runs through this split path or a bare ``walk_window``.
         """
         elapsed_s = (ts_next - ts_prev).total_seconds()
         if not on_intervals:
@@ -1252,7 +1317,9 @@ class SoilPredictor(SoilBase):
         native relative saturation Se, and the roll-mechanics tests compare it against
         ``SoilPDECore.sample`` (also Se). This is the single boundary where the roll
         output crosses into the tension-native decision + publish layer; ``psi_from_se``
-        returns a POSITIVE hPa magnitude (drier soil -> larger tension).
+        returns the signed matric potential (negative hPa; drier soil -> more
+        negative). It is published unchanged; the scorer compares its magnitude to
+        ``threshold_hpa`` (see ``_score_candidate``).
         """
         model = self._pde.soil_model
         return {
@@ -1260,46 +1327,49 @@ class SoilPredictor(SoilBase):
             for channel_id, values in trajectories.items()
         }
 
-    # Tension conversion, feasibility, and ladder selection (pure)
+    # Tension conversion, candidate scoring, and ladder selection (pure)
 
     @staticmethod
-    def _peak_tension(
+    def _score_candidate(
         trajectory: tuple[list[pd.Timestamp], dict[str, list[float]]],
         decision_probes: list[str],
+        threshold_hpa: float,
     ) -> float:
-        """Worst-case (largest) water tension over the configured decision probes AND
-        the whole horizon, for one candidate's ``(timestamps, {probe_channel_id: [hPa, ...]})``.
+        """RMS distance of a candidate's water tension from the setpoint
+        ``threshold_hpa``, over the whole horizon, pooled across the decision
+        probes. Lower is better; ``_select`` takes the argmin.
 
-        The trajectory values are already water tension (hPa): the roll output is
-        converted from the solver's native Se at the roll->publish boundary in
-        ``predict()`` (see ``_trajectories_to_tension``). Tension is a POSITIVE
-        magnitude (drier soil -> larger tension), so there is no sign flip here or in
-        ``_feasible`` -- the comparison against ``threshold_hpa`` is direct.
+        The trajectory values are water tension (hPa), converted from the solver's
+        native Se at the roll->publish boundary in ``predict()`` (see
+        ``_trajectories_to_tension``). ``threshold_hpa`` is read here as a TARGET
+        tension (setpoint), not a ceiling: tension above OR below it adds to the
+        score, so the recommended candidate is the one that tracks the setpoint
+        most closely.
 
         Probes not present in ``decision_probes`` are ignored. Returns ``+inf`` if
         ``decision_probes`` selects no probe present in the trajectory, so a
-        misconfigured probe subset reads as INFEASIBLE (fail safe) rather than
-        vacuously feasible -- a wrongly-empty decision set must never silently
-        recommend ``none_needed``. ``configure()`` additionally hard-fails when the
-        configured ``decision_probes`` resolve to zero known ids.
+        misconfigured probe subset scores as WORST (fail safe) and can never be the
+        argmin. ``configure()`` additionally hard-fails when the configured
+        ``decision_probes`` resolve to zero known ids.
+
+        This is the single scoring seam: swap the formula here -- for example to a
+        one-sided ceiling ``max(0, tension - threshold)`` -- without touching the
+        selector or the publish path.
         """
         _timestamps, probe_series = trajectory
-        peak = float("-inf")
+        deviations: list[np.ndarray] = []
         for channel_id in decision_probes:
             tension_values = probe_series.get(channel_id)
             if not tension_values:
                 continue
-            candidate_peak = float(np.max(np.asarray(tension_values, dtype=float)))
-            if candidate_peak > peak:
-                peak = candidate_peak
-        return peak if peak != float("-inf") else float("inf")
-
-    @staticmethod
-    def _feasible(peak_tension: float, threshold_hpa: float) -> bool:
-        """A candidate is feasible iff its peak tension stays at or below the
-        threshold -- direct comparison, no sign flip (``peak_tension`` and
-        ``threshold_hpa`` are both positive hPa magnitudes)."""
-        return peak_tension <= threshold_hpa
+            # Trajectories are signed matric potential (negative hPa); compare their
+            # suction MAGNITUDE against the positive ``threshold_hpa`` setpoint, so
+            # the setpoint stays a plain positive dryness target.
+            deviations.append(np.abs(np.asarray(tension_values, dtype=float)) - threshold_hpa)
+        if not deviations:
+            return float("inf")
+        stacked = np.concatenate(deviations)
+        return float(np.sqrt(np.mean(np.square(stacked))))
 
     @classmethod
     def _select(
@@ -1309,62 +1379,29 @@ class SoilPredictor(SoilBase):
         decision_probes: list[str],
         threshold_hpa: float,
         grid_mode: str,
-    ) -> tuple[tuple[pd.Timedelta, ...], str]:
-        """Select the recommended candidate and a status in ``{"ok", "none_needed",
-        "infeasible"}``.
+    ) -> tuple[pd.Timedelta, ...]:
+        """Select the recommended candidate: the rung whose water-tension
+        trajectory tracks the ``threshold_hpa`` setpoint most closely, scored by
+        ``_score_candidate`` (RMS-to-setpoint, lower is better).
 
-        ``fill_order`` (default): the ladder is a strictly-increasing total-water
-        chain and feasibility is monotone along it (adding later-window water never
-        raises earlier tension), so walk from least water up and take the FIRST
-        feasible rung -- no search, no tie-break. Edges: the all-``0min`` rung (the
-        first) feasible -> ``none_needed``; no rung feasible -> the top (largest-water)
-        rung, ``infeasible``; otherwise the first feasible rung, ``ok``.
+        Both grid modes reduce to the same rule -- score every candidate and take
+        the argmin, breaking ties by least total watering (``_total_minutes``) for a
+        deterministic pick. There is no feasibility test and no status: the ceiling
+        and the monotone-feasibility walk are gone.
 
-        ``full``: the candidate set is a partial order, not a chain. Among feasible
-        candidates, choose least total watering minutes; tie-break in order (a) fewer
-        active (non-zero) windows, (b) earliest active start (the earliest window
-        index with a non-zero duration; a candidate with none is "latest" for this
-        purpose), (c) largest tension margin (``threshold_hpa - peak_tension``). Edges:
-        the all-``0min`` candidate chosen -> ``none_needed``; no candidate feasible ->
-        the largest-total-minutes candidate, ``infeasible``; otherwise ``ok``.
+        ``fill_order`` is an APPROXIMATE search: it scores only the front-loaded
+        ladder subset, not the full Cartesian grid, so the argmin is
+        best-on-the-ladder, not a proven global optimum (the RMS-to-setpoint score
+        is not monotone in total water, so the true optimum can be interior). Use
+        ``grid_mode = "full"`` when the recommendation must be exact.
         """
         if not ladder:
             raise ValueError("_select requires a non-empty ladder.")
-
-        peak_tensions = {candidate: cls._peak_tension(trajectories[candidate], decision_probes) for candidate in ladder}
-        feasible = {candidate: cls._feasible(peak_tensions[candidate], threshold_hpa) for candidate in ladder}
-        zero_candidate = tuple(pd.Timedelta(0) for _ in ladder[0])
-
-        if grid_mode == "full":
-            feasible_candidates = [c for c in ladder if feasible[c]]
-            if not feasible_candidates:
-                chosen = max(ladder, key=lambda c: cls._total_minutes(c))
-                return chosen, "infeasible"
-
-            def _sort_key(c: tuple[pd.Timedelta, ...]) -> tuple[float, int, int, float]:
-                total_minutes = cls._total_minutes(c)
-                active_count = sum(1 for d in c if d > pd.Timedelta(0))
-                earliest_start = next((i for i, d in enumerate(c) if d > pd.Timedelta(0)), len(c))
-                margin = threshold_hpa - peak_tensions[c]
-                return (total_minutes, active_count, earliest_start, -margin)
-
-            chosen = min(feasible_candidates, key=_sort_key)
-            status = "none_needed" if chosen == zero_candidate else "ok"
-            return chosen, status
-
-        if grid_mode != "fill_order":
+        if grid_mode not in ("fill_order", "full"):
             raise ValueError(f"Unknown grid_mode {grid_mode!r}; expected 'fill_order' or 'full'.")
 
-        # fill_order: the ladder is already ordered least-water-first (see
-        # _build_ladder); walk it and take the first feasible rung.
-        if feasible[ladder[0]]:
-            return ladder[0], "none_needed"
-
-        for candidate in ladder:
-            if feasible[candidate]:
-                return candidate, "ok"
-
-        return ladder[-1], "infeasible"
+        scores = {c: cls._score_candidate(trajectories[c], decision_probes, threshold_hpa) for c in ladder}
+        return min(ladder, key=lambda c: (scores[c], cls._total_minutes(c)))
 
     @staticmethod
     def _total_minutes(candidate: tuple[pd.Timedelta, ...]) -> float:
@@ -1606,7 +1643,6 @@ class SoilPredictor(SoilBase):
     def _publish_recommendation(
         self,
         chosen: tuple[pd.Timedelta, ...],
-        status: str,
         run_timestamp: pd.Timestamp,
         forecast_creation: pd.Timestamp,
     ) -> None:
@@ -1622,8 +1658,9 @@ class SoilPredictor(SoilBase):
         check, but the fill below is defensive -- get ``0.0``, not the trajectory
         table's ``-1`` sentinel; a "no window configured" reading of 0 minutes is
         unambiguous on the advisory channel, whereas the sentinel is only meaningful
-        alongside the trajectory table's fixed-arity PK columns), the total watering
-        minutes, and the status string.
+        alongside the trajectory table's fixed-arity PK columns) and the total
+        watering minutes. A ``recommend_total_min`` of ``0`` is the "do nothing"
+        recommendation; there is no separate status channel.
 
         ``forecast_creation`` is accepted for call-site symmetry with the trajectory
         write but is not persisted here: the recommendation row is keyed by run time,
@@ -1636,12 +1673,10 @@ class SoilPredictor(SoilBase):
             self.data[key].set(run_timestamp, minutes)
 
         self.data[self._RECOMMEND_TOTAL_KEY].set(run_timestamp, total_minutes)
-        self.data[self._RECOMMEND_STATUS_KEY].set(run_timestamp, status)
         logging.debug(
-            "%s: recommendation published: total=%.1fmin status=%s (now=%s).",
+            "%s: recommendation published: total=%.1fmin (now=%s).",
             self.name,
             total_minutes,
-            status,
             run_timestamp,
         )
 
@@ -1661,7 +1696,8 @@ class SoilPredictor(SoilBase):
         per-window minutes (``_UNUSED_WINDOW_SENTINEL`` for any window index
         beyond ``len(candidate)``, so the PK column set is stable regardless of
         how many windows a deployment configures), ``is_recommended`` (True only
-        for ``chosen``'s rows), and its per-probe water tension (hPa).
+        for ``chosen``'s rows), and its per-probe signed matric potential
+        (negative hPa, from the retention model's ``psi_from_se``).
 
         Pure and unit-testable: no ``Channel``/connector access here. Column
         NAMES are the bare channel keys, not full channel ids --
@@ -1702,7 +1738,7 @@ class SoilPredictor(SoilBase):
         to full channel ids (what ``connector.write`` matches against) first.
         Warns and skips (never raises) if `logger` is not configured or the
         connector cannot be resolved/is not a writable connector -- a grid
-        persistence failure must never abort the legacy zero-flow forecast.
+        persistence failure must never abort the forecast on the main channels.
         """
         if self._logger_id is None:
             return

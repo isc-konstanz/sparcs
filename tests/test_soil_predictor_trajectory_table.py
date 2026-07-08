@@ -146,9 +146,10 @@ def test_trajectory_frame_is_recommended_true_only_for_chosen():
 
 
 def test_trajectory_frame_carries_per_probe_values():
-    """The frame stores each candidate's per-probe trajectory values as-is. In
-    production these are already water tension (hPa), converted upstream at the
-    roll->publish boundary; the frame itself is a pure pass-through."""
+    """The frame stores each candidate's per-probe trajectory values as-is -- a
+    pure pass-through. In production these are already signed matric potential
+    (negative hPa) from the retention model's psi_from_se; the frame does not
+    re-convert."""
     predictor = _make_bare_predictor(max_windows=4, n_windows=2)
     ladder, timestamps = _synthetic_ladder_trajectories()
     chosen = (_td(0), _td(0))
@@ -218,7 +219,6 @@ def test_publish_recommendation_never_touches_trajectory_channel_keys(monkeypatc
     recommend_keys = [
         *predictor._recommend_window_keys,
         predictor._RECOMMEND_TOTAL_KEY,
-        predictor._RECOMMEND_STATUS_KEY,
     ]
     trajectory_keys = [
         predictor._TRAJ_TIMESTAMP_CREATION_KEY,
@@ -229,7 +229,7 @@ def test_publish_recommendation_never_touches_trajectory_channel_keys(monkeypatc
     _patch_data(monkeypatch, _FakeDataAccess(recommend_keys + trajectory_keys))
 
     run_ts = pd.Timestamp("2026-07-03 01:00", tz="Europe/Berlin")
-    predictor._publish_recommendation((_td(30), _td(0)), "ok", run_ts, run_ts)
+    predictor._publish_recommendation((_td(30), _td(0)), run_ts, run_ts)
 
     for key in trajectory_keys:
         assert predictor.data[key].calls == [], f"trajectory channel '{key}' must never be .set()"
@@ -239,18 +239,17 @@ def test_publish_recommendation_never_touches_trajectory_channel_keys(monkeypatc
         assert len(predictor.data[key].calls) == 1, f"recommendation channel '{key}' must be set exactly once"
 
 
-def test_publish_recommendation_sets_expected_window_minutes_total_and_status(monkeypatch):
+def test_publish_recommendation_sets_expected_window_minutes_and_total(monkeypatch):
     predictor = _make_bare_predictor(max_windows=4, n_windows=2)
     recommend_keys = [
         *predictor._recommend_window_keys,
         predictor._RECOMMEND_TOTAL_KEY,
-        predictor._RECOMMEND_STATUS_KEY,
     ]
     _patch_data(monkeypatch, _FakeDataAccess(recommend_keys))
 
     run_ts = pd.Timestamp("2026-07-03 01:00", tz="Europe/Berlin")
     chosen = (_td(45), _td(15))
-    predictor._publish_recommendation(chosen, "ok", run_ts, run_ts)
+    predictor._publish_recommendation(chosen, run_ts, run_ts)
 
     assert predictor.data["recommend_w0_min"].calls == [(run_ts, 45.0)]
     assert predictor.data["recommend_w1_min"].calls == [(run_ts, 15.0)]
@@ -258,22 +257,6 @@ def test_publish_recommendation_sets_expected_window_minutes_total_and_status(mo
     assert predictor.data["recommend_w2_min"].calls == [(run_ts, 0.0)]
     assert predictor.data["recommend_w3_min"].calls == [(run_ts, 0.0)]
     assert predictor.data[predictor._RECOMMEND_TOTAL_KEY].calls == [(run_ts, 60.0)]
-    assert predictor.data[predictor._RECOMMEND_STATUS_KEY].calls == [(run_ts, "ok")]
-
-
-def test_publish_recommendation_status_values_pass_through_unmodified(monkeypatch):
-    predictor = _make_bare_predictor(max_windows=4, n_windows=2)
-    recommend_keys = [
-        *predictor._recommend_window_keys,
-        predictor._RECOMMEND_TOTAL_KEY,
-        predictor._RECOMMEND_STATUS_KEY,
-    ]
-
-    for status in ("ok", "none_needed", "infeasible"):
-        _patch_data(monkeypatch, _FakeDataAccess(recommend_keys))
-        run_ts = pd.Timestamp("2026-07-03 01:00", tz="Europe/Berlin")
-        predictor._publish_recommendation((_td(0), _td(0)), status, run_ts, run_ts)
-        assert predictor.data[predictor._RECOMMEND_STATUS_KEY].calls == [(run_ts, status)]
 
 
 # --- _write_trajectory_table: degrade-on-missing-connector -------------------

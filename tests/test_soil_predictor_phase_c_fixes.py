@@ -82,23 +82,24 @@ def test_build_flow_schedule_dst_window_integrates_at_correct_local_time():
     assert off_ts == pd.Timestamp("2026-03-29 18:30", tz=_TZ)
 
 
-def test_peak_tension_zero_matching_probes_is_infeasible_not_vacuous():
-    """When decision_probes match no probe in the trajectory, _peak_tension must
-    return +inf so the candidate reads as INFEASIBLE, not vacuously feasible.
-    Trajectory values are already water tension (hPa); _peak_tension takes no model."""
+def test_score_candidate_empty_decision_set_scores_worst():
+    """When decision_probes match no probe in the trajectory, _score_candidate
+    returns +inf so the candidate can never be the argmin (fail safe). Trajectory
+    values are already water tension (hPa); the score takes no model."""
     trajectory = ([pd.Timestamp("2026-07-03 01:00", tz=_TZ)], {"root_20": [500.0]})
 
-    peak = SoilPredictor._peak_tension(trajectory, ["does_not_exist"])
+    score = SoilPredictor._score_candidate(trajectory, ["does_not_exist"], threshold_hpa=300.0)
 
-    assert peak == float("inf")
-    assert SoilPredictor._feasible(peak, threshold_hpa=300.0) is False  # pre-fix: -inf -> True
+    assert score == float("inf")
 
 
-def test_peak_tension_matching_probe_still_worst_case():
-    """A present decision probe still yields the finite worst-case tension."""
+def test_score_candidate_rms_distance_over_present_probe():
+    """A present decision probe yields the finite RMS-to-setpoint distance over the
+    horizon; probes outside decision_probes are ignored."""
     trajectory = (
         [pd.Timestamp("2026-07-03 01:00", tz=_TZ), pd.Timestamp("2026-07-03 02:00", tz=_TZ)],
         {"root_20": [120.0, 480.0], "surface": [900.0, 900.0]},
     )
-    peak = SoilPredictor._peak_tension(trajectory, ["root_20"])
-    assert peak == 480.0  # surface ignored (not a decision probe); worst-case over time
+    score = SoilPredictor._score_candidate(trajectory, ["root_20"], threshold_hpa=300.0)
+    # deviations -180, +180 vs 300; surface ignored.
+    assert score == pytest.approx(180.0)

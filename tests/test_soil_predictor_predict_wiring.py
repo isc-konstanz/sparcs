@@ -91,13 +91,17 @@ def _make_predictor(windows, calls, last_simulated_at=pd.Timestamp("2026-07-03 0
         calls.append("solve")
         return [et_data.index[0]], {}, {}, {}
 
+    def _solve_candidate(ic, candidate, et_data, seg_et, horizon_start, horizon_end):
+        calls.append("solve_candidate")
+        return [et_data.index[0]], {}, {}, {}
+
     def _rollout(*_a, **_k):
         calls.append("rollout")
         return {}
 
     def _select(*_a, **_k):
         calls.append("select")
-        return (pd.Timedelta(0),), "none_needed"
+        return (pd.Timedelta(0),)
 
     def _build_frame(*_a, **_k):
         calls.append("build_frame")
@@ -108,6 +112,7 @@ def _make_predictor(windows, calls, last_simulated_at=pd.Timestamp("2026-07-03 0
         return {}
 
     p._solve = _solve
+    p._solve_candidate = _solve_candidate
     p._publish_results = lambda *a, **k: calls.append("publish_results")
     p._rollout_ladder = _rollout
     p._rollout_parallel = _rollout_parallel
@@ -115,6 +120,7 @@ def _make_predictor(windows, calls, last_simulated_at=pd.Timestamp("2026-07-03 0
     p._publish_recommendation = lambda *a, **k: calls.append("publish_recommendation")
     p._build_trajectory_frame = _build_frame
     p._write_trajectory_table = lambda *a, **k: calls.append("write_table")
+    p._write_trajectory_fields = lambda *a, **k: calls.append("write_fields")
     return p
 
 
@@ -143,6 +149,45 @@ def test_predict_grid_block_invokes_all_collaborators(caplog):
     ):
         assert step in calls, f"{step!r} not called; predict() grid wiring is broken. calls={calls}"
     assert "watering-grid" not in caplog.text.lower(), f"grid try/except swallowed an error: {caplog.text}"
+
+
+def test_predict_publishes_resolved_chosen_when_recommendation_is_nonzero(caplog):
+    """When the selector picks a NON-zero candidate, predict() re-solves that single
+    candidate (to recover its snapshots + diagnostics) and publishes ITS roll on the
+    main channels. The re-solve happens before the main publish, which happens before
+    the secondary recommendation/trajectory writes."""
+    calls = []
+    predictor = _make_predictor([object()], calls)
+
+    def _select_nonzero(*_a, **_k):
+        calls.append("select")
+        return (pd.Timedelta(minutes=30),)
+
+    predictor._select = _select_nonzero
+    now = pd.Timestamp("2026-07-03 01:30", tz=_TZ)
+
+    with caplog.at_level(logging.ERROR):
+        predictor.predict(now, forecast_creation=now)
+
+    assert "solve_candidate" in calls, f"chosen candidate not re-solved. calls={calls}"
+    assert calls.index("solve_candidate") < calls.index("publish_results")
+    assert calls.index("publish_results") < calls.index("write_table")
+    assert "watering-grid" not in caplog.text.lower()
+
+
+def test_predict_zero_recommendation_reuses_zero_flow_solve_without_resolve(caplog):
+    """When the selector picks the all-0min rung, predict() reuses the held zero-flow
+    solve for the main channels -- it must NOT re-solve (the zero-flow roll already IS
+    that candidate's roll)."""
+    calls = []
+    predictor = _make_predictor([object()], calls)  # default _select returns the zero rung
+    now = pd.Timestamp("2026-07-03 01:30", tz=_TZ)
+
+    with caplog.at_level(logging.ERROR):
+        predictor.predict(now, forecast_creation=now)
+
+    assert "publish_results" in calls
+    assert "solve_candidate" not in calls, f"zero rung must not re-solve. calls={calls}"
 
 
 def test_predict_degrades_to_caterpillar_when_parallel_roll_raises(caplog):
@@ -240,10 +285,11 @@ def test_predict_short_forecast_chain_skips():
     assert calls == []
 
 
-def test_predict_grid_failure_does_not_abort_legacy_forecast(caplog):
-    """A grid/DB failure must never abort the tick: the legacy forecast is
-    published, then a raising ladder roll-out is caught and logged, and predict()
-    returns normally."""
+def test_predict_grid_failure_falls_back_to_zero_flow_forecast(caplog):
+    """A grid/DB failure must never abort the tick: a raising ladder roll-out is
+    caught and logged, the held zero-flow roll is published as the fallback, and the
+    secondary recommendation/trajectory writes are skipped. predict() returns
+    normally."""
     calls = []
     predictor = _make_predictor([object()], calls)
 
@@ -256,6 +302,7 @@ def test_predict_grid_failure_does_not_abort_legacy_forecast(caplog):
     with caplog.at_level(logging.ERROR):
         predictor.predict(now, forecast_creation=now)  # must not raise
 
-    assert "publish_results" in calls  # legacy forecast still published
-    assert "write_table" not in calls  # grid aborted after the failure
+    assert "publish_results" in calls  # zero-flow fallback still published
+    assert "write_table" not in calls  # secondary writes skipped after the failure
+    assert "publish_recommendation" not in calls
     assert "watering-grid" in caplog.text.lower()  # failure was logged, not silent

@@ -54,7 +54,7 @@ class SoilModel(ABC):
     @abstractmethod
     def psi_from_se(self, se: Any) -> Any:
         """
-        Calculate the soil water tension ψ from the effective saturation Sₑ.
+        Calculate the soil matric potential ψ from the effective saturation Sₑ.
 
         Parameters
         ----------
@@ -64,19 +64,23 @@ class SoilModel(ABC):
         Returns
         -------
         float or array-like
-            Soil water tension ψ [hPa].
+            Signed matric potential ψ [hPa], negative: 0 at saturation and more
+            negative as the soil dries (the tensiometer / DB convention). Its
+            magnitude ``abs(ψ)`` is the suction/tension.
         """
         ...
 
     @abstractmethod
     def se_from_psi(self, psi: Any) -> Any:
         """
-        Calculate the effective saturation Sₑ from the soil water tension ψ.
+        Calculate the effective saturation Sₑ from the soil matric potential ψ.
 
         Parameters
         ----------
         psi : float or array-like
-            Soil water tension ψ [hPa].
+            Matric potential ψ [hPa]. Sign-agnostic: the inverse depends only on
+            ``abs(ψ)``, so either the signed (negative) potential or its magnitude
+            yields the same Sₑ.
 
         Returns
         -------
@@ -268,8 +272,13 @@ class Genuchten(SoilModel):
         return self._theta_from_se(se)
 
     def psi_from_se(self, se: Any) -> Any:
+        # Signed matric potential ψ (negative hPa; 0 at saturation, more negative
+        # as the soil dries), the convention the real tensiometer and the DB store.
+        # _water_column_from_se returns the head MAGNITUDE, so negate it. The
+        # inverse se_from_psi is sign-agnostic (abs internally), so the round-trip
+        # holds for either sign of ψ.
         water_column = self._water_column_from_se(se)
-        return _psi_from_water_column(water_column)
+        return -_psi_from_water_column(water_column)
 
     def se_from_psi(self, psi: Any) -> Any:
         water_column = _water_column_from_psi(psi)
@@ -401,8 +410,11 @@ class BrooksCorey(SoilModel):
         return self._theta_from_se(se)
 
     def psi_from_se(self, se: Any) -> Any:
+        # Signed matric potential ψ (negative hPa; see Genuchten.psi_from_se).
+        # _water_column_from_se is the head magnitude, so negate for the physical
+        # sign; se_from_psi is the sign-agnostic inverse.
         wc = self._water_column_from_se(se)
-        return _psi_from_water_column(wc)
+        return -_psi_from_water_column(wc)
 
     def se_from_psi(self, psi: Any) -> Any:
         wc = _water_column_from_psi(psi)

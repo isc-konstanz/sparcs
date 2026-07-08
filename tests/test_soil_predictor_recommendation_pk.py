@@ -51,7 +51,7 @@ def _make_predictor(max_windows=4):
 
 
 def test_publish_recommendation_writes_one_row_at_run_timestamp():
-    """Every recommend_* channel (windows, total, status) is set exactly once, at
+    """Every recommend_* channel (windows, total) is set exactly once, at
     run_timestamp -- one coherent auto-logged row per run."""
     predictor = _make_predictor(max_windows=4)
     run_timestamp = pd.Timestamp("2026-07-03 01:30", tz=_TZ)
@@ -59,7 +59,6 @@ def test_publish_recommendation_writes_one_row_at_run_timestamp():
 
     predictor._publish_recommendation(
         (pd.Timedelta(minutes=45), pd.Timedelta(minutes=15)),
-        "ok",
         run_timestamp,
         forecast_creation,
     )
@@ -70,7 +69,6 @@ def test_publish_recommendation_writes_one_row_at_run_timestamp():
     assert predictor.data["recommend_w2_min"].sets == [(run_timestamp, 0.0)]
     assert predictor.data["recommend_w3_min"].sets == [(run_timestamp, 0.0)]
     assert predictor.data[SoilPredictor._RECOMMEND_TOTAL_KEY].sets == [(run_timestamp, 60.0)]
-    assert predictor.data[SoilPredictor._RECOMMEND_STATUS_KEY].sets == [(run_timestamp, "ok")]
 
 
 def test_publish_recommendation_never_touches_timestamp_creation():
@@ -81,7 +79,7 @@ def test_publish_recommendation_never_touches_timestamp_creation():
     run_timestamp = pd.Timestamp("2026-07-03 01:30", tz=_TZ)
     forecast_creation = pd.Timestamp("2026-07-03 00:00", tz=_TZ)
 
-    predictor._publish_recommendation((pd.Timedelta(0),), "none_needed", run_timestamp, forecast_creation)
+    predictor._publish_recommendation((pd.Timedelta(0),), run_timestamp, forecast_creation)
 
     touched = set(predictor.data.keys())
     assert SoilPredictor._TIMESTAMP_CREATION_KEY not in touched, (

@@ -558,6 +558,9 @@ class SoilSimulation(SoilBase):
             return
         for probe in self._probes:
             se = self._pde.sample(probe)
+            # psi_from_se is the signed matric potential (negative hPa; drier ->
+            # more negative), the tensiometer / DB convention, so publish it
+            # directly. The PDE core (anchoring, total_water) stays in Se.
             self.data[probe.channel_id].set(now, float(self._soil_model.psi_from_se(se)))
 
     def get_sensor_probes(self) -> list[ProbeSpec]:
