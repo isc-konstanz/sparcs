@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-sparcs.components.agriculture.evapotranspiration
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+sparcs.components.agriculture.simulation.evapotranspiration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-
+Per-segment Penman-Monteith evapotranspiration for the field-simulation chain.
 """
 
 from __future__ import annotations
@@ -111,7 +111,7 @@ class Evapotranspiration(Component):
             raise ValueError(f"Missing or NaN required columns for evapotranspiration: {missing_cols}")
 
         # Weather-only terms, segment-independent, computed once.
-        svp = self._sat_vapor_pressure(temperature=df[Weather.TEMP_AIR], only_pos=True)
+        svp = self._sat_vapor_pressure(temperature=df[Weather.TEMP_AIR])
         gvp = self._ground_vapor_pressure(hum_rel=df[Weather.HUMIDITY_REL], svp=svp)
         vh = self._vaporization_heat(temperature=df[Weather.TEMP_AIR])
         svp_slope = self._slope_sat_vapor_pressure(temperature=df[Weather.TEMP_AIR], svp=svp, vh=vh)
@@ -199,13 +199,14 @@ class Evapotranspiration(Component):
             stacked = pd.concat([seg_terms[s.name][c] for s in seg_list], axis=1)
             df[c] = stacked.to_numpy().dot(weights)
 
+        # The frame column must carry the constant's declared unit [kg/(m²·h)];
+        # the per-segment seg_et decomposition stays in kg/(m²·s) for the PDE.
+        df[Evapotranspiration.EVAPOTRANSPIRATION] *= self._KG_PER_S_TO_KG_PER_H
+
         if publish:
             ts = df.index[-1]
             for c in self.CHANNELS:
-                value = float(df[c].iloc[-1])
-                if c is Evapotranspiration.EVAPOTRANSPIRATION:
-                    value *= self._KG_PER_S_TO_KG_PER_H
-                self.data[c].set(ts, value)
+                self.data[c].set(ts, float(df[c].iloc[-1]))
 
             temp_gnd_stack = pd.concat([seg_temp_gnd[s.name] for s in seg_list], axis=1)
             temp_gnd_bulk_last = float(temp_gnd_stack.to_numpy().dot(weights)[-1])
@@ -228,28 +229,12 @@ class Evapotranspiration(Component):
     @staticmethod
     def _sat_vapor_pressure(
         temperature: pd.Series,
-        only_pos: bool = True,
     ) -> pd.Series:
-        """Saturation vapor pressure [kPa] from air temperature [°C].
-
-        ``only_pos=False`` blends positive/negative parameterizations to avoid discontinuity at 0 °C.
-        """
+        """Saturation vapor pressure [kPa] from air temperature [°C] (Magnus, above-freezing constants)."""
         SVP_AT_0C = 0.61078  # [kPa] at 0 °C
         B_POS, C_POS = 17.270, 237.3  # positive-temperature constants [-], [°C]
-        B_NEG, C_NEG = 21.875, 265.5  # negative-temperature constants [-], [°C]
-        ATAN_WIDTH = 10.0
-        ATAN_TRANSITION_SHARPNESS = 6.313  # = np.tan(0.9 * np.pi / 2) * 2
 
-        if only_pos:
-            svp = SVP_AT_0C * np.exp((B_POS * temperature) / (temperature + C_POS))
-        else:
-            svp_n = SVP_AT_0C * ((B_NEG * temperature) / (temperature + C_NEG)).apply(np.exp)
-            svp_p = SVP_AT_0C * ((B_POS * temperature) / (temperature + C_POS)).apply(np.exp)
-
-            atan_v = np.arctan(temperature * ATAN_TRANSITION_SHARPNESS / ATAN_WIDTH) / np.pi + 0.5
-            svp = svp_n + (svp_p - svp_n) * atan_v
-
-        return svp
+        return SVP_AT_0C * np.exp((B_POS * temperature) / (temperature + C_POS))
 
     @staticmethod
     def _ground_vapor_pressure(
@@ -315,7 +300,9 @@ class Evapotranspiration(Component):
         epsilon_atm = 1.24 * (gvp * 10 / temp_air_k) ** (1 / 7)  # Brutsaert (1975)
         epsilon_surface = SURFACE_EMISSIVITY_BASE + NDVI_EMISSIVITY_FACTOR * ndvi
         epsilon_surface = epsilon_surface.clip(upper=1.0)
-        epsilon_atm_cloud = epsilon_atm * (1 + CLOUD_TYPE_FACTOR * csi**2)
+        # Clouds boost downward longwave: ~(1 + 0.22·cloudiness²) with
+        # cloudiness ≈ 1 - clear-sky index (TVA-type correction).
+        epsilon_atm_cloud = epsilon_atm * (1 + CLOUD_TYPE_FACTOR * (1.0 - csi) ** 2)
 
         shortwave_net = ghi * (1 - ALBEDO)
         longwave_in = epsilon_atm_cloud * STEFAN_BOLTZMANN * temp_air_k**4
@@ -335,19 +322,19 @@ class Evapotranspiration(Component):
     ) -> pd.Series:
         """Aerodynamic resistance [s/m] via log wind profile (neutral stability, Monin-Obukhov)."""
         VON_KARMAN = 0.41  # [-]
+        # FAO-56 floor for calm conditions; wind = 0 would drive ra to infinity
+        # and silently zero the aerodynamic term.
+        WIND_FLOOR_MS = 0.5  # [m/s]
 
         displacement_height = (2.0 / 3.0) * plant_height  # [m]
-        roughness_momentum = roughness * plant_height  # [m]
+        roughness_momentum = (roughness * plant_height).clip(lower=1e-4)  # [m]
         roughness_heat = 0.1 * roughness_momentum  # [m]
 
         z_eff = measure_height - displacement_height
         z_eff = z_eff.clip(lower=1e-6)
 
-        ra = (
-            np.log(z_eff / roughness_momentum)
-            * np.log(z_eff / roughness_heat)
-            / (VON_KARMAN**2 * _kmh_to_ms(wind_speed))
-        )
+        wind_ms = np.maximum(_kmh_to_ms(wind_speed), WIND_FLOOR_MS)
+        ra = np.log(z_eff / roughness_momentum) * np.log(z_eff / roughness_heat) / (VON_KARMAN**2 * wind_ms)
 
         return pd.Series(ra, index=wind_speed.index)
 
