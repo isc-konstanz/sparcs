@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-sparcs.components.agriculture.soil.model
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+sparcs.components.agriculture.soil.models
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-
+Soil retention / hydraulic-conductivity models (Mualem-van Genuchten,
+Brooks-Corey) and the ``create_soil_model`` factory.
 """
 
 from __future__ import annotations
@@ -12,6 +13,19 @@ from abc import ABC, abstractmethod
 from typing import Any, Optional
 
 import numpy as np
+
+
+def _clip_se(se: Any, lo: float, hi: float) -> Any:
+    """Clip Se into a model's numeric domain for floats and arrays.
+
+    FiPy CellVariables (duck-typed via ``faceValue``, keeping this module
+    FiPy-free) pass through unclipped: the PDE coefficient must stay a symbolic
+    function of the solution variable, and the solver keeps its values in-band
+    (post-sweep SE_MIN/SE_MAX clipping in ``SoilPDECore``).
+    """
+    if hasattr(se, "faceValue"):
+        return se
+    return np.clip(np.asarray(se, dtype=float), lo, hi)
 
 
 class SoilModel(ABC):
@@ -289,7 +303,10 @@ class Genuchten(SoilModel):
         return self.k_from_se(se)
 
     def k_from_se(self, se: Any) -> Any:
-        k_rel = se**self.bpar * (1 - (1 - se ** (1 / self.m)) ** self.m) ** 2
+        # Se clipped to (0, 1]: outside the physical domain the Mualem formula
+        # returns NaN/complex (negative base to a fractional power).
+        se_eff = _clip_se(se, 1.0e-12, 1.0)
+        k_rel = se_eff**self.bpar * (1 - (1 - se_eff ** (1 / self.m)) ** self.m) ** 2
         return self.k_s * k_rel
 
     def dh_dse(self, se: Any) -> Any:
@@ -300,8 +317,11 @@ class Genuchten(SoilModel):
         # matric pressure head; psi_from_se returns the same magnitude in
         # hPa. Conversion: `alpha` is in cm⁻¹ by van Genuchten convention,
         # so 1/alpha is in cm; the leading 0.01 takes cm → m.
-        u = se ** (-1.0 / self.m) - 1.0
-        return (0.01 / (self.n * self.m * self.alpha)) * u ** ((1.0 / self.n) - 1.0) * se ** (-(1.0 / self.m) - 1.0)
+        # The slope is singular at both saturation bounds; clip Se to (0, 1)
+        # like BrooksCorey and rely on the PDE's source clipper near saturation.
+        se_eff = _clip_se(se, 1.0e-12, 1.0 - 1.0e-12)
+        u = se_eff ** (-1.0 / self.m) - 1.0
+        return (0.01 / (self.n * self.m * self.alpha)) * u ** ((1.0 / self.n) - 1.0) * se_eff ** (-(1.0 / self.m) - 1.0)
 
     def _se_from_theta(self, theta: Any) -> Any:
         return (theta - self.theta_r) / (self.theta_s - self.theta_r)
@@ -428,7 +448,7 @@ class BrooksCorey(SoilModel):
     def k_from_se(self, se: Any) -> Any:
         # Se is clipped to (0, 1]; above air-entry h_b the model defines
         # K = K_s exactly, which the formula recovers at Se = 1.
-        se_eff = np.clip(np.asarray(se, dtype=float), 1.0e-12, 1.0)
+        se_eff = _clip_se(se, 1.0e-12, 1.0)
         return self.k_s * se_eff**self._k_exp
 
     # -- diffusivity helper for the PDE ---------------------------------------
@@ -445,7 +465,7 @@ class BrooksCorey(SoilModel):
         # h = (1/α) · Se^(-1/λ)      (in cm of water column; α in cm⁻¹)
         # d|h|/dSe = (1/(α λ)) · Se^(-1/λ - 1)   (cm/Se)
         # multiply by 0.01 to convert cm/Se → m/Se.
-        se_eff = np.clip(np.asarray(se, dtype=float), 1.0e-12, 1.0 - 1.0e-12)
+        se_eff = _clip_se(se, 1.0e-12, 1.0 - 1.0e-12)
         return (0.01 / (self.alpha * self.n)) * se_eff ** (-(1.0 / self.n) - 1.0)
 
     # -- internals -------------------------------------------------------------
@@ -535,7 +555,7 @@ def create_soil_model(model: Optional[str] = None, **params: Any) -> SoilModel:
     cls = _MODEL_REGISTRY[canonical]
     accepted = set(inspect.signature(cls).parameters)
     kwargs = {k: v for k, v in params.items() if k in accepted}
-    missing = [p for p in ("theta_r", "theta_s", "k_s") if p in accepted and p not in kwargs]
+    missing = [p for p in ("theta_r", "theta_s", "alpha", "n", "k_s") if p in accepted and p not in kwargs]
     if missing:
         raise ValueError(f"Soil model {canonical!r} missing required parameter(s): {missing}")
     return cls(**kwargs)
