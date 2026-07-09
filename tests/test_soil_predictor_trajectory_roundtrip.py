@@ -2,18 +2,32 @@
 """sparcs.tests.test_soil_predictor_trajectory_roundtrip
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-BOX-PENDING: the PRD Prerequisite 2 / issue 06 direct-write spike -- a
+BOX-PENDING: the direct-write spike -- a
 duplicate-timestamp composite-PK round-trip through the real lories SQL
 connector (``lories.connectors.sql.database.SqlDatabase``) against MariaDB or
 MySQL.
 
-Two same-timestamp rows that differ only in ``w0_min`` must survive
+Two same-timestamp rows that differ only in ``forecast_id`` must survive
 ``connector.write(frame)`` -> ``connector.read(resources)`` as two DISTINCT
 rows keyed on the full composite PK ``(timestamp, timestamp_creation,
-w0_min, ...)``, not collapsed -- this is the exact behavior
-``_write_trajectory_table`` depends on (``Table.write`` upserts on the full
-composite PK via ``ON DUPLICATE KEY UPDATE``; two rows sharing ``timestamp``
-but differing in ``w0_min`` are different PK tuples, hence different rows).
+forecast_id, ...)``, not collapsed -- this is the exact behavior
+``_write_detail_table`` (the ``agri_soil_forecast`` detail table) depends on
+(``Table.write`` upserts on the full composite PK via
+``ON DUPLICATE KEY UPDATE``; two rows sharing ``timestamp`` but differing in
+``forecast_id`` are different PK tuples, hence different rows).
+
+NOTE: production ``_register_detail_channels`` now gives EACH probe its OWN
+``timestamp_creation``/``forecast_id`` TWIN channels (not one pair shared by
+every probe), each carrying that probe's own ``soil_id``/``field_id``
+surrogate attributes -- required because the SQL connector's per-attribute-set
+write grouping (``table.py``'s ``_groupby``) raises ``ResourceError`` for any
+resource on a keyed table missing a declared surrogate attribute, and a
+single shared pair cannot carry N different probes' soil_ids at once. This
+spike's simplified single-probe/no-surrogate schema below still proves the
+core duplicate-timestamp composite-PK mechanism (the part genuinely gated on
+a real DB); the multi-probe surrogate-attribute grouping itself is unit-tested
+without a DB in ``test_soil_predictor_trajectory_table.py`` /
+``test_soil_predictor_recommendation_pk.py``.
 
 There is NO local MariaDB/MySQL server available in this environment (see
 project memory: no local DB server), and the lories SQL connector's own
@@ -72,9 +86,9 @@ _ENV_DIALECT = "SPARCS_TEST_SQL_DIALECT"
 
 _REQUIRED_ENV = (_ENV_HOST, _ENV_PORT, _ENV_USER, _ENV_PASSWORD, _ENV_DATABASE)
 
-TABLE_NAME = "soil_predictor_trajectory_roundtrip_test"
+TABLE_NAME = "agri_soil_forecast_roundtrip_test"
 TIMESTAMP_CREATION_ID = "test_roundtrip.traj_timestamp_creation"
-W0_ID = "test_roundtrip.w0_min"
+FORECAST_ID_ID = "test_roundtrip.traj_forecast_id"
 SE_ID = "test_roundtrip.traj_root_20"
 
 _SETTINGS_CONF = """
@@ -131,11 +145,11 @@ def _build_resources() -> "Resources":
         primary=True,
         nullable=False,
     )
-    w0_min = Resource(
-        id=W0_ID,
-        key="w0_min",
-        name="Window 0 duration",
-        type=float,
+    forecast_id = Resource(
+        id=FORECAST_ID_ID,
+        key="forecast_id",
+        name="Forecast candidate id",
+        type=int,
         table=TABLE_NAME,
         primary=True,
         nullable=False,
@@ -147,20 +161,20 @@ def _build_resources() -> "Resources":
         type=float,
         table=TABLE_NAME,
     )
-    return Resources([timestamp_creation, w0_min, se])
+    return Resources([timestamp_creation, forecast_id, se])
 
 
 def _build_two_combo_frame() -> pd.DataFrame:
     """Two rows sharing the SAME `timestamp` index value, differing only in
-    `w0_min` -- the exact duplicate-timestamp composite-PK scenario the
-    trajectory table depends on."""
+    `forecast_id` -- the exact duplicate-timestamp composite-PK scenario the
+    detail table depends on (two candidates' rows for the same future step)."""
     ts = pd.Timestamp("2026-07-03 08:00", tz="UTC")
     creation = pd.Timestamp("2026-07-03 01:00", tz="UTC")
     index = pd.DatetimeIndex([ts, ts], name="timestamp")
     return pd.DataFrame(
         {
             TIMESTAMP_CREATION_ID: [creation, creation],
-            W0_ID: [0.0, 30.0],
+            FORECAST_ID_ID: [0, 1],
             SE_ID: [0.8, 0.9],
         },
         index=index,
@@ -207,13 +221,13 @@ def sql_connector(tmp_path, monkeypatch):
         pass
 
 
-def test_duplicate_timestamp_distinct_w0_min_survive_as_distinct_rows(sql_connector):
+def test_duplicate_timestamp_distinct_forecast_id_survive_as_distinct_rows(sql_connector):
     connector, resources = sql_connector
     frame = _build_two_combo_frame()
 
     connector.write(frame)
 
-    # The trajectory table cannot be read back through connector.read(): its whole
+    # The detail table cannot be read back through connector.read(): its whole
     # point is multiple rows per timestamp (one per candidate), but lories' read
     # path rejects a non-unique DatetimeIndex (validate_index in
     # lories/data/validation.py raises "Invalid series with non unique index"), and
@@ -223,12 +237,12 @@ def test_duplicate_timestamp_distinct_w0_min_survive_as_distinct_rows(sql_connec
     from sqlalchemy import text
 
     rows = connector.connection.execute(
-        text(f"SELECT w0_min, traj_root_20 FROM {TABLE_NAME} ORDER BY w0_min")
+        text(f"SELECT forecast_id, traj_root_20 FROM {TABLE_NAME} ORDER BY forecast_id")
     ).fetchall()
 
     assert len(rows) == 2, (
-        "two rows sharing `timestamp` but differing in `w0_min` must survive as "
+        "two rows sharing `timestamp` but differing in `forecast_id` must survive as "
         "two DISTINCT rows keyed on the full composite PK, not collapsed to one"
     )
-    assert sorted(float(r[0]) for r in rows) == [0.0, 30.0]
+    assert sorted(int(r[0]) for r in rows) == [0, 1]
     assert sorted(float(r[1]) for r in rows) == [0.8, 0.9]  # each row keeps its own Se

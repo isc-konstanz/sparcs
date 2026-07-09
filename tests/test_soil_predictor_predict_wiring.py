@@ -103,8 +103,12 @@ def _make_predictor(windows, calls, last_simulated_at=pd.Timestamp("2026-07-03 0
         calls.append("select")
         return (pd.Timedelta(0),)
 
-    def _build_frame(*_a, **_k):
-        calls.append("build_frame")
+    def _build_header_frame(*_a, **_k):
+        calls.append("build_header_frame")
+        return pd.DataFrame()
+
+    def _build_detail_frame(*_a, **_k):
+        calls.append("build_detail_frame")
         return pd.DataFrame()
 
     def _rollout_parallel(*_a, **_k):
@@ -117,16 +121,17 @@ def _make_predictor(windows, calls, last_simulated_at=pd.Timestamp("2026-07-03 0
     p._rollout_ladder = _rollout
     p._rollout_parallel = _rollout_parallel
     p._select = _select
-    p._publish_recommendation = lambda *a, **k: calls.append("publish_recommendation")
-    p._build_trajectory_frame = _build_frame
-    p._write_trajectory_table = lambda *a, **k: calls.append("write_table")
+    p._build_header_frame = _build_header_frame
+    p._write_header_table = lambda *a, **k: calls.append("write_header_table")
+    p._build_detail_frame = _build_detail_frame
+    p._write_detail_table = lambda *a, **k: calls.append("write_detail_table")
     p._write_trajectory_fields = lambda *a, **k: calls.append("write_fields")
     return p
 
 
 def test_predict_grid_block_invokes_all_collaborators(caplog):
     """The happy path: the legacy roll runs, then the grid block invokes the
-    ladder roll-out, selector, recommendation publish, frame build, and direct
+    ladder roll-out, selector, and the header/detail frame build + direct
     write -- and its try/except swallows nothing. This fails if predict() calls a
     grid collaborator with a non-existent attribute or a wrong argument: the
     resulting exception is caught by the grid try/except, so the collaborator spies
@@ -143,9 +148,10 @@ def test_predict_grid_block_invokes_all_collaborators(caplog):
         "publish_results",
         "rollout",
         "select",
-        "publish_recommendation",
-        "build_frame",
-        "write_table",
+        "build_header_frame",
+        "write_header_table",
+        "build_detail_frame",
+        "write_detail_table",
     ):
         assert step in calls, f"{step!r} not called; predict() grid wiring is broken. calls={calls}"
     assert "watering-grid" not in caplog.text.lower(), f"grid try/except swallowed an error: {caplog.text}"
@@ -155,7 +161,7 @@ def test_predict_publishes_resolved_chosen_when_recommendation_is_nonzero(caplog
     """When the selector picks a NON-zero candidate, predict() re-solves that single
     candidate (to recover its snapshots + diagnostics) and publishes ITS roll on the
     main channels. The re-solve happens before the main publish, which happens before
-    the secondary recommendation/trajectory writes."""
+    the secondary header/detail writes."""
     calls = []
     predictor = _make_predictor([object()], calls)
 
@@ -171,7 +177,7 @@ def test_predict_publishes_resolved_chosen_when_recommendation_is_nonzero(caplog
 
     assert "solve_candidate" in calls, f"chosen candidate not re-solved. calls={calls}"
     assert calls.index("solve_candidate") < calls.index("publish_results")
-    assert calls.index("publish_results") < calls.index("write_table")
+    assert calls.index("publish_results") < calls.index("write_header_table")
     assert "watering-grid" not in caplog.text.lower()
 
 
@@ -194,7 +200,7 @@ def test_predict_degrades_to_caterpillar_when_parallel_roll_raises(caplog):
     """parallel=True but the parallel executor raises (e.g. the pool cannot be
     created): predict() must still produce the forecast via the sequential
     caterpillar, log the fallback, and NOT let the failure reach the outer grid
-    try/except (which would skip the recommendation + trajectory write)."""
+    try/except (which would skip the header + detail write)."""
     calls = []
     predictor = _make_predictor([object()], calls, parallel=True)
 
@@ -214,9 +220,10 @@ def test_predict_degrades_to_caterpillar_when_parallel_roll_raises(caplog):
         "publish_results",
         "rollout",
         "select",
-        "publish_recommendation",
-        "build_frame",
-        "write_table",
+        "build_header_frame",
+        "write_header_table",
+        "build_detail_frame",
+        "write_detail_table",
     ):
         assert step in calls, f"{step!r} not called; parallel-degrade wiring is broken. calls={calls}"
     assert "rollout_parallel" not in calls
@@ -236,7 +243,14 @@ def test_predict_grid_block_skipped_without_windows():
     predictor.predict(now, forecast_creation=now)
 
     assert "publish_results" in calls
-    for grid_step in ("rollout", "select", "publish_recommendation", "build_frame", "write_table"):
+    for grid_step in (
+        "rollout",
+        "select",
+        "build_header_frame",
+        "write_header_table",
+        "build_detail_frame",
+        "write_detail_table",
+    ):
         assert grid_step not in calls
 
 
@@ -288,7 +302,7 @@ def test_predict_short_forecast_chain_skips():
 def test_predict_grid_failure_falls_back_to_zero_flow_forecast(caplog):
     """A grid/DB failure must never abort the tick: a raising ladder roll-out is
     caught and logged, the held zero-flow roll is published as the fallback, and the
-    secondary recommendation/trajectory writes are skipped. predict() returns
+    secondary header/detail writes are skipped. predict() returns
     normally."""
     calls = []
     predictor = _make_predictor([object()], calls)
@@ -303,6 +317,7 @@ def test_predict_grid_failure_falls_back_to_zero_flow_forecast(caplog):
         predictor.predict(now, forecast_creation=now)  # must not raise
 
     assert "publish_results" in calls  # zero-flow fallback still published
-    assert "write_table" not in calls  # secondary writes skipped after the failure
-    assert "publish_recommendation" not in calls
+    assert "write_header_table" not in calls  # secondary writes skipped after the failure
+    assert "write_detail_table" not in calls
+    assert "build_header_frame" not in calls
     assert "watering-grid" in caplog.text.lower()  # failure was logged, not silent

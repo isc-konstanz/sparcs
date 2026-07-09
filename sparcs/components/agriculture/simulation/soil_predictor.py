@@ -6,10 +6,15 @@ sparcs.components.agriculture.simulation.soil_predictor
 Forecast-driven horizon predictor. Rolls the Richards-equation soil PDE
 over the available weather forecast for every watering candidate on the
 configured ladder, publishes the recommended candidate's forecast as signed
-water tension (hPa) at every configured probe, and persists the
-recommendation row plus the all-candidate trajectory table. Optionally
-archives saturation-field snapshots at ``save_freq`` cadence as npz blobs
-(``predict_state``) and PNGs (``predict_plot``).
+water tension (hPa) at every configured probe, and persists every
+candidate's forecast as a two-table pair: one ``agri_field_forecast`` header
+row per candidate per run (durations, window starts, ``is_recommended``,
+``weather_creation``) and ALL candidates' per-probe tension trajectories in
+``agri_soil_forecast``. There is no separate recommendation table -- the
+chosen candidate is the header row with ``is_recommended = True``. The
+in-memory ``predict_<probe>`` channels (and the debug ``predict_state`` /
+``predict_plot`` blobs) stay available for Dash/debugging but are no longer
+logged.
 """
 
 from __future__ import annotations
@@ -83,10 +88,9 @@ _DEFAULT_PARALLEL: bool = False
 # not a validated field value.
 _DEFAULT_THRESHOLD_HPA: float = 300.0
 
-# Trajectory table: fixed PK arity (unused window columns filled with the
-# sentinel below) and the sentinel value itself.
+# Forecast header table: fixed PK arity for the w{i}_min/w{i}_start column
+# set. Windows beyond what a deployment configures are left NULL (no sentinel).
 _DEFAULT_MAX_WINDOWS: int = 4
-_UNUSED_WINDOW_SENTINEL: float = -1.0
 
 
 @dataclass(frozen=True)
@@ -121,23 +125,44 @@ class SoilPredictor(SoilBase):
     _STATE_CHANNEL_KEY: str = "predict_state"
     _PLOT_CHANNEL_KEY: str = "predict_plot"
 
-    # Recommendation channels (normal auto-logged path, one row per run).
-    _RECOMMEND_TOTAL_KEY: str = "recommend_total_min"
-    # The recommendation lives in its own table keyed by run time only (no
-    # timestamp_creation composite PK), so each run appends one row and the
-    # recommendation history accumulates through the normal auto-logger. Keeping it
-    # out of the soil_predictor forecast table is what avoids the composite-PK
-    # partner problem entirely -- see _publish_recommendation.
-    _RECOMMEND_TABLE_NAME: str = "soil_predictor_recommendation"
+    # --- Header table (direct connector write) --------------------------------
+    # `agri_field_forecast`: one row per candidate per run, indexed at the
+    # predictor's RUN time (the default "timestamp" index column carries it --
+    # no separate primary timestamp_creation channel is needed here, unlike the
+    # detail table below). forecast_id is the per-row PK partner that
+    # distinguishes one run's candidate rows from each other.
+    _HEADER_TABLE_NAME: str = "agri_field_forecast"
+    _HEADER_FORECAST_ID_KEY: str = "forecast_id"
+    _HEADER_IS_RECOMMENDED_KEY: str = "is_recommended"
+    _HEADER_TOTAL_MIN_KEY: str = "total_min"
+    _HEADER_WEATHER_CREATION_KEY: str = "weather_creation"
 
-    # Trajectory-table channels (direct connector write). Distinct-key scheme:
-    # the timestamp/probe columns carry a `traj_` prefix and the PK columns are
-    # `w{i}_min`, so none can collide with a legacy auto-logged channel key
-    # (`predict_<probe>`, `timestamp_creation`, ...); `is_recommended` has no
-    # legacy counterpart -- see the module docstring / configure().
-    _TRAJ_TIMESTAMP_CREATION_KEY: str = "traj_timestamp_creation"
-    _TRAJ_IS_RECOMMENDED_KEY: str = "is_recommended"
-    _TRAJ_TABLE_NAME: str = "soil_predictor_trajectory"
+    # --- Detail table (direct connector write) ---------------------------------
+    # `agri_soil_forecast`: ALL candidates' per-probe tension rows, indexed at
+    # the forecast step's future timestamp. Every probe channel gets its OWN
+    # timestamp_creation/forecast_id TWIN (traj_<probe>_timestamp_creation /
+    # traj_<probe>_forecast_id, both sharing the "timestamp_creation"/
+    # "forecast_id" DB columns across probes -- same pattern as traj_<probe>
+    # sharing "water_tension") rather than one pair shared by every probe: the
+    # SQL connector's per-attribute-set write grouping (table.py `_groupby`)
+    # requires EVERY channel written to this table to carry ALL its declared
+    # surrogate attributes (soil_id, field_id), and a single shared
+    # timestamp_creation/forecast_id pair cannot carry N different probes'
+    # soil_ids at once. `timestamp_creation` is the predictor's RUN time --
+    # distinct from the header's index and from the weather issue time
+    # (header's `weather_creation`) -- so every run's rows survive, never
+    # upsert-collide. `forecast_id` is the same per-run candidate enumeration
+    # as the header's forecast_id. Both twins are per-row value channels with
+    # `logger={primary: true, nullable: false}` (exactly the w0_min pattern the
+    # old trajectory table used); soil_id/field_id are surrogate attributes,
+    # resolved code-side from the SAME config SoilSimulation's own probe
+    # channel reads (`_resolve_probe_identities`) and applied identically to a
+    # probe's tension channel AND both its twins (config-side identity stays
+    # on the probe; the twins inherit it in code -- see
+    # `_register_detail_channels`).
+    _DETAIL_TABLE_NAME: str = "agri_soil_forecast"
+    _DETAIL_TIMESTAMP_CREATION_SUFFIX: str = "_timestamp_creation"
+    _DETAIL_FORECAST_ID_SUFFIX: str = "_forecast_id"
 
     _horizon: pd.Timedelta
     _save_freq: pd.Timedelta
@@ -193,20 +218,27 @@ class SoilPredictor(SoilBase):
 
     _probes: list[ProbeSpec]
 
-    # Fixed PK arity for the trajectory table (see _build_trajectory_frame) and
-    # the id of the SQL logger connector the direct grid write targets; None
-    # when [soil_predictor].logger is not configured (the grid write is then
-    # skipped with a warning -- see configure()/_write_trajectory_table).
+    # Fixed PK arity for the header's w{i}_min/w{i}_start columns (see
+    # _build_header_frame) and the id of the SQL logger connector the direct
+    # header/detail writes target; None when [soil_predictor].logger is not
+    # configured (both writes are then skipped with a warning -- see
+    # configure()/_write_header_table/_write_detail_table).
     _max_windows: int
     _logger_id: Optional[str]
 
-    # Recommendation channel keys, w0_min ... w{max_windows-1}_min, in window order.
-    _recommend_window_keys: list[str]
-    # Trajectory channel keys, w0_min ... w{max_windows-1}_min (PK columns), in window order.
-    _traj_window_keys: list[str]
-    # probe.channel_id -> trajectory channel key (traj_<probe>), distinct from
-    # _channel_keys (the legacy predict_<probe> auto-logged keys).
+    # Header data-column keys, w0_min ... w{max_windows-1}_min / w0_start ...
+    # w{max_windows-1}_start, in window order.
+    _header_window_min_keys: list[str]
+    _header_window_start_keys: list[str]
+    # probe.channel_id -> detail-table channel key (traj_<probe>), distinct from
+    # _channel_keys (the in-memory predict_<probe> keys).
     _traj_channel_keys: dict[str, str]
+    # probe.channel_id -> that probe's timestamp_creation/forecast_id TWIN
+    # channel keys (traj_<probe>_timestamp_creation / traj_<probe>_forecast_id)
+    # -- per-probe so each carries the SAME soil_id/field_id as its tension
+    # channel (see _register_detail_channels/_resolve_probe_identities).
+    _detail_creation_keys: dict[str, str]
+    _detail_forecast_id_keys: dict[str, str]
 
     # Dedup gate: skip if (now, forecast_creation) was already published.
     _last_predicted_key: Optional[tuple[pd.Timestamp, pd.Timestamp]] = None
@@ -336,8 +368,8 @@ class SoilPredictor(SoilBase):
             raise ValueError(
                 f"{self.id}: {len(self._windows)} [soil_predictor.windows] configured, "
                 f"exceeding max_windows={self._max_windows}; max_windows is the fixed "
-                "trajectory-table PK arity and needs a manual table migration to raise "
-                "(see SOIL.md)."
+                "w{i}_min/w{i}_start column-set arity on agri_field_forecast and needs "
+                "a manual table migration to raise (see SOIL.md)."
             )
 
         self._logger_id = configs.get("logger", default=None)
@@ -345,9 +377,8 @@ class SoilPredictor(SoilBase):
             self._logger_id = str(self._logger_id)
         else:
             logger.warning(
-                "%s: [soil_predictor].logger not configured; the all-candidate "
-                "trajectory table will not be written (the recommendation channels "
-                "still log normally).",
+                "%s: [soil_predictor].logger not configured; the "
+                "agri_field_forecast/agri_soil_forecast tables will not be written.",
                 self.name,
             )
 
@@ -400,52 +431,18 @@ class SoilPredictor(SoilBase):
                 )
             self._decision_probes = decision_probes
 
-        self.data.add(
-            key=self._TIMESTAMP_CREATION_KEY,
-            name="Predictor Creation Timestamp",
-            type=pd.Timestamp,
-            aggregate="last",
-            logger={
-                "primary": True,
-                "nullable": False,
-                "enabled": True,
-            },
-        )
-
-        self._channel_keys = {}
-        for probe in self._probes:
-            key = f"predict_{probe.channel_id}"
-            self._channel_keys[probe.channel_id] = key
-            self.data.add(
-                key,
-                type=float,
-                name=f"Predicted {probe.name}",
-                unit="hPa",
-                aggregate="last",
-                logger={"enabled": True},
-            )
-
+        # Main auto-logged run-time channel + in-memory-only Dash/debug channels:
+        # extracted into small _register_* helpers (mirrors soil.py's
+        # _register_state_channel/_register_progress_image_channel) so the exact
+        # data.add() kwargs -- notably every logger.enabled=False here, the collapse
+        # this issue makes -- are unit-testable without a full configure() bootstrap.
+        self._register_timestamp_creation_channel()
+        self._channel_keys = self._register_predict_channels(self._probes)
         if self._save_state:
-            self.data.add(
-                self._STATE_CHANNEL_KEY,
-                type=bytes,
-                name="Predicted soil state",
-                aggregate="last",
-                logger={"enabled": True},
-            )
-
+            self._register_state_channel()
         if self._save_plot:
-            self.data.add(
-                self._PLOT_CHANNEL_KEY,
-                type=bytes,
-                name="Predicted soil progress image",
-                unit="png",
-                aggregate="last",
-                logger={"enabled": True},
-            )
-
-        for c in _DIAGNOSTIC_CONSTANTS:
-            self.data.add(c, aggregate="last", logger={"enabled": True})
+            self._register_plot_channel()
+        self._register_diagnostic_channels()
 
         if not self._probes:
             logger.warning(
@@ -455,105 +452,315 @@ class SoilPredictor(SoilBase):
                 self.name,
             )
 
-        # --- Recommendation channels (normal auto-logged path) ---------------
-        # One row per run in the dedicated _RECOMMEND_TABLE_NAME table, keyed by run
-        # time only: recommend_w0_min ... recommend_w{max_windows-1}_min,
-        # recommend_total_min. Its own table (no timestamp_creation
-        # composite PK) lets the recommendation history accumulate through the normal
-        # auto-logger. Distinct keys from the trajectory table's w{i}_min PK columns
-        # below (different channels, different table).
-        self._recommend_window_keys = []
-        for i in range(self._max_windows):
-            key = f"recommend_w{i}_min"
-            self._recommend_window_keys.append(key)
+        # Header (`agri_field_forecast`) + detail (`agri_soil_forecast`) tables
+        # (direct connector write). Skipped entirely when no `logger` is
+        # configured (degrade, don't crash) -- see the module docstring.
+        self._header_window_min_keys = []
+        self._header_window_start_keys = []
+        self._traj_channel_keys = {}
+        self._detail_creation_keys = {}
+        self._detail_forecast_id_keys = {}
+        if self._logger_id is not None:
+            self._header_window_min_keys, self._header_window_start_keys = self._register_header_channels()
+            probe_identities = self._resolve_probe_identities(soil_block, self._probes)
+            (
+                self._traj_channel_keys,
+                self._detail_creation_keys,
+                self._detail_forecast_id_keys,
+            ) = self._register_detail_channels(self._probes, probe_identities)
+
+    # --- Channel registration helpers (data.add() kwargs, unit-testable) -------
+
+    def _register_timestamp_creation_channel(self) -> None:
+        """Main run-time channel: kept for in-memory/Dash use, but no longer
+        logged -- once the reference config's stale `table = "soil_predictor"`
+        default is dropped, a lone enabled channel here would still auto-create a
+        vestigial group-named table of PK-only rows. The run time now travels
+        via the header's timestamp index and the detail rows' timestamp_creation
+        value channel (`_register_detail_channels`)."""
+        self.data.add(
+            self._TIMESTAMP_CREATION_KEY,
+            name="Predictor Creation Timestamp",
+            type=pd.Timestamp,
+            aggregate="last",
+            logger={
+                "primary": True,
+                "nullable": False,
+                "enabled": False,
+            },
+        )
+
+    def _register_predict_channels(self, probes: list[ProbeSpec]) -> dict[str, str]:
+        """In-memory only (Dash/debug): the chosen candidate's forecast now
+        persists via the header's is_recommended + its agri_soil_forecast rows.
+        Returns probe.channel_id -> predict_<probe> channel key."""
+        channel_keys: dict[str, str] = {}
+        for probe in probes:
+            key = f"predict_{probe.channel_id}"
+            channel_keys[probe.channel_id] = key
             self.data.add(
                 key,
                 type=float,
-                name=f"Recommended window {i} duration",
+                name=f"Predicted {probe.name}",
+                unit="hPa",
+                aggregate="last",
+                logger={"enabled": False},
+            )
+        return channel_keys
+
+    def _register_state_channel(self) -> None:
+        """In-memory only (Dash/debug): no longer persisted (collapsed
+        recommendation stage -- see the module docstring)."""
+        self.data.add(
+            self._STATE_CHANNEL_KEY,
+            type=bytes,
+            name="Predicted soil state",
+            aggregate="last",
+            logger={"enabled": False},
+        )
+
+    def _register_plot_channel(self) -> None:
+        """In-memory only (Dash/debug): no longer persisted."""
+        self.data.add(
+            self._PLOT_CHANNEL_KEY,
+            type=bytes,
+            name="Predicted soil progress image",
+            unit="png",
+            aggregate="last",
+            logger={"enabled": False},
+        )
+
+    def _register_diagnostic_channels(self) -> None:
+        """In-memory only (Dash/debug): the forecast water-balance diagnostics
+        are no longer persisted."""
+        for c in _DIAGNOSTIC_CONSTANTS:
+            self.data.add(c, aggregate="last", logger={"enabled": False})
+
+    def _register_header_channels(self) -> tuple[list[str], list[str]]:
+        """`agri_field_forecast`: one row per candidate per run. Bound to the
+        configured `logger` connector; these channels are NEVER `.set()` by the
+        predictor -- the automatic flush (Channels.to_frame(unique=True)) skips
+        any channel whose timestamp is NaT, so leaving them un-set is what keeps
+        the auto path silent for them (see the module docstring). Returns
+        (window_min_keys, window_start_keys), w0 ... w{max_windows-1}, in order.
+        Only called when `self._logger_id is not None` (see configure())."""
+        self.data.add(
+            self._HEADER_FORECAST_ID_KEY,
+            name="Forecast candidate id",
+            type=int,
+            aggregate="last",
+            logger={
+                "connector": self._logger_id,
+                "table": self._HEADER_TABLE_NAME,
+                "primary": True,
+                "nullable": False,
+                "enabled": True,
+            },
+        )
+
+        window_min_keys = []
+        for i in range(self._max_windows):
+            key = f"w{i}_min"
+            window_min_keys.append(key)
+            self.data.add(
+                key,
+                type=float,
+                name=f"Window {i} duration",
                 unit="min",
                 aggregate="last",
-                logger={"enabled": True, "table": self._RECOMMEND_TABLE_NAME},
+                logger={
+                    "connector": self._logger_id,
+                    "table": self._HEADER_TABLE_NAME,
+                    "enabled": True,
+                },
+            )
+
+        window_start_keys = []
+        for i in range(self._max_windows):
+            key = f"w{i}_start"
+            window_start_keys.append(key)
+            self.data.add(
+                key,
+                type=str,
+                name=f"Window {i} start",
+                aggregate="last",
+                logger={
+                    "connector": self._logger_id,
+                    "table": self._HEADER_TABLE_NAME,
+                    "enabled": True,
+                },
             )
 
         self.data.add(
-            self._RECOMMEND_TOTAL_KEY,
-            type=float,
-            name="Recommended total watering duration",
-            unit="min",
+            self._HEADER_IS_RECOMMENDED_KEY,
+            type=bool,
+            name="Is recommended candidate",
             aggregate="last",
-            logger={"enabled": True, "table": self._RECOMMEND_TABLE_NAME},
+            logger={
+                "connector": self._logger_id,
+                "table": self._HEADER_TABLE_NAME,
+                "enabled": True,
+            },
         )
 
-        # --- Trajectory-table channels (direct connector write) --------------
-        # Bound to the configured `logger` connector, in a dedicated table
-        # (_TRAJ_TABLE_NAME) distinct from the default logger's predictor table.
-        # These channels are NEVER `.set()` by the predictor -- the automatic
-        # flush (Channels.to_frame(unique=True)) skips any channel whose
-        # timestamp is NaT, so leaving them un-set is what keeps the auto path
-        # silent for them (see the module docstring / PRD "Further Notes").
-        # Skipped entirely when no `logger` is configured (degrade, don't crash).
-        self._traj_window_keys = []
-        self._traj_channel_keys = {}
-        if self._logger_id is not None:
+        self.data.add(
+            self._HEADER_TOTAL_MIN_KEY,
+            type=float,
+            name="Total watering duration",
+            unit="min",
+            aggregate="last",
+            logger={
+                "connector": self._logger_id,
+                "table": self._HEADER_TABLE_NAME,
+                "enabled": True,
+            },
+        )
+
+        self.data.add(
+            self._HEADER_WEATHER_CREATION_KEY,
+            name="Weather forecast issue time",
+            type=pd.Timestamp,
+            aggregate="last",
+            logger={
+                "connector": self._logger_id,
+                "table": self._HEADER_TABLE_NAME,
+                "enabled": True,
+            },
+        )
+        return window_min_keys, window_start_keys
+
+    def _resolve_probe_identities(
+        self,
+        soil_block: Configurations,
+        probes: list[ProbeSpec],
+    ) -> dict[str, dict[str, Any]]:
+        """soil_id/field_id kwargs per probe, for the detail table's per-probe
+        channel triplet (`_register_detail_channels`). Read from the SAME
+        config the live ``SoilSimulation``'s own ``agri_soil_simulation`` probe
+        channel resolves -- ``[soil_simulation.data.channels.<probe_key>].soil_id``
+        (per probe) and ``[soil_simulation.data.channels].field_id``
+        (component-wide) -- reused code-side (mirrors ``soil.py``'s
+        ``_validate_probe_soil_ids``), NOT re-declared under the predictor's own
+        config: every channel sharing one probe's rows must carry an IDENTICAL
+        surrogate pair, because the SQL connector's per-attribute-set write
+        grouping (``table.py``) raises ``ResourceError`` if any resource in a
+        keyed-table write is missing a declared surrogate attribute.
+
+        A probe with no configured ``soil_id`` is warned (not raised, matching
+        ``soil.py``) and gets no ``soil_id`` kwarg at all -- the detail write
+        then fails at the next ``connector.write()`` for this table (caught by
+        the surrounding best-effort try/except and logged, not raised to the
+        caller), and because the write grouping raises on the FIRST resource
+        missing the attribute, ALL probes' rows for that tick are dropped
+        along with the misconfigured probe's. Accepted failure mode until the
+        fixtures carry soil_ids.
+        """
+        channels_cfg = soil_block.get_member("data", defaults={}).get_member("channels", defaults={})
+        field_id = channels_cfg.get("field_id", default=None)
+
+        identities: dict[str, dict[str, Any]] = {}
+        for probe in probes:
+            identity: dict[str, Any] = {}
+            if field_id is not None:
+                identity["field_id"] = field_id
+            soil_id = channels_cfg.get_member(probe.channel_id, defaults={}).get("soil_id", default=None)
+            if soil_id is None:
+                logger.warning(
+                    "%s: probe '%s' has no soil_id configured on "
+                    "[soil_simulation.data.channels.%s]; its agri_soil_forecast "
+                    "rows cannot be attributed to a probe.",
+                    self.name,
+                    probe.channel_id,
+                    probe.channel_id,
+                )
+            else:
+                identity["soil_id"] = soil_id
+            identities[probe.channel_id] = identity
+        return identities
+
+    def _register_detail_channels(
+        self,
+        probes: list[ProbeSpec],
+        probe_identities: dict[str, dict[str, Any]],
+    ) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+        """`agri_soil_forecast`: ALL candidates' per-probe tension rows. Same
+        never-`.set()` / logger-gated contract as `_register_header_channels`.
+
+        Each probe gets THREE channels: `traj_<probe>` (shared "water_tension"
+        DB column, like today) and its OWN `timestamp_creation`/`forecast_id`
+        TWINS (`traj_<probe>_timestamp_creation` / `traj_<probe>_forecast_id`,
+        sharing the "timestamp_creation"/"forecast_id" DB columns across probes
+        -- exactly the same shared-column pattern as `water_tension`) instead of
+        one shared pair for every probe: the connector's per-attribute-set
+        write grouping requires every channel on this table to carry the SAME
+        surrogate attributes as the group it belongs to, and a single shared
+        pair cannot carry N different probes' soil_ids at once. `probe_identities`
+        (`_resolve_probe_identities`) supplies the soil_id/field_id kwargs,
+        applied IDENTICALLY across a probe's three channels (declarations are
+        otherwise identical across probes too -- the schema's duplicate-column
+        guard is dead code, first-wins, so consistency here is load-bearing).
+
+        Returns (tension_keys, creation_keys, forecast_id_keys), each
+        probe.channel_id -> that probe's channel key. Only called when
+        `self._logger_id is not None` (see configure())."""
+        tension_keys: dict[str, str] = {}
+        creation_keys: dict[str, str] = {}
+        forecast_id_keys: dict[str, str] = {}
+        for probe in probes:
+            identity = probe_identities.get(probe.channel_id, {})
+            key = f"traj_{probe.channel_id}"
+            tension_keys[probe.channel_id] = key
             self.data.add(
-                self._TRAJ_TIMESTAMP_CREATION_KEY,
-                name="Trajectory Creation Timestamp",
+                key,
+                type=float,
+                name=f"Trajectory {probe.name}",
+                unit="hPa",
+                aggregate="last",
+                logger={
+                    "connector": self._logger_id,
+                    "table": self._DETAIL_TABLE_NAME,
+                    "column": "water_tension",
+                    "enabled": True,
+                },
+                **identity,
+            )
+
+            creation_key = f"{key}{self._DETAIL_TIMESTAMP_CREATION_SUFFIX}"
+            creation_keys[probe.channel_id] = creation_key
+            self.data.add(
+                creation_key,
+                name=f"Trajectory {probe.name} run timestamp",
                 type=pd.Timestamp,
                 aggregate="last",
                 logger={
                     "connector": self._logger_id,
-                    "table": self._TRAJ_TABLE_NAME,
+                    "table": self._DETAIL_TABLE_NAME,
+                    "column": "timestamp_creation",
                     "primary": True,
                     "nullable": False,
                     "enabled": True,
                 },
+                **identity,
             )
 
-            for i in range(self._max_windows):
-                key = f"w{i}_min"
-                self._traj_window_keys.append(key)
-                self.data.add(
-                    key,
-                    type=float,
-                    name=f"Trajectory window {i} duration",
-                    unit="min",
-                    aggregate="last",
-                    logger={
-                        "connector": self._logger_id,
-                        "table": self._TRAJ_TABLE_NAME,
-                        "primary": True,
-                        "nullable": False,
-                        "enabled": True,
-                    },
-                )
-
+            forecast_id_key = f"{key}{self._DETAIL_FORECAST_ID_SUFFIX}"
+            forecast_id_keys[probe.channel_id] = forecast_id_key
             self.data.add(
-                self._TRAJ_IS_RECOMMENDED_KEY,
-                type=bool,
-                name="Is recommended candidate",
+                forecast_id_key,
+                name=f"Trajectory {probe.name} candidate id",
+                type=int,
                 aggregate="last",
                 logger={
                     "connector": self._logger_id,
-                    "table": self._TRAJ_TABLE_NAME,
+                    "table": self._DETAIL_TABLE_NAME,
+                    "column": "forecast_id",
+                    "primary": True,
+                    "nullable": False,
                     "enabled": True,
                 },
+                **identity,
             )
-
-            for probe in self._probes:
-                key = f"traj_{probe.channel_id}"
-                self._traj_channel_keys[probe.channel_id] = key
-                self.data.add(
-                    key,
-                    type=float,
-                    name=f"Trajectory {probe.name}",
-                    unit="hPa",
-                    aggregate="last",
-                    logger={
-                        "connector": self._logger_id,
-                        "table": self._TRAJ_TABLE_NAME,
-                        "enabled": True,
-                    },
-                )
+        return tension_keys, creation_keys, forecast_id_keys
 
     @property
     def cooldown(self) -> pd.Timedelta:
@@ -580,9 +787,11 @@ class SoilPredictor(SoilBase):
     def predict(self, now: pd.Timestamp, forecast_creation: Optional[pd.Timestamp]) -> None:
         """One prediction tick; silently skips if no forecast or no live soil state yet.
 
-        ``forecast_creation`` is the composite-PK partner (forecast issue time) stamped
-        on every emitted row. Falls back to ``now`` when unavailable so the channel
-        always emits a non-null value.
+        ``forecast_creation`` (the weather forecast's issue time) is persisted only
+        as the header's ``weather_creation`` data column -- it is no longer a PK
+        partner (``now``, the predictor's own run time, is: see
+        ``_build_header_frame``/``_build_detail_frame``). Falls back to ``now`` when
+        unavailable so the column always gets a non-null value.
         """
         if forecast_creation is None:
             logger.debug(
@@ -760,19 +969,24 @@ class SoilPredictor(SoilBase):
             forecast_creation,
         )
 
-        # Secondary watering-grid writes -- the recommendation table, the
-        # all-candidate trajectory table, and the debug field plots. Best-effort and
-        # only when the grid path produced a recommendation: a failure here never
-        # affects the forecast already published on the main channels above.
+        # Secondary watering-grid writes -- the agri_field_forecast header, the
+        # agri_soil_forecast detail rows (ALL candidates), and the debug field
+        # plots. Best-effort and only when the grid path produced a
+        # recommendation: a failure here never affects the forecast already
+        # published on the main channels above. `now` is the run time (every
+        # run's rows are kept, keyed by it -- see _build_header_frame /
+        # _build_detail_frame); `forecast_creation` (the weather issue time) is
+        # persisted only as the header's weather_creation data column.
         if published and chosen is not None:
             try:
-                self._publish_recommendation(chosen, now, forecast_creation)
-                trajectory_frame = self._build_trajectory_frame(ladder_traj, chosen, forecast_creation)
-                self._write_trajectory_table(trajectory_frame)
+                header_frame = self._build_header_frame(self._ladder, chosen, now, forecast_creation)
+                self._write_header_table(header_frame)
+                detail_frame = self._build_detail_frame(self._ladder, ladder_traj, now)
+                self._write_detail_table(detail_frame)
                 self._write_trajectory_fields(ic_rel_sat, et_data, seg_et, horizon_start, horizon_end, chosen, now)
             except Exception:  # noqa: BLE001
                 logger.exception(
-                    "%s: recommendation/trajectory-write failed (now=%s, creation=%s); "
+                    "%s: header/detail-write failed (now=%s, creation=%s); "
                     "the forecast published on the main channels is unaffected.",
                     self.name,
                     now,
@@ -1667,161 +1881,240 @@ class SoilPredictor(SoilBase):
                     pd.Series(plot_values, index=save_index, dtype=object),
                 )
 
-    # Recommendation + trajectory-table publishing (the watering-grid outputs)
+    # Header + detail forecast-table publishing (the watering-grid outputs)
 
-    def _publish_recommendation(
+    @staticmethod
+    def _forecast_ids(ladder: list[tuple[pd.Timedelta, ...]]) -> dict[tuple[pd.Timedelta, ...], int]:
+        """Deterministic candidate-id enumeration for one run: a candidate's
+        ``forecast_id`` is its position in ``ladder``. ``ladder`` (``self._ladder``,
+        built once at ``configure()``) has a stable order for a given deployment
+        regardless of grid_mode (``fill_order`` or ``full``) or which candidates a
+        parallel roll-out happens to finish first, and that order does not change
+        run over run -- so the same candidate gets the same id every run. Shared by
+        ``_build_header_frame``/``_build_detail_frame`` so header and detail rows
+        agree on every candidate's id.
+        """
+        return {candidate: forecast_id for forecast_id, candidate in enumerate(ladder)}
+
+    def _build_header_frame(
         self,
+        ladder: list[tuple[pd.Timedelta, ...]],
         chosen: tuple[pd.Timedelta, ...],
         run_timestamp: pd.Timestamp,
-        forecast_creation: pd.Timestamp,
-    ) -> None:
-        """Publish the chosen candidate on the recommendation channels (normal
-        auto-logged path): one row per run at ``run_timestamp`` in the dedicated
-        ``_RECOMMEND_TABLE_NAME`` table. That table is keyed by run time only (no
-        ``timestamp_creation`` composite PK), so each run appends a row and the
-        recommendation history accumulates through the auto-logger -- no PK partner
-        to keep in sync, unlike the forecast table.
-
-        Per-window minutes: window indices beyond ``len(chosen)`` get ``0.0``
-        (deployments normally configure fewer windows than the fixed
-        ``_max_windows`` PK arity), not the trajectory table's ``-1`` sentinel --
-        a "no window configured" reading of 0 minutes is unambiguous on the
-        advisory channel, whereas the sentinel is only meaningful alongside the
-        trajectory table's fixed-arity PK columns. Plus the total watering
-        minutes: a ``recommend_total_min`` of ``0`` is the "do nothing"
-        recommendation; there is no separate status channel.
-
-        ``forecast_creation`` is accepted for call-site symmetry with the trajectory
-        write but is not persisted here: the recommendation row is keyed by run time,
-        not by the forecast issue.
-        """
-        total_minutes = self._total_minutes(chosen)
-
-        for i, key in enumerate(self._recommend_window_keys):
-            minutes = chosen[i].total_seconds() / 60.0 if i < len(chosen) else 0.0
-            self.data[key].set(run_timestamp, minutes)
-
-        self.data[self._RECOMMEND_TOTAL_KEY].set(run_timestamp, total_minutes)
-        logger.debug(
-            "%s: recommendation published: total=%.1fmin (now=%s).",
-            self.name,
-            total_minutes,
-            run_timestamp,
-        )
-
-    def _build_trajectory_frame(
-        self,
-        ladder_trajectories: dict[tuple[pd.Timedelta, ...], tuple[list[pd.Timestamp], dict[str, list[float]]]],
-        chosen: tuple[pd.Timedelta, ...],
-        forecast_creation: pd.Timestamp,
+        weather_creation: pd.Timestamp,
     ) -> pd.DataFrame:
-        """Build the all-candidate trajectory frame: index = forecast timestamps
-        (duplicated across candidates); columns = the trajectory channel KEYS
-        (``_TRAJ_TIMESTAMP_CREATION_KEY``, ``w0_min ... w{max_windows-1}_min``,
-        ``is_recommended``, ``traj_<probe>`` for every probe present in
-        ``ladder_trajectories``).
+        """Build the ``agri_field_forecast`` header frame: one row per candidate in
+        ``ladder``, indexed at ``run_timestamp`` (repeated across every row -- the
+        header's PK partner is ``forecast_id``, not a second timestamp channel).
 
-        Every candidate contributes one row per forecast timestamp: its
-        per-window minutes (``_UNUSED_WINDOW_SENTINEL`` for any window index
-        beyond ``len(candidate)``, so the PK column set is stable regardless of
-        how many windows a deployment configures), ``is_recommended`` (True only
-        for ``chosen``'s rows), and its per-probe signed matric potential
-        (negative hPa, from the retention model's ``psi_from_se``).
+        Per candidate: its deterministic ``forecast_id`` (``_forecast_ids``), its
+        per-window minutes (``None`` for any window index beyond the number of
+        CONFIGURED windows -- NULL, not a sentinel, since every candidate has the
+        same fixed-arity tuple length), the configured windows' clock-time starts
+        (also ``None`` past the configured count), ``is_recommended`` (True only
+        for ``chosen``), ``total_min``, and ``weather_creation`` (the weather issue
+        time this run used, constant across every row).
 
-        Pure and unit-testable: no ``Channel``/connector access here. Column
-        NAMES are the bare channel keys, not full channel ids --
-        ``_write_trajectory_table`` renames them to ids (``connector.write``
-        matches on ``resource.id in data.columns``) right before the write.
+        Pure and unit-testable: no ``Channel``/connector access here. Column NAMES
+        are the bare channel keys, not full channel ids -- ``_write_header_table``
+        renames them to ids (``connector.write`` matches on
+        ``resource.id in data.columns``) right before the write.
         """
+        forecast_ids = self._forecast_ids(ladder)
+        columns = [
+            self._HEADER_FORECAST_ID_KEY,
+            *self._header_window_min_keys,
+            *self._header_window_start_keys,
+            self._HEADER_IS_RECOMMENDED_KEY,
+            self._HEADER_TOTAL_MIN_KEY,
+            self._HEADER_WEATHER_CREATION_KEY,
+        ]
+        if not ladder:
+            return pd.DataFrame(columns=columns)
+
         rows: list[dict[str, Any]] = []
         index: list[pd.Timestamp] = []
 
-        for candidate, (timestamps, probe_series) in ladder_trajectories.items():
-            is_recommended = candidate == chosen
-            window_minutes = [
-                candidate[i].total_seconds() / 60.0 if i < len(candidate) else _UNUSED_WINDOW_SENTINEL
-                for i in range(self._max_windows)
-            ]
-            for t_idx, ts in enumerate(timestamps):
-                row: dict[str, Any] = {self._TRAJ_TIMESTAMP_CREATION_KEY: forecast_creation}
-                for key, minutes in zip(self._traj_window_keys, window_minutes):
-                    row[key] = minutes
-                row[self._TRAJ_IS_RECOMMENDED_KEY] = is_recommended
-                for probe_id, key in self._traj_channel_keys.items():
-                    values = probe_series.get(probe_id)
-                    row[key] = values[t_idx] if values is not None and t_idx < len(values) else np.nan
-                rows.append(row)
-                index.append(ts)
-
-        columns = [self._TRAJ_TIMESTAMP_CREATION_KEY, *self._traj_window_keys, self._TRAJ_IS_RECOMMENDED_KEY]
-        columns.extend(self._traj_channel_keys.values())
-        if not rows:
-            return pd.DataFrame(columns=columns)
+        for candidate in ladder:
+            row: dict[str, Any] = {
+                self._HEADER_FORECAST_ID_KEY: forecast_ids[candidate],
+                self._HEADER_IS_RECOMMENDED_KEY: candidate == chosen,
+                self._HEADER_TOTAL_MIN_KEY: self._total_minutes(candidate),
+                self._HEADER_WEATHER_CREATION_KEY: weather_creation,
+            }
+            for i, key in enumerate(self._header_window_min_keys):
+                row[key] = candidate[i].total_seconds() / 60.0 if i < len(candidate) else None
+            for i, key in enumerate(self._header_window_start_keys):
+                row[key] = self._windows[i].start.strftime("%H:%M") if i < len(self._windows) else None
+            rows.append(row)
+            index.append(run_timestamp)
 
         frame = pd.DataFrame.from_records(rows, index=pd.DatetimeIndex(index, name="timestamp"))
         return frame.loc[:, columns]
 
-    def _write_trajectory_table(self, frame: pd.DataFrame) -> None:
-        """Direct-write the all-candidate trajectory frame to the configured
-        `logger` connector, once. Renames ``frame``'s bare channel-key columns
-        to full channel ids (what ``connector.write`` matches against) first.
-        Warns and skips (never raises) if `logger` is not configured or the
-        connector cannot be resolved/is not a writable connector -- a grid
-        persistence failure must never abort the forecast on the main channels.
+    def _build_detail_frame(
+        self,
+        ladder: list[tuple[pd.Timedelta, ...]],
+        ladder_trajectories: dict[tuple[pd.Timedelta, ...], tuple[list[pd.Timestamp], dict[str, list[float]]]],
+        run_timestamp: pd.Timestamp,
+    ) -> pd.DataFrame:
+        """Build the ``agri_soil_forecast`` detail frame: per-probe LONG rows (one
+        row per candidate x forecast-timestamp x probe), not the old wide
+        ``traj_<probe>``-columns-side-by-side shape. Every row populates ONLY
+        that probe's own THREE columns (tension, its timestamp_creation twin,
+        its forecast_id twin) -- every OTHER probe's three columns are absent /
+        NaN on that row. The direct-write path groups rows back together per
+        probe by its channels' own surrogate ``soil_id``/``field_id``
+        attributes (config-side, identical across a probe's three channels --
+        see ``_register_detail_channels``/``_resolve_probe_identities``); each
+        probe's group then contains exactly its own three columns, so
+        ``Table._validate``'s per-group ``dropna(how="all")`` keeps every row
+        that has this probe's data and drops rows belonging to other probes.
+
+        ``run_timestamp`` (the predictor's RUN time, not the weather issue
+        time) and ``forecast_id`` (``_forecast_ids(ladder)``, the SAME
+        enumeration ``_build_header_frame`` uses) are written into every
+        probe's OWN twin columns, so their values are identical across probes
+        for a given candidate x timestamp -- only the column IDENTITY differs
+        per probe, not the values.
+
+        Pure and unit-testable: no ``Channel``/connector access here. Column NAMES
+        are the bare channel keys, not full channel ids -- ``_write_detail_table``
+        renames them to ids right before the write.
+        """
+        forecast_ids = self._forecast_ids(ladder)
+        columns: list[str] = []
+        for probe_id in self._traj_channel_keys:
+            columns.append(self._traj_channel_keys[probe_id])
+            columns.append(self._detail_creation_keys[probe_id])
+            columns.append(self._detail_forecast_id_keys[probe_id])
+
+        rows: list[dict[str, Any]] = []
+        index: list[pd.Timestamp] = []
+
+        for candidate, (timestamps, probe_series) in ladder_trajectories.items():
+            forecast_id = forecast_ids[candidate]
+            for probe_id, tension_key in self._traj_channel_keys.items():
+                values = probe_series.get(probe_id)
+                if not values:
+                    continue
+                creation_key = self._detail_creation_keys[probe_id]
+                forecast_id_key = self._detail_forecast_id_keys[probe_id]
+                for t_idx, ts in enumerate(timestamps):
+                    if t_idx >= len(values):
+                        continue
+                    rows.append(
+                        {
+                            tension_key: values[t_idx],
+                            creation_key: run_timestamp,
+                            forecast_id_key: forecast_id,
+                        }
+                    )
+                    index.append(ts)
+
+        if not rows:
+            return pd.DataFrame(columns=columns)
+
+        frame = pd.DataFrame.from_records(rows, index=pd.DatetimeIndex(index, name="timestamp"))
+        return frame.reindex(columns=columns)
+
+    def _write_direct_frame(
+        self,
+        frame: pd.DataFrame,
+        id_by_key_fn: Callable[[], dict[str, str]],
+        table_label: str,
+    ) -> None:
+        """Shared direct-write path for the header/detail forecast tables:
+        rename ``frame``'s bare channel-key columns to full channel ids (what
+        ``connector.write`` matches against) and write once. Warns and skips
+        (never raises) if `logger` is not configured or the connector cannot be
+        resolved/is not a writable connector -- a grid persistence failure must
+        never abort the forecast on the main channels.
+
+        ``id_by_key_fn`` is called ONLY once the connector has resolved and is
+        writable -- it touches ``self.data`` (one lookup per channel), which a
+        skip must never do (mirrors the old single-table write's behavior: a
+        missing `logger`/connector short-circuits before any channel lookup).
         """
         if self._logger_id is None:
             return
         if frame.empty:
-            logger.debug("%s: trajectory frame empty; skipping direct write.", self.name)
+            logger.debug("%s: %s frame empty; skipping direct write.", self.name, table_label)
             return
 
         connector = self._resolve_logger_connector(self._logger_id)
         if connector is None:
             logger.warning(
-                "%s: logger connector '%s' not found; skipping the trajectory-table direct write.",
+                "%s: logger connector '%s' not found; skipping the %s direct write.",
                 self.name,
                 self._logger_id,
+                table_label,
             )
             return
         if not hasattr(connector, "write"):
             logger.warning(
-                "%s: logger connector '%s' (%s) has no write(); skipping the trajectory-table direct write.",
+                "%s: logger connector '%s' (%s) has no write(); skipping the %s direct write.",
                 self.name,
                 self._logger_id,
                 type(connector).__name__,
+                table_label,
             )
             return
 
-        id_by_key = {
-            self._TRAJ_TIMESTAMP_CREATION_KEY: self.data[self._TRAJ_TIMESTAMP_CREATION_KEY].id,
-            self._TRAJ_IS_RECOMMENDED_KEY: self.data[self._TRAJ_IS_RECOMMENDED_KEY].id,
-        }
-        for key in self._traj_window_keys:
-            id_by_key[key] = self.data[key].id
-        for key in self._traj_channel_keys.values():
-            id_by_key[key] = self.data[key].id
-
-        write_frame = frame.rename(columns=id_by_key)
+        write_frame = frame.rename(columns=id_by_key_fn())
         try:
             connector.write(write_frame)
         except Exception:  # noqa: BLE001
             logger.exception(
-                "%s: direct write of the trajectory table to logger '%s' failed.",
+                "%s: direct write of the %s to logger '%s' failed.",
                 self.name,
+                table_label,
                 self._logger_id,
             )
             return
         logger.info(
-            "%s: trajectory table written: %d rows to logger '%s'.",
+            "%s: %s written: %d rows to logger '%s'.",
             self.name,
+            table_label,
             len(write_frame),
             self._logger_id,
         )
 
-    def _resolve_logger_connector(self, logger_id: str) -> Optional[Any]:
-        """Resolve the connector for the trajectory direct-write.
+    def _header_id_by_key(self) -> dict[str, str]:
+        id_by_key = {
+            self._HEADER_FORECAST_ID_KEY: self.data[self._HEADER_FORECAST_ID_KEY].id,
+            self._HEADER_IS_RECOMMENDED_KEY: self.data[self._HEADER_IS_RECOMMENDED_KEY].id,
+            self._HEADER_TOTAL_MIN_KEY: self.data[self._HEADER_TOTAL_MIN_KEY].id,
+            self._HEADER_WEATHER_CREATION_KEY: self.data[self._HEADER_WEATHER_CREATION_KEY].id,
+        }
+        for key in self._header_window_min_keys:
+            id_by_key[key] = self.data[key].id
+        for key in self._header_window_start_keys:
+            id_by_key[key] = self.data[key].id
+        return id_by_key
 
-        Prefer the connector the trajectory channels already bound at
+    def _write_header_table(self, frame: pd.DataFrame) -> None:
+        """Direct-write the ``agri_field_forecast`` header frame."""
+        self._write_direct_frame(frame, self._header_id_by_key, "header table")
+
+    def _detail_id_by_key(self) -> dict[str, str]:
+        id_by_key: dict[str, str] = {}
+        for key in self._traj_channel_keys.values():
+            id_by_key[key] = self.data[key].id
+        for key in self._detail_creation_keys.values():
+            id_by_key[key] = self.data[key].id
+        for key in self._detail_forecast_id_keys.values():
+            id_by_key[key] = self.data[key].id
+        return id_by_key
+
+    def _write_detail_table(self, frame: pd.DataFrame) -> None:
+        """Direct-write the ``agri_soil_forecast`` detail frame."""
+        self._write_direct_frame(frame, self._detail_id_by_key, "detail table")
+
+    def _resolve_logger_connector(self, logger_id: str) -> Optional[Any]:
+        """Resolve the connector for the header/detail direct-writes.
+
+        Prefer the connector the direct-write channels already bound at
         registration: ``ChannelConnector`` walks the component path to reach a
         root-level ``[connectors.<id>]`` connector (the common case for a shared
         SQL logger). ``self.connectors``' bare-key/id lookup is **component
@@ -1848,13 +2141,20 @@ class SoilPredictor(SoilBase):
             return None
 
     def _logger_connector_from_channel(self) -> Optional[Any]:
-        """The connector a trajectory channel already resolved against the root
-        context (``ChannelConnector``'s component-path walk), or ``None`` if the
-        channels are not registered / not bound yet. Defensive: a resolution
-        failure must degrade to the id-based fallback, never raise.
+        """The connector a forecast-table channel already resolved against the
+        root context (``ChannelConnector``'s component-path walk), or ``None``
+        if the channels are not registered / not bound yet. Defensive: a
+        resolution failure must degrade to the id-based fallback, never raise.
+
+        Anchored on the HEADER's forecast_id channel: unlike the detail table's
+        per-probe timestamp_creation/forecast_id twins, it is a single, always-
+        present channel whenever `self._logger_id is not None` (both tables are
+        registered together in `configure()`), and connector resolution is
+        table-agnostic -- every channel bound to this `logger` id resolves the
+        SAME connector regardless of which table it belongs to.
         """
         try:
-            return self.data[self._TRAJ_TIMESTAMP_CREATION_KEY].logger._get_registrator()
+            return self.data[self._HEADER_FORECAST_ID_KEY].logger._get_registrator()
         except Exception:  # noqa: BLE001
             return None
 
