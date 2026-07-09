@@ -1333,13 +1333,13 @@ class SoilBase(Component):
 
         kg_per_s_to_kg_per_h = 3600.0
         return {
-            "water_top_out": e_flux_mean * kg_per_s_to_kg_per_h,
-            "water_transpiration": t_flux_mean * kg_per_s_to_kg_per_h,
-            "water_top_in": top_in * kg_per_s_to_kg_per_h,
-            "water_bottom": bottom * kg_per_s_to_kg_per_h,
-            "water_runoff": runoff_rate * kg_per_s_to_kg_per_h,
-            "water_demand_unmet": unmet_rate * kg_per_s_to_kg_per_h,
-            "water_balance_residual": balance_residual * kg_per_s_to_kg_per_h,
+            "top_out": e_flux_mean * kg_per_s_to_kg_per_h,
+            "transpiration": t_flux_mean * kg_per_s_to_kg_per_h,
+            "top_in": top_in * kg_per_s_to_kg_per_h,
+            "bottom_out": bottom * kg_per_s_to_kg_per_h,
+            "runoff": runoff_rate * kg_per_s_to_kg_per_h,
+            "demand_unmet": unmet_rate * kg_per_s_to_kg_per_h,
+            "balance_residual": balance_residual * kg_per_s_to_kg_per_h,
         }
 
 

@@ -24,6 +24,8 @@ import numpy as np
 import pandas as pd
 from lories import Constant
 from lories.components.weather import Weather
+from lories.core import ConfigurationError
+from lories.data import Channels
 from lories.typing import Configurations
 from lories.util import to_timedelta
 
@@ -122,25 +124,29 @@ class SoilSimulation(SoilBase):
     SIMULATION_STATE = Constant(bytes, "simulation_state", "Soil Simulation State", "-")
     SOIL_PROGRESS_IMAGE = Constant(bytes, "soil_progress_image", "Soil Simulation Progress Image", "png")
 
-    # Internal math in kg/(m²·s); channels publish in kg/(m²·h).
-    WATER_TOP_IN = Constant(float, "water_top_in", "Top Water Input (Irrigation)", "kg/(m^2*h)")
-    WATER_TOP_OUT = Constant(float, "water_top_out", "Top Water Output (Evaporation)", "kg/(m^2*h)")
-    WATER_BOTTOM = Constant(float, "water_bottom", "Bottom Water Output (Drainage)", "kg/(m^2*h)")
-    WATER_TRANSP = Constant(float, "water_transpiration", "Plant Transpiration", "kg/(m^2*h)")
+    # Internal math in kg/(m²·s); channels publish in kg/(m²·h). Short keys with
+    # context="water" (house pattern, cf. context="pv" in solar/system.py): the
+    # registry id stays "water_*"-unique while the bare key becomes the channel
+    # key / agri_field_simulation SQL column.
+    WATER_TOP_IN = Constant(float, "top_in", "Top Water Input (Irrigation + Rain)", "kg/(m^2*h)", context="water")
+    WATER_TOP_OUT = Constant(float, "top_out", "Top Water Output (Evaporation)", "kg/(m^2*h)", context="water")
+    WATER_BOTTOM = Constant(float, "bottom_out", "Bottom Water Output (Drainage)", "kg/(m^2*h)", context="water")
+    WATER_TRANSP = Constant(float, "transpiration", "Plant Transpiration", "kg/(m^2*h)", context="water")
     # Per-step clipper residuals, area-normalised [kg/(m²·h)].
-    WATER_RUNOFF = Constant(float, "water_runoff", "Rejected Top Influx (Runoff)", "kg/(m^2*h)")
-    WATER_DEMAND_UNMET = Constant(float, "water_demand_unmet", "Unmet Evap+Transp Demand", "kg/(m^2*h)")
+    WATER_RUNOFF = Constant(float, "runoff", "Rejected Top Influx (Runoff)", "kg/(m^2*h)", context="water")
+    WATER_DEMAND_UNMET = Constant(float, "demand_unmet", "Unmet Evap+Transp Demand", "kg/(m^2*h)", context="water")
     # Gap between integral closure and independent bottom-face drainage estimate; non-zero flags solver drift.
     WATER_BALANCE_RESIDUAL = Constant(
         float,
-        "water_balance_residual",
+        "balance_residual",
         "Mass-Balance Residual (integral - direct)",
         "kg/(m^2*h)",
+        context="water",
     )
     # Per-step assimilation increment from anchoring [kg per out-of-plane metre,
     # matching total_water()]. A diagnostic of how hard the correction works; not
     # a flux, so it is excluded from the mass-balance residual.
-    WATER_ANCHOR = Constant(float, "water_anchor", "Anchor Assimilation Increment", "kg/m")
+    WATER_ANCHOR = Constant(float, "anchor", "Anchor Assimilation Increment", "kg/m", context="water")
 
     _plot_config: Optional[PlotConfig] = None
 
@@ -192,7 +198,7 @@ class SoilSimulation(SoilBase):
         # ponding + feddes are sibling blocks of [pde], not nested under it.
         apply_surface_forcing(self._ode_config, configs)
 
-        self.data.add(SoilSimulation.SIMULATION_STATE, aggregate="last", logger={"enabled": True})
+        self._register_state_channel()
         for c in (
             SoilSimulation.WATER_TOP_IN,
             SoilSimulation.WATER_TOP_OUT,
@@ -227,7 +233,7 @@ class SoilSimulation(SoilBase):
             self._plot_ax = None
             if self._plot_config.save or self._plot_config.live:
                 os.makedirs(self._plot_config.dir, exist_ok=True)
-            self.data.add(SoilSimulation.SOIL_PROGRESS_IMAGE, aggregate="last", logger={"enabled": True})
+            self._register_progress_image_channel()
 
         self._pde = self._build_pde()
         logger.info(
@@ -367,6 +373,18 @@ class SoilSimulation(SoilBase):
 
     def apply_state_blob(self, raw: bytes, timestamp: pd.Timestamp) -> None:
         if raw is None or len(raw) == 0:
+            return
+        if self._last_simulated_at is not None and timestamp <= self._last_simulated_at:
+            # Restrict the restore to the initial read: once wired, the read-side
+            # connector's listener also fires on every tick's own _save_state()
+            # self-notification, and a stale connector read arriving after ticking
+            # starts must not rewind the sim clock backwards on the next advance().
+            logger.debug(
+                "%s: ignoring soil state blob from %s (already simulated through %s)",
+                self.name,
+                timestamp,
+                self._last_simulated_at,
+            )
             return
         try:
             self._pde.load_state_blob(raw)
@@ -528,6 +546,7 @@ class SoilSimulation(SoilBase):
             self._probes.append(probe)
 
         if self._probes:
+            self._validate_probe_soil_ids()
             logger.info(
                 "%s: registered %d tension probe(s)",
                 self.name,
@@ -541,8 +560,52 @@ class SoilSimulation(SoilBase):
             name=probe.name,
             unit="hPa",
             aggregate="mean",
-            logger={"enabled": True},
+            logger={"enabled": True, "table": "agri_soil_simulation", "column": "water_tension"},
         )
+
+    def _register_state_channel(self) -> None:
+        self.data.add(
+            SoilSimulation.SIMULATION_STATE,
+            aggregate="last",
+            logger={"enabled": True, "column": "state"},
+        )
+
+    def _register_progress_image_channel(self) -> None:
+        self.data.add(
+            SoilSimulation.SOIL_PROGRESS_IMAGE,
+            aggregate="last",
+            logger={"enabled": True, "column": "image"},
+        )
+
+    def _validate_probe_soil_ids(self) -> None:
+        """soil_id identity (R6): per-probe ``[data.channels.<key>] soil_id = N``.
+
+        A duplicate soil_id within the field raises; a probe missing soil_id
+        only warns -- fixtures gain soil_ids in a later issue, so a
+        configure-time raise here would red the suite until then.
+        """
+        channels_cfg = self.data.configs.get_member(Channels.TYPE, defaults={})
+        seen: dict[Any, str] = {}
+        for probe in self._probes:
+            probe_cfg = channels_cfg.get_member(probe.channel_id, defaults={})
+            soil_id = probe_cfg.get("soil_id", default=None)
+            if soil_id is None:
+                logger.warning(
+                    "%s: probe '%s' has no soil_id configured; its "
+                    "agri_soil_simulation rows cannot be attributed to a probe. "
+                    "Set [data.channels.%s] soil_id = N (mirrored probes reuse "
+                    "the twin sensor's id; model-only probes use ids >= 100).",
+                    self.name,
+                    probe.channel_id,
+                    probe.channel_id,
+                )
+                continue
+            if soil_id in seen:
+                raise ConfigurationError(
+                    f"{self.name}: duplicate soil_id {soil_id!r} on probes "
+                    f"'{seen[soil_id]}' and '{probe.channel_id}'"
+                )
+            seen[soil_id] = probe.channel_id
 
     def _sample_probes(self, now: pd.Timestamp) -> None:
         if not self._probes:

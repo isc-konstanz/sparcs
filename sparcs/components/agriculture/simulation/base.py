@@ -228,14 +228,7 @@ class FieldSimulation(Component):
         self._evapo_rename = {c.id: c.key for c in self._weather_channels}
 
         soil_data = self.soil_simulation.data
-        if not soil_data.simulation_state.has_logger():
-            logger.warning(
-                "%s: SIMULATION_STATE has no logger configured; soil state will not "
-                "persist across restarts. Configure a logger on the channel to enable "
-                "warm starts.",
-                self.name,
-            )
-        if soil_data.simulation_state.has_connector():
+        if self._check_state_channel_warm_start(soil_data):
             self.data.register(
                 self._state_callback,
                 soil_data.simulation_state,
@@ -484,6 +477,28 @@ class FieldSimulation(Component):
                     continue  # published by Evapotranspiration as the per-segment bulk mean
                 self.data[c].set(ts, float(df[c].iloc[-1]))
         return df
+
+    def _check_state_channel_warm_start(self, soil_data: Any) -> bool:
+        """Warn about a warm-start-breaking SIMULATION_STATE config; return
+        whether the restore listener should be registered (a read-side
+        connector is present)."""
+        state_channel = soil_data.simulation_state
+        if not state_channel.has_logger():
+            logger.warning(
+                "%s: SIMULATION_STATE has no logger configured; soil state will not "
+                "persist across restarts. Configure a logger on the channel to enable "
+                "warm starts.",
+                self.name,
+            )
+        elif not state_channel.has_connector():
+            logger.warning(
+                "%s: SIMULATION_STATE has a logger but no read-side connector "
+                "configured; soil state will be written but never restored on "
+                "restart. Configure a connector on the channel to enable warm "
+                "starts.",
+                self.name,
+            )
+        return state_channel.has_connector()
 
     def _state_callback(self, data: pd.DataFrame) -> None:
         if data.empty or self.soil_simulation is None:

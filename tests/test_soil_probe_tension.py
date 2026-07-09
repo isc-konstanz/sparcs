@@ -20,6 +20,7 @@ import types
 import pytest
 
 import pandas as pd
+from lories.core import ConfigurationError
 
 soil = pytest.importorskip("sparcs.components.agriculture.simulation.soil")
 SoilSimulation = soil.SoilSimulation
@@ -119,3 +120,94 @@ def test_sample_probes_drier_probe_yields_larger_tension(monkeypatch):
     dry_tension = fake["soil_30cm"].calls[0][1]
     wet_tension = fake["soil_60cm"].calls[0][1]
     assert dry_tension < wet_tension < 0.0
+
+
+# --- probe channels route to agri_soil_simulation.water_tension --------------
+
+
+def test_register_probe_sets_soil_simulation_table_and_column(monkeypatch):
+    """Without this override the probe channel would inherit the component's
+    default table (keyed by field_id only) and N probes would upsert-clobber
+    one shared column."""
+    sim, fake = _bare_sim(monkeypatch, probes=[], sample_by_id={})
+
+    sim._register_probe(_probe("soil_30cm", "Soil 30cm"))
+
+    _, kwargs = fake.added[0]
+    assert kwargs["logger"]["table"] == "agri_soil_simulation"
+    assert kwargs["logger"]["column"] == "water_tension"
+
+
+# --- soil_id identity validation ----------------------------------------------
+
+
+class _FakeChannelConfig:
+    def __init__(self, values: dict):
+        self._values = values
+
+    def get(self, key, default=None):
+        return self._values.get(key, default)
+
+
+class _FakeChannelsConfig:
+    def __init__(self, per_channel: dict):
+        self._per_channel = per_channel
+
+    def get_member(self, key, defaults=None):
+        return _FakeChannelConfig(self._per_channel.get(key, defaults or {}))
+
+
+class _FakeDataConfigs:
+    """Stand-in for ``self.data.configs``: only the ``get_member`` surface
+    ``_validate_probe_soil_ids`` touches (``[data.channels.<key>] soil_id``)."""
+
+    def __init__(self, per_channel: dict):
+        self._channels_cfg = _FakeChannelsConfig(per_channel)
+
+    def get_member(self, key, defaults=None):
+        return self._channels_cfg
+
+
+def _bare_sim_for_soil_id_validation(monkeypatch, probes, per_channel_soil_ids):
+    sim = object.__new__(SoilSimulation)
+    sim._name = "test_soil_simulation"
+    sim._probes = probes
+    fake_data = types.SimpleNamespace(configs=_FakeDataConfigs(per_channel_soil_ids))
+    monkeypatch.setattr(SoilSimulation, "data", property(lambda self: fake_data))
+    return sim
+
+
+def test_validate_probe_soil_ids_duplicate_raises(monkeypatch):
+    probes = [_probe("soil_30cm", "Soil 30cm"), _probe("soil_60cm", "Soil 60cm")]
+    sim = _bare_sim_for_soil_id_validation(
+        monkeypatch,
+        probes,
+        {"soil_30cm": {"soil_id": 3}, "soil_60cm": {"soil_id": 3}},
+    )
+
+    with pytest.raises(ConfigurationError):
+        sim._validate_probe_soil_ids()
+
+
+def test_validate_probe_soil_ids_missing_only_warns(monkeypatch, caplog):
+    probes = [_probe("soil_30cm", "Soil 30cm")]
+    sim = _bare_sim_for_soil_id_validation(monkeypatch, probes, {})
+
+    with caplog.at_level("WARNING"):
+        sim._validate_probe_soil_ids()  # must not raise
+
+    assert any("soil_id" in message for message in caplog.messages)
+
+
+def test_validate_probe_soil_ids_unique_ids_no_warning(monkeypatch, caplog):
+    probes = [_probe("soil_30cm", "Soil 30cm"), _probe("soil_60cm", "Soil 60cm")]
+    sim = _bare_sim_for_soil_id_validation(
+        monkeypatch,
+        probes,
+        {"soil_30cm": {"soil_id": 3}, "soil_60cm": {"soil_id": 6}},
+    )
+
+    with caplog.at_level("WARNING"):
+        sim._validate_probe_soil_ids()
+
+    assert caplog.messages == []
