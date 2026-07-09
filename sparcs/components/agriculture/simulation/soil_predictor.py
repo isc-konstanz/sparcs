@@ -12,9 +12,11 @@ row per candidate per run (durations, window starts, ``is_recommended``,
 ``weather_creation``) and ALL candidates' per-probe tension trajectories in
 ``agri_soil_forecast``. There is no separate recommendation table -- the
 chosen candidate is the header row with ``is_recommended = True``. The
-in-memory ``predict_<probe>`` channels (and the debug ``predict_state`` /
-``predict_plot`` blobs) stay available for Dash/debugging but are no longer
-logged.
+chosen candidate's watering schedule is additionally persisted as
+state-transition edge rows in ``agri_field_irrigation`` (one row per planned
+on/off change, minute-exact). The in-memory ``predict_<probe>`` channels (and
+the debug ``predict_state`` / ``predict_plot`` blobs) stay available for
+Dash/debugging but are no longer logged.
 """
 
 from __future__ import annotations
@@ -163,6 +165,20 @@ class SoilPredictor(SoilBase):
     _DETAIL_TABLE_NAME: str = "agri_soil_forecast"
     _DETAIL_TIMESTAMP_CREATION_SUFFIX: str = "_timestamp_creation"
     _DETAIL_FORECAST_ID_SUFFIX: str = "_forecast_id"
+
+    # --- Irrigation-plan table (direct connector write) ------------------------
+    # `agri_field_irrigation`: the chosen candidate's watering schedule as
+    # state-transition edge rows (one row per on/off edge), indexed at the edge's
+    # OWN timestamp -- unlike the header table, this index varies per row, like
+    # the detail table's future timestamps. `timestamp_creation` is the
+    # predictor's RUN time, the PK partner that keeps every run's edges distinct.
+    # Unlike the detail table's per-probe twins, only ONE `timestamp_creation`
+    # value channel is needed: this table has a single field per predictor
+    # component (field_id cascades component-wide via config, not per-row), so
+    # there is no per-probe soil_id to disambiguate.
+    _IRRIGATION_TABLE_NAME: str = "agri_field_irrigation"
+    _IRRIGATION_STATE_KEY: str = "irrigation_state"
+    _IRRIGATION_TIMESTAMP_CREATION_KEY: str = "irrigation_timestamp_creation"
 
     _horizon: pd.Timedelta
     _save_freq: pd.Timedelta
@@ -452,9 +468,10 @@ class SoilPredictor(SoilBase):
                 self.name,
             )
 
-        # Header (`agri_field_forecast`) + detail (`agri_soil_forecast`) tables
-        # (direct connector write). Skipped entirely when no `logger` is
-        # configured (degrade, don't crash) -- see the module docstring.
+        # Header (`agri_field_forecast`) + detail (`agri_soil_forecast`) +
+        # irrigation-plan (`agri_field_irrigation`) tables (direct connector
+        # write). Skipped entirely when no `logger` is configured (degrade,
+        # don't crash) -- see the module docstring.
         self._header_window_min_keys = []
         self._header_window_start_keys = []
         self._traj_channel_keys = {}
@@ -468,6 +485,7 @@ class SoilPredictor(SoilBase):
                 self._detail_creation_keys,
                 self._detail_forecast_id_keys,
             ) = self._register_detail_channels(self._probes, probe_identities)
+            self._register_irrigation_channels()
 
     # --- Channel registration helpers (data.add() kwargs, unit-testable) -------
 
@@ -762,6 +780,39 @@ class SoilPredictor(SoilBase):
             )
         return tension_keys, creation_keys, forecast_id_keys
 
+    def _register_irrigation_channels(self) -> None:
+        """`agri_field_irrigation`: the chosen candidate's watering schedule as
+        state-transition edge rows. Same never-`.set()` / logger-gated contract
+        as `_register_header_channels`; only called when `self._logger_id is
+        not None` (see configure()). Only one field per predictor component, so
+        a single shared `timestamp_creation` value channel is enough -- no
+        per-probe twins like the detail table needs."""
+        self.data.add(
+            self._IRRIGATION_STATE_KEY,
+            type=bool,
+            name="Irrigation plan state",
+            aggregate="last",
+            logger={
+                "connector": self._logger_id,
+                "table": self._IRRIGATION_TABLE_NAME,
+                "enabled": True,
+            },
+        )
+        self.data.add(
+            self._IRRIGATION_TIMESTAMP_CREATION_KEY,
+            name="Irrigation plan run timestamp",
+            type=pd.Timestamp,
+            aggregate="last",
+            logger={
+                "connector": self._logger_id,
+                "table": self._IRRIGATION_TABLE_NAME,
+                "column": "timestamp_creation",
+                "primary": True,
+                "nullable": False,
+                "enabled": True,
+            },
+        )
+
     @property
     def cooldown(self) -> pd.Timedelta:
         """Per-listener backpressure floor for the ``_predict_callback`` registration
@@ -970,23 +1021,26 @@ class SoilPredictor(SoilBase):
         )
 
         # Secondary watering-grid writes -- the agri_field_forecast header, the
-        # agri_soil_forecast detail rows (ALL candidates), and the debug field
-        # plots. Best-effort and only when the grid path produced a
-        # recommendation: a failure here never affects the forecast already
-        # published on the main channels above. `now` is the run time (every
-        # run's rows are kept, keyed by it -- see _build_header_frame /
-        # _build_detail_frame); `forecast_creation` (the weather issue time) is
-        # persisted only as the header's weather_creation data column.
+        # agri_soil_forecast detail rows (ALL candidates), the chosen candidate's
+        # agri_field_irrigation edge rows, and the debug field plots. Best-effort
+        # and only when the grid path produced a recommendation: a failure here
+        # never affects the forecast already published on the main channels
+        # above. `now` is the run time (every run's rows are kept, keyed by it --
+        # see _build_header_frame / _build_detail_frame / _build_irrigation_frame);
+        # `forecast_creation` (the weather issue time) is persisted only as the
+        # header's weather_creation data column.
         if published and chosen is not None:
             try:
                 header_frame = self._build_header_frame(self._ladder, chosen, now, forecast_creation)
                 self._write_header_table(header_frame)
                 detail_frame = self._build_detail_frame(self._ladder, ladder_traj, now)
                 self._write_detail_table(detail_frame)
+                irrigation_frame = self._build_irrigation_frame(chosen, horizon_start, horizon_end, now)
+                self._write_irrigation_table(irrigation_frame)
                 self._write_trajectory_fields(ic_rel_sat, et_data, seg_et, horizon_start, horizon_end, chosen, now)
             except Exception:  # noqa: BLE001
                 logger.exception(
-                    "%s: header/detail-write failed (now=%s, creation=%s); "
+                    "%s: header/detail/irrigation-write failed (now=%s, creation=%s); "
                     "the forecast published on the main channels is unaffected.",
                     self.name,
                     now,
@@ -2018,13 +2072,89 @@ class SoilPredictor(SoilBase):
         frame = pd.DataFrame.from_records(rows, index=pd.DatetimeIndex(index, name="timestamp"))
         return frame.reindex(columns=columns)
 
+    def _build_irrigation_frame(
+        self,
+        candidate: tuple[pd.Timedelta, ...],
+        horizon_start: pd.Timestamp,
+        horizon_end: pd.Timestamp,
+        run_timestamp: pd.Timestamp,
+    ) -> pd.DataFrame:
+        """Build the ``agri_field_irrigation`` edge-row frame for the CHOSEN
+        candidate's watering schedule: one ``(on_ts, True)`` row and one
+        ``(off_ts, False)`` row per MERGED on-interval, both stamped with
+        ``run_timestamp``. Re-derives the schedule via ``_build_flow_schedule``
+        -- built during solving but discarded there -- instead of threading it
+        through, keeping this a function of the chosen candidate's durations
+        and the horizon bounds alone. A zero-duration (do-nothing) candidate
+        yields no intervals and therefore zero rows: a plan with no watering
+        has no state transition to record.
+
+        ``_build_flow_schedule`` clamps every interval's ``off_ts`` to
+        ``horizon_end`` but does not otherwise guarantee non-degenerate,
+        disjoint, ordered intervals, so ``_merge_irrigation_intervals`` sorts,
+        drops any interval a short horizon collapsed to ``on_ts >= off_ts``,
+        and merges any two intervals that touch or overlap before edges are
+        emitted -- see that method for why. The returned off edge for a window
+        whose configured duration would run past the horizon IS the closing
+        edge (the clamp above), so no separate trailing-edge case is needed
+        here.
+
+        Pure and unit-testable: no ``Channel``/connector access here. Column NAMES
+        are the bare channel keys, not full channel ids -- ``_write_irrigation_table``
+        renames them to ids right before the write.
+        """
+        columns = [self._IRRIGATION_STATE_KEY, self._IRRIGATION_TIMESTAMP_CREATION_KEY]
+        schedule = self._build_flow_schedule(self._windows, list(candidate), self._flow_m3s, horizon_start, horizon_end)
+        intervals = self._merge_irrigation_intervals(schedule)
+        if not intervals:
+            return pd.DataFrame(columns=columns)
+
+        rows: list[dict[str, Any]] = []
+        index: list[pd.Timestamp] = []
+        for on_ts, off_ts in intervals:
+            rows.append({self._IRRIGATION_STATE_KEY: True, self._IRRIGATION_TIMESTAMP_CREATION_KEY: run_timestamp})
+            index.append(on_ts)
+            rows.append({self._IRRIGATION_STATE_KEY: False, self._IRRIGATION_TIMESTAMP_CREATION_KEY: run_timestamp})
+            index.append(off_ts)
+
+        frame = pd.DataFrame.from_records(rows, index=pd.DatetimeIndex(index, name="timestamp"))
+        return frame.loc[:, columns]
+
+    @staticmethod
+    def _merge_irrigation_intervals(
+        intervals: list[tuple[pd.Timestamp, pd.Timestamp]],
+    ) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+        """Drop degenerate/inverted intervals (``on_ts >= off_ts`` -- a window
+        whose resolved start lands at or after a horizon too short to reach
+        it, or whose clamped ``off_ts`` collapses back onto ``on_ts``), then
+        sort the rest by ``on_ts`` and merge any pair that touches or
+        overlaps (``next_on_ts <= current_off_ts``) into one interval.
+        Nothing upstream forbids two configured windows from abutting or
+        overlapping once resolved onto the horizon, and irrigation staying on
+        continuously across such a joint has no state transition to record
+        there -- emitting independent edges per window would instead place a
+        ``(False, True)`` pair on the identical timestamp, an ambiguous PK
+        write the connector's upsert would resolve nondeterministically.
+        """
+        valid = sorted((on_ts, off_ts) for on_ts, off_ts in intervals if on_ts < off_ts)
+        if not valid:
+            return []
+
+        merged: list[list[pd.Timestamp]] = [list(valid[0])]
+        for on_ts, off_ts in valid[1:]:
+            if on_ts <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], off_ts)
+            else:
+                merged.append([on_ts, off_ts])
+        return [(on_ts, off_ts) for on_ts, off_ts in merged]
+
     def _write_direct_frame(
         self,
         frame: pd.DataFrame,
         id_by_key_fn: Callable[[], dict[str, str]],
         table_label: str,
     ) -> None:
-        """Shared direct-write path for the header/detail forecast tables:
+        """Shared direct-write path for the header/detail/irrigation tables:
         rename ``frame``'s bare channel-key columns to full channel ids (what
         ``connector.write`` matches against) and write once. Warns and skips
         (never raises) if `logger` is not configured or the connector cannot be
@@ -2110,6 +2240,16 @@ class SoilPredictor(SoilBase):
     def _write_detail_table(self, frame: pd.DataFrame) -> None:
         """Direct-write the ``agri_soil_forecast`` detail frame."""
         self._write_direct_frame(frame, self._detail_id_by_key, "detail table")
+
+    def _irrigation_id_by_key(self) -> dict[str, str]:
+        return {
+            self._IRRIGATION_STATE_KEY: self.data[self._IRRIGATION_STATE_KEY].id,
+            self._IRRIGATION_TIMESTAMP_CREATION_KEY: self.data[self._IRRIGATION_TIMESTAMP_CREATION_KEY].id,
+        }
+
+    def _write_irrigation_table(self, frame: pd.DataFrame) -> None:
+        """Direct-write the ``agri_field_irrigation`` edge-row frame."""
+        self._write_direct_frame(frame, self._irrigation_id_by_key, "irrigation table")
 
     def _resolve_logger_connector(self, logger_id: str) -> Optional[Any]:
         """Resolve the connector for the header/detail direct-writes.

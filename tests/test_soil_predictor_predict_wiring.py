@@ -111,6 +111,10 @@ def _make_predictor(windows, calls, last_simulated_at=pd.Timestamp("2026-07-03 0
         calls.append("build_detail_frame")
         return pd.DataFrame()
 
+    def _build_irrigation_frame(*_a, **_k):
+        calls.append("build_irrigation_frame")
+        return pd.DataFrame()
+
     def _rollout_parallel(*_a, **_k):
         calls.append("rollout_parallel")
         return {}
@@ -125,17 +129,20 @@ def _make_predictor(windows, calls, last_simulated_at=pd.Timestamp("2026-07-03 0
     p._write_header_table = lambda *a, **k: calls.append("write_header_table")
     p._build_detail_frame = _build_detail_frame
     p._write_detail_table = lambda *a, **k: calls.append("write_detail_table")
+    p._build_irrigation_frame = _build_irrigation_frame
+    p._write_irrigation_table = lambda *a, **k: calls.append("write_irrigation_table")
     p._write_trajectory_fields = lambda *a, **k: calls.append("write_fields")
     return p
 
 
 def test_predict_grid_block_invokes_all_collaborators(caplog):
     """The happy path: the legacy roll runs, then the grid block invokes the
-    ladder roll-out, selector, and the header/detail frame build + direct
-    write -- and its try/except swallows nothing. This fails if predict() calls a
-    grid collaborator with a non-existent attribute or a wrong argument: the
-    resulting exception is caught by the grid try/except, so the collaborator spies
-    never fire and the 'watering-grid' error is logged -- both asserted below."""
+    ladder roll-out, selector, and the header/detail/irrigation frame build +
+    direct write -- and its try/except swallows nothing. This fails if predict()
+    calls a grid collaborator with a non-existent attribute or a wrong argument:
+    the resulting exception is caught by the grid try/except, so the collaborator
+    spies never fire and the 'watering-grid' error is logged -- both asserted
+    below."""
     calls = []
     predictor = _make_predictor([object()], calls)
     now = pd.Timestamp("2026-07-03 01:30", tz=_TZ)
@@ -152,9 +159,13 @@ def test_predict_grid_block_invokes_all_collaborators(caplog):
         "write_header_table",
         "build_detail_frame",
         "write_detail_table",
+        "build_irrigation_frame",
+        "write_irrigation_table",
     ):
         assert step in calls, f"{step!r} not called; predict() grid wiring is broken. calls={calls}"
     assert "watering-grid" not in caplog.text.lower(), f"grid try/except swallowed an error: {caplog.text}"
+    # The irrigation plan is published after the header/detail tables.
+    assert calls.index("write_detail_table") < calls.index("build_irrigation_frame")
 
 
 def test_predict_publishes_resolved_chosen_when_recommendation_is_nonzero(caplog):
@@ -200,7 +211,7 @@ def test_predict_degrades_to_caterpillar_when_parallel_roll_raises(caplog):
     """parallel=True but the parallel executor raises (e.g. the pool cannot be
     created): predict() must still produce the forecast via the sequential
     caterpillar, log the fallback, and NOT let the failure reach the outer grid
-    try/except (which would skip the header + detail write)."""
+    try/except (which would skip the header + detail + irrigation write)."""
     calls = []
     predictor = _make_predictor([object()], calls, parallel=True)
 
@@ -224,6 +235,8 @@ def test_predict_degrades_to_caterpillar_when_parallel_roll_raises(caplog):
         "write_header_table",
         "build_detail_frame",
         "write_detail_table",
+        "build_irrigation_frame",
+        "write_irrigation_table",
     ):
         assert step in calls, f"{step!r} not called; parallel-degrade wiring is broken. calls={calls}"
     assert "rollout_parallel" not in calls
@@ -250,6 +263,8 @@ def test_predict_grid_block_skipped_without_windows():
         "write_header_table",
         "build_detail_frame",
         "write_detail_table",
+        "build_irrigation_frame",
+        "write_irrigation_table",
     ):
         assert grid_step not in calls
 
@@ -302,7 +317,7 @@ def test_predict_short_forecast_chain_skips():
 def test_predict_grid_failure_falls_back_to_zero_flow_forecast(caplog):
     """A grid/DB failure must never abort the tick: a raising ladder roll-out is
     caught and logged, the held zero-flow roll is published as the fallback, and the
-    secondary header/detail writes are skipped. predict() returns
+    secondary header/detail/irrigation writes are skipped. predict() returns
     normally."""
     calls = []
     predictor = _make_predictor([object()], calls)
@@ -320,4 +335,6 @@ def test_predict_grid_failure_falls_back_to_zero_flow_forecast(caplog):
     assert "write_header_table" not in calls  # secondary writes skipped after the failure
     assert "write_detail_table" not in calls
     assert "build_header_frame" not in calls
+    assert "build_irrigation_frame" not in calls
+    assert "write_irrigation_table" not in calls
     assert "watering-grid" in caplog.text.lower()  # failure was logged, not silent
