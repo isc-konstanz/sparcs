@@ -508,19 +508,26 @@ actuate irrigation.
   no status channel; tension above OR below the setpoint both add to the
   score, so the pick is the candidate that tracks the setpoint most
   closely.
-- **Outputs.** The recommendation goes out on dedicated auto-logged
-  channels (`recommend_w{i}_min`, `recommend_total_min`)
-  written to their own table
-  (`soil_predictor_recommendation`), one row per run keyed by run time
-  only — so the recommendation history accumulates through the normal
-  auto-logger with no `timestamp_creation` composite-PK partner to keep in
-  sync (unlike the forecast table). This is the seam a future irrigation
-  controller subscribes to. Every candidate's per-timestep trajectory is
-  persisted to a dedicated table via a **direct connector write** keyed on
-  the ladder dimensions (`w{i}_min` composite-PK columns, `is_recommended`
-  marking the winner), because the automatic log path collapses duplicate
-  timestamps. The trajectory channels are never `.set()`, so the auto
-  flush stays silent for them.
+- **Outputs.** The recommendation goes out as one **header row per
+  candidate per run** on `agri_field_forecast` (PK `timestamp` = predictor
+  run time, `forecast_id`, `id` ← `field_id`): `w0_min`…`w{max_windows-1}_min`
+  and `w0_start`…`w{max_windows-1}_start` (nullable past the configured
+  window count, no `-1` sentinel), `is_recommended` marking the winner,
+  `total_min`, and `weather_creation` (the weather-forecast issue time the
+  run used). There is no separate recommendation table — the chosen
+  candidate *is* the header row with `is_recommended = true`; that is the
+  seam a future irrigation controller subscribes to. Every candidate's
+  per-timestep tension trajectory is persisted to the companion detail
+  table, `agri_soil_forecast` (PK `timestamp` = future time,
+  `timestamp_creation` = run time, `forecast_id`, `field_id`, `id` ←
+  `soil_id`; `water_tension` for ALL candidates). Both tables are written via
+  **direct connector write**, because the automatic log path collapses
+  duplicate timestamps; the trajectory channels are never `.set()`, so the
+  auto flush stays silent for them. The chosen candidate's watering schedule
+  is additionally persisted as **edge rows** on `agri_field_irrigation` (PK
+  `timestamp` = edge time, `timestamp_creation` = run time, `id` ←
+  `field_id`; `irrigation_state` bool) — one row per planned on/off
+  transition, minute-exact; readers forward-fill between edges.
 - **Debug field plots (optional).** With `save_trajectory_plot = true`,
   each run dumps the soil saturation field as a PNG at **every forecast
   step (hourly), for every watering candidate** on the ladder, into a
@@ -536,52 +543,63 @@ actuate irrigation.
   aborts the forecast/recommendation already published.
 
 **Consumer migration.** The all-`0min` rung reproduces today's
-zero-irrigation forecast. A dashboard reading the current
-`predict_<probe>` channels should move to the trajectory table filtered
-by the all-`0min` PK row (or the `is_recommended` column), so no consumer
-silently reads a mix of candidates.
+zero-irrigation forecast. A dashboard reading the in-memory
+`predict_<probe>` channels should move to `agri_soil_forecast` filtered by
+the all-`0min` candidate's `forecast_id` (join `agri_field_forecast` for
+that mapping, or filter on its `is_recommended` column when the all-`0min`
+rung happens to be the pick), so no consumer silently reads a mix of
+candidates.
 
 **Units / sign convention.** The retention model's `psi_from_se` returns the
 **signed matric potential (negative hPa**, 0 at saturation and more negative as
 the soil dries), the convention the real SDI-12 tensiometer and the DB store. So
 the published probe channels — the live sim `soil_<depth>`, the forecast
-`predict_<probe>`, and the trajectory-table `traj_<probe>` columns — carry that
-signed value straight through: the sim and predictor publish `psi_from_se`
-unchanged. The decision scorer (`_score_candidate`) compares the suction
-**magnitude** (`abs(ψ)`) against the positive `threshold_hpa` setpoint, so the
-recommendation and the config stay in positive-magnitude terms and are unaffected
-by the sign. Grafana axes and any alert thresholds on these channels must read
-negative hPa.
+`predict_<probe>`, and the `agri_soil_forecast`-bound `traj_<probe>` channels —
+carry that signed value straight through: the sim and predictor publish
+`psi_from_se` unchanged. The decision scorer (`_score_candidate`) compares the
+suction **magnitude** (`abs(ψ)`) against the positive `threshold_hpa` setpoint, so
+the recommendation and the config stay in positive-magnitude terms and are
+unaffected by the sign. Grafana axes and any alert thresholds on these channels
+must read negative hPa.
 
-**Grafana consumption (out-of-app).** All candidates are already in
-`soil_predictor_trajectory`; there is no in-app comparison view. Grafana
-reads MySQL/MariaDB directly. One panel = one probe; each candidate (its
-`w{i}_min` duration tuple) is one series; filter to the latest
-`traj_timestamp_creation` so only today's forecast shows, and let
-`is_recommended` tag the winning series. Example (probe `root_20`, two
-windows), using Grafana's MySQL **Time series** format:
+**Grafana consumption (out-of-app).** All candidates are in `agri_soil_forecast`
+— long format: one row per probe via `id` ← `soil_id`, not a wide
+`traj_<probe>` column per probe. Header context (`w{i}_min`, `is_recommended`)
+lives on the companion `agri_field_forecast` row, joined on
+`(timestamp_creation, forecast_id, field_id)`. There is no in-app comparison
+view; Grafana reads MySQL/MariaDB directly. One panel = one probe
+(`WHERE id = <soil_id>`); each candidate (its `forecast_id`) is one series;
+filter to the latest run's `timestamp_creation` so only today's forecast
+shows, and let `is_recommended` tag the winning series. Example (probe
+`root_20`, `soil_id = 120`, field `id = 2`, two windows), using Grafana's
+MySQL **Time series** format:
 
 ```sql
 SELECT
-  timestamp AS "time",
+  d.timestamp AS "time",
   CONCAT(
-    'w0=', ROUND(w0_min), 'min w1=', ROUND(w1_min), 'min',
-    CASE WHEN is_recommended THEN ' (recommended)' ELSE '' END
+    'w0=', ROUND(h.w0_min), 'min w1=', ROUND(h.w1_min), 'min',
+    CASE WHEN h.is_recommended THEN ' (recommended)' ELSE '' END
   ) AS metric,
-  traj_root_20 AS value
-FROM soil_predictor_trajectory
-WHERE traj_timestamp_creation = (
-  SELECT MAX(traj_timestamp_creation) FROM soil_predictor_trajectory
-)
-ORDER BY timestamp;
+  d.water_tension AS value
+FROM agri_soil_forecast d
+JOIN agri_field_forecast h
+  ON h.timestamp = d.timestamp_creation
+ AND h.forecast_id = d.forecast_id
+ AND h.id = d.field_id
+WHERE d.id = 120
+  AND d.field_id = 2
+  AND d.timestamp_creation = (
+    SELECT MAX(timestamp) FROM agri_field_forecast WHERE id = 2
+  )
+ORDER BY d.timestamp;
 ```
 
-Swap `traj_root_20` for `traj_<probe>` per panel. Only reference the
-`w{i}_min` columns that are actually configured — unused window columns up
-to `max_windows` carry the `-1` sentinel, so exclude them from the label (or
-add `AND w2_min = -1` to pin a specific window count). The recommended row is
-the `is_recommended = 1` candidate; drop the `CASE` and add
-`WHERE is_recommended = 1` for a single-series "the pick" panel.
+Swap `d.id = 120` for another probe's `soil_id` per panel. Only reference the
+`w{i}_min` columns that are actually configured — unused windows past a
+deployment's configured count are `NULL` (no sentinel), so exclude them from
+the label. The recommended series is `h.is_recommended = 1`; drop the `CASE`
+and add `AND h.is_recommended = 1` for a single-series "the pick" panel.
 
 ---
 
@@ -660,7 +678,7 @@ combo_cap       = 16             # max ladder rungs; FAILS AT CONFIG if exceeded
 grid_mode       = "fill_order"   # candidate SET: "fill_order" ladder (default) | "full" product
 parallel        = false          # EXECUTION: roll candidates independently across cores (opt-in)
 max_workers     = 7              # worker processes when parallel=true; default os.cpu_count()-1
-max_windows     = 4              # fixed PK arity for the trajectory table
+max_windows     = 4              # fixed PK arity for the agri_field_forecast header table
 logger          = "db"           # id of the SQL logger connector for the grid write
 decision_probes = ["root_20", "root_40"]  # subset of [soil_simulation.probes] keys
 
