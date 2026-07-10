@@ -74,6 +74,7 @@ class FieldSimulation(Component):
 
     # On the orchestrator, not a soil child: clipping at the chain entry delays everything downstream.
     _intake_delay: pd.Timedelta = pd.Timedelta(0)
+    _backfill_max: pd.Timedelta = pd.Timedelta(days=1)
 
     _weather_channels: Optional[Channels] = None
     _required_weather_keys: tuple[str, ...] = ()
@@ -115,6 +116,7 @@ class FieldSimulation(Component):
         self._bay_width = float(configs.get("bay_width", default=3.5))
 
         self._intake_delay = self._parse_intake_delay(configs)
+        self._backfill_max = self._parse_backfill_max(configs)
 
         for c in self.VEGETATION_CHANNELS:
             self.data.add(c, aggregate="mean", logger={"enabled": False})
@@ -272,6 +274,11 @@ class FieldSimulation(Component):
         """Parse ``[field_simulation] intake_delay`` (default ``0`` = feature off)."""
         return to_timedelta(configs.get("intake_delay", default="0min"))
 
+    @staticmethod
+    def _parse_backfill_max(configs: Configurations) -> pd.Timedelta:
+        """Parse ``[field_simulation] backfill_max`` (default ``1day``)."""
+        return to_timedelta(configs.get("backfill_max", default="1day"))
+
     def _replication_cutoff(self) -> Optional[pd.Timestamp]:
         """Wall-clock frontier the chain may consume up to: ``utcnow - intake_delay``.
 
@@ -296,9 +303,28 @@ class FieldSimulation(Component):
             return frame
         return frame.loc[frame.index <= cutoff]
 
+    @staticmethod
+    def _ranged_window(
+        last: Optional[pd.Timestamp], cutoff: pd.Timestamp, backfill_max: pd.Timedelta
+    ) -> Optional[tuple[pd.Timestamp, pd.Timestamp]]:
+        """Next fetch window to drain the backlog between ``last`` and ``cutoff``, bounded by ``backfill_max``.
+
+        ``last is None`` starts with a bounded warm-up window ending at ``cutoff``. Otherwise
+        the window starts at ``last`` and advances by at most ``backfill_max`` per call, so a
+        long backlog is drained in bounded chunks rather than fetched in one shot. Returns
+        ``None`` once ``last`` has caught up to (or passed) ``cutoff``.
+        """
+        if last is None:
+            return cutoff - backfill_max, cutoff
+        if last >= cutoff:
+            return None
+        return last, min(cutoff, last + backfill_max)
+
     def _weather_callback(self, data: pd.DataFrame) -> None:
         if not self._weather_inputs_valid():
             return
+        if self._intake_delay > pd.Timedelta(0):
+            return self._advance_ranged()
         frame = self._weather_channels.to_frame(unique=True)
         if frame.empty:
             return
@@ -316,6 +342,41 @@ class FieldSimulation(Component):
         et_data, seg_et = self._run_chain(frame.rename(columns=self._evapo_rename))
         now = et_data.index[-1]
         self.soil_simulation.advance(et_data, now, seg_et)
+
+    def _advance_ranged(self) -> None:
+        """Trigger-only tick for ``intake_delay > 0``: drains ``[last -> utcnow - intake_delay]``
+        in ``backfill_max``-bounded chunks via a ranged connector read, then steps the soil
+        PDE through the drained rows one at a time via ``simulate_loop``.
+
+        The DB is the backlog and ``_last_simulated_at`` the cursor; the live path
+        (``intake_delay == 0``) above is untouched.
+        """
+        cutoff = self._replication_cutoff()
+        last = getattr(self.soil_simulation, "_last_simulated_at", None)
+        if last is not None and last.tzinfo is None:
+            last = last.tz_localize("UTC")
+        window = self._ranged_window(last, cutoff, self._backfill_max)
+        if window is None:
+            return
+
+        try:
+            frame = self.weather.data.read(start=window[0], end=window[1], channels=self._weather_channels)
+        except Exception as e:
+            logger.warning("%s: ranged weather read failed: %s", self.name, e)
+            return
+
+        if frame.index.tz is None:
+            frame.index = frame.index.tz_localize("UTC")
+        if last is not None:
+            frame = frame.loc[frame.index > last]
+        if frame.empty:
+            return
+
+        try:
+            et_data, seg_et = self._run_chain(frame)
+            self.soil_simulation.simulate_loop(et_data, seg_et)
+        except Exception as e:
+            logger.warning("%s: ranged chain evaluation failed: %s", self.name, e)
 
     def _predict_callback(self, data: pd.DataFrame) -> None:
         """Timed predictor trigger, decoupled from the live-sim weather listener.
