@@ -401,6 +401,17 @@ In short: shading-aware, segment-resolved ET demand arrives
 pre-computed; the soil PDE is responsible only for routing that
 demand (plus rain and irrigation) through the unsaturated zone.
 
+### 10.1 Live ticking with intake_delay and ranged fetch
+
+When `[field_simulation] intake_delay > 0`, the listener operates in **ranged-fetch mode** to handle replication delays (e.g., 15-min batches arriving from a replica database). Instead of reading only the newest row (which is too fresh and gets clipped), `_advance_ranged()` fetches the full interval `[last_simulated_at → utcnow − intake_delay]` via a ranged connector read and steps the full-resolution frame through ET → `simulate_loop()`, one `advance()` per row, so every row's rain and ET enter the water balance. The `intake_delay == 0` path remains unchanged.
+
+The **DRAIN window** semantics prevent data loss during long outages:
+
+- `_ranged_window(last, cutoff, backfill_max)` uses the DB as the backlog and `_last_simulated_at` as the cursor.
+- Each tick consumes at most `backfill_max` (default "1day", config key `[field_simulation] backfill_max`); outages drain in bounded chunks with no data skipped and rain mass balance preserved.
+- First boot (`last=None`) → warm-up window `(cutoff − backfill_max, cutoff)`; the cursor anchors at its first row and real weather is stepped from there (no synthetic spin-up on this path).
+- Between replication batches (`last >= cutoff`) → skip tick (state unchanged, time accumulated).
+
 ---
 
 ## 11. Component split
@@ -612,7 +623,8 @@ replication knob, `intake_delay`, sits one level up on the parent
 
 ```toml
 [field_simulation]
-intake_delay = "0min"    # hold the whole chain this far behind wall-clock; default 0 = off
+intake_delay    = "0min"      # hold the whole chain this far behind wall-clock; default 0 = off
+backfill_max    = "1day"      # max data to consume per tick when draining; default 1day
 ```
 
 **`intake_delay`** holds the field simulation's data-consumption frontier a fixed
@@ -628,6 +640,12 @@ margin, so every point the chain consumes has had time to fully replicate. On a
 single-box / edge install leave it at the default `0`, which is a provable no-op
 (the frame is passed through unchanged). The `SoilPredictor` inherits the same
 delay automatically; there is no separate predictor knob.
+
+**`backfill_max`** (active only when `intake_delay > 0`) bounds the ranged-fetch window per
+tick, so one tick never integrates an arbitrarily long outage in a single solve step. The
+drain logic fetches at most `backfill_max` worth of backlog per tick and catches up in
+bounded chunks — after a 3-day outage with the "1day" default, three ticks restore the
+frontier. Raise it to recover in fewer ticks, lower it to keep each catch-up solve shorter.
 
 ```toml
 [pde]
