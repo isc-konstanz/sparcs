@@ -156,6 +156,10 @@ class SoilSimulation(SoilBase):
     # 20 mm/h over the strip and typical k_s near 180 mm/h.
     STRIP_FLUX_WARN_MM_H: float = 500.0
 
+    # et_data column carrying the per-timestep whole-field irrigation flow
+    # [l/min], attached by FieldSimulation._on_tick from logged flow data.
+    IRRIGATION_FLOW_LPM: str = "irrigation_flow_lpm"
+
     _last_simulated_at: Optional[pd.Timestamp] = None
     _simulating: bool = False
     _strip_flux_warned: bool = False
@@ -422,7 +426,13 @@ class SoilSimulation(SoilBase):
                 seg_transp[name] = transp
 
         # Whole-field meter [l/min] → m³/s per out-of-plane metre (see configure()).
-        flow_m3s = self.context._irrigation_flow_lpm / (60_000.0 * self._total_drip_line_length_m)
+        # NULL/absent flow means "not watering"; NaN must never reach the source.
+        flow_lpm = 0.0
+        if SoilSimulation.IRRIGATION_FLOW_LPM in et_data.columns:
+            value = et_data[SoilSimulation.IRRIGATION_FLOW_LPM].iloc[-1]
+            if pd.notna(value):
+                flow_lpm = float(value)
+        flow_m3s = flow_lpm / (60_000.0 * self._total_drip_line_length_m)
         self._warn_absurd_strip_flux(flow_m3s)
 
         rain_flux = 0.0

@@ -71,7 +71,12 @@ class FieldSimulation(Component):
 
     _lai_type: str = "grass"
     _evapo_rename: dict[str, str]
-    _irrigation_flow_lpm: float = 0.0
+
+    # Flow channel read as a logged series per tick; None = no irrigation wired.
+    _irrigation_flow_channel: Any = None
+    # How far before a chunk the flow history is read, so watering that started
+    # before the span still forces its leading timesteps.
+    _FLOW_LOOKBACK: pd.Timedelta = pd.Timedelta(days=1)
 
     # On the orchestrator, not a soil child: clipping at the chain entry delays everything downstream.
     _intake_delay: pd.Timedelta = pd.Timedelta(0)
@@ -263,17 +268,17 @@ class FieldSimulation(Component):
                 interval=self.soil_predictor.cooldown,
             )
 
+        self._irrigation_flow_channel = None
         if self.irrigation is not None:
             try:
-                flow_channel = self.irrigation.data[Irrigation.FLOW]
+                self._irrigation_flow_channel = self.irrigation.data[Irrigation.FLOW]
             except KeyError:
-                flow_channel = None
-            if flow_channel is not None:
-                self.data.register(
-                    self._irrigation_callback,
-                    Channels([flow_channel]),
-                    how="any",
-                    unique=True,
+                self._irrigation_flow_channel = None
+            if self._irrigation_flow_channel is None or not self._irrigation_flow_channel.has_logger():
+                logger.warning(
+                    "%s: irrigation is configured but its flow channel is missing or has "
+                    "no logger; the tick reads logged flow and will assume 0 l/min.",
+                    self.name,
                 )
 
         for channel in self._weather_channels:
@@ -404,6 +409,7 @@ class FieldSimulation(Component):
             if weather.empty or not self._weather_frame_valid(weather):
                 continue
             et_data, seg_et = self._run_chain(weather)
+            et_data[SoilSimulation.IRRIGATION_FLOW_LPM] = self._read_flow_span(chunk_start, chunk_end, et_data.index)
             if self.soil_simulation._last_simulated_at is None:
                 # Cold start: one advance spins the PDE up at the newest row.
                 self.soil_simulation.advance(et_data, et_data.index[-1], seg_et)
@@ -422,6 +428,30 @@ class FieldSimulation(Component):
     def _read_weather_span(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
         frame = self.data.read_logged(self._weather_channels, start=start, end=end, unique=True)
         return self._trim_span(frame, start, end)
+
+    def _read_flow_span(self, start: pd.Timestamp, end: pd.Timestamp, index: pd.DatetimeIndex) -> pd.Series:
+        """Logged irrigation flow [l/min] aligned onto the weather timesteps."""
+        if self._irrigation_flow_channel is None:
+            return pd.Series(0.0, index=index)
+        frame = self.data.read_logged(
+            Channels([self._irrigation_flow_channel]),
+            start=start - self._FLOW_LOOKBACK,
+            end=end,
+            unique=True,
+        )
+        return self._align_flow(frame, index)
+
+    @staticmethod
+    def _align_flow(frame: pd.DataFrame, index: pd.DatetimeIndex) -> pd.Series:
+        """Backward-fill flow rows onto ``index``: each timestep gets the most
+        recent flow at or before it. NULL rows and leading gaps read as 0.0
+        (not watering) -- NaN must never reach the PDE source (cf. 20431c7)."""
+        if frame.empty:
+            return pd.Series(0.0, index=index)
+        series = frame.iloc[:, 0].sort_index()
+        series = series[~series.index.duplicated(keep="last")]
+        aligned = series.reindex(index, method="ffill")
+        return aligned.fillna(0.0).astype(float)
 
     def _trim_span(self, frame: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
         """Rename logged columns to weather keys and keep rows in ``(start, end]``."""
@@ -615,16 +645,6 @@ class FieldSimulation(Component):
         if data.empty or self.soil_simulation is None:
             return
         self.soil_simulation.apply_state_blob(data.iloc[0, 0], data.index[0])
-
-    def _irrigation_callback(self, data: pd.DataFrame) -> None:
-        try:
-            flow = float(data.iloc[-1, 0])
-        except (ValueError, TypeError, IndexError):
-            flow = 0.0
-        # A NULL flow row means "not watering". ``float(np.nan)`` does not raise,
-        # so without this guard a NaN latches into the PDE source (soil.py) and
-        # poisons it -- the live analog of the bench asof-latch fix (20431c7).
-        self._irrigation_flow_lpm = 0.0 if pd.isna(flow) else flow
 
     def _prepare_weather(self, data: pd.DataFrame) -> pd.DataFrame:
         return validate_meteo_inputs(data, self.location)
