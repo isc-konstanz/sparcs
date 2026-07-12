@@ -429,17 +429,14 @@ watering-recommendation roll-out. It is advisory in v1: it publishes a
 suggestion and persists every candidate for evaluation; it does not
 actuate irrigation.
 
-- **Timing (decoupled from the live solver).** The roll-out is heavy
-  (one PDE integration per candidate schedule), so it must not run on
-  the live-sim weather-callback thread — a multi-minute roll-out there
-  would stall the live solver. Instead the predictor registers its own
-  listener on `SoilSimulation`'s `SIMULATION_STATE` channel (published
-  after every live advance) and self-gates to a fixed daily boundary
-  (`interval` + `offset`, site-local, the same `floor_date + offset`
-  pattern `WeatherForecast` uses). Running on the state channel also
-  means the predictor cannot fire before live state exists, so cold
-  start needs no special case. A per-listener `cooldown` is a
-  backpressure floor, distinct from the daily run cadence.
+- **Timing (sequential on the tick).** `FieldSimulation`'s wall-clock
+  tick calls `predict()` after every advance that moved the frontier,
+  on the tick thread, so the roll-out never overlaps the live solve.
+  The predictor self-gates to a fixed daily boundary (`interval` +
+  `offset`, site-local, the same `floor_date + offset` pattern
+  `WeatherForecast` uses); most tick invocations return at that gate.
+  The cold-start guard inside `predict()` skips until live soil state
+  exists, without claiming the boundary.
 - **Watering model.** Each candidate is one duration per configured
   window. Windows are clock times (`[soil_predictor.windows.<name>]`, e.g.
   morning at 08:00, optionally an evening window), each with its own
@@ -606,28 +603,41 @@ and add `AND h.is_recommended = 1` for a single-series "the pick" panel.
 ## 12. Configuration reference (TOML)
 
 The live driver is configured under `[soil_simulation]`; the `[pde]`, `[model]`,
-`[mesh]`, `[anchor]`, `[probes]`, and `[plot]` blocks below nest under it. One
-replication knob, `intake_delay`, sits one level up on the parent
-`[field_simulation]` because it governs the whole chain, not just the PDE:
+`[mesh]`, `[anchor]`, `[probes]`, and `[plot]` blocks below nest under it. The
+run schedule and the replication knob sit one level up on the parent
+`[field_simulation]` because they govern the whole chain, not just the PDE:
 
 ```toml
 [field_simulation]
-intake_delay = "0min"    # hold the whole chain this far behind wall-clock; default 0 = off
+interval     = 60        # wall-clock tick cadence, minutes; ticks fire at aligned slots
+offset       = 0         # minutes within the interval (interval=60, offset=5 -> xx:05)
+intake_delay = "0min"    # hold the whole chain this far behind wall-clock; default 0
 ```
 
+**`interval`/`offset`** set the wall-clock tick: `FieldSimulation` runs on its
+own clock thread (started in `activate()`), firing at absolute aligned slots
+(`floor_date + offset`, the `WeatherForecast` pattern), so restarts do not
+shift the schedule. Each tick reads the **logged** weather over
+`(frontier, now - intake_delay]` (daily chunks on catch-up, so
+`SIMULATION_STATE` persists per chunk), runs the ET chain, steps the PDE
+per observation row, attaches the logged irrigation flow as a per-timestep
+series, and finally hands the new frontier to `SoilPredictor.predict()`.
+A tick advances only as far as logged data reaches; outages and gaps
+self-heal on later ticks. If a run overruns its slot, the next slot is
+skipped, never queued.
+
 **`intake_delay`** holds the field simulation's data-consumption frontier a fixed
-duration behind wall-clock: each tick clips the weather frame to rows stamped at
-or before `now_utc - intake_delay` before the ET chain, so ground shading, ET,
-the soil PDE, and — through the delayed `SIMULATION_STATE` — the predictor all
-trail the frontier together, and the sim only integrates over inputs that are at
-least that old. It exists for the split-compute deployment where the sim and
-predictor run on a second box reading a **replica** database. Set `intake_delay`
-**at least as large as the replication interval feeding that box** — the lories
-15-minute replication cron, or the `claything_to_copperhead` cron — plus a
-margin, so every point the chain consumes has had time to fully replicate. On a
-single-box / edge install leave it at the default `0`, which is a provable no-op
-(the frame is passed through unchanged). The `SoilPredictor` inherits the same
-delay automatically; there is no separate predictor knob.
+duration behind wall-clock: each tick reads inputs up to `now_utc - intake_delay`,
+so ground shading, ET, the soil PDE, and — through the delayed
+`SIMULATION_STATE` — the predictor all trail the frontier together, and the sim
+only integrates over inputs that are at least that old. It exists for the
+split-compute deployment where the sim and predictor run on a second box reading
+a **replica** database. Set `intake_delay` **at least as large as the
+replication interval feeding that box** — the lories 15-minute replication cron,
+or the `claything_to_copperhead` cron — plus a margin, so every point the chain
+consumes has had time to fully replicate. On a single-box / edge install leave
+it at the default `0` (the tick then reads up to `now`). The `SoilPredictor`
+inherits the same delay automatically; there is no separate predictor knob.
 
 ```toml
 [pde]
@@ -672,7 +682,6 @@ block the PDE core uses; only the keys below are predictor-specific.
 horizon         = "24h"          # forecast roll-out horizon
 interval        = 1440           # run cadence, minutes (daily); own default
 offset          = 60             # minutes past local midnight -> ~01:00 local
-cooldown        = 60             # per-listener backpressure floor, minutes
 threshold_hpa   = 300            # target tension SETPOINT (RMS scoring), positive hPa magnitude
 combo_cap       = 16             # max ladder rungs; FAILS AT CONFIG if exceeded
 grid_mode       = "fill_order"   # candidate SET: "fill_order" ladder (default) | "full" product

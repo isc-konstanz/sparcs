@@ -407,8 +407,7 @@ class FieldSimulation(Component):
             else:
                 self.soil_simulation.simulate_loop(et_data, seg_et)
 
-        # Sequential predict after a tick that advanced; the predictor's own
-        # interval/offset gate keeps roll-outs at their configured cadence.
+        # The predictor's own interval/offset gate decides whether a roll-out runs.
         new_frontier = self.soil_simulation._last_simulated_at
         if self.soil_predictor is not None and new_frontier is not None and new_frontier != frontier:
             self.soil_predictor.predict(
