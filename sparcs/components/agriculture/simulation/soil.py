@@ -156,8 +156,7 @@ class SoilSimulation(SoilBase):
     # 20 mm/h over the strip and typical k_s near 180 mm/h.
     STRIP_FLUX_WARN_MM_H: float = 500.0
 
-    # et_data column carrying the per-timestep whole-field irrigation flow
-    # [l/min], attached by FieldSimulation._on_tick from logged flow data.
+    # et_data column, whole-field flow [l/min] per timestep; written by FieldSimulation._on_tick.
     IRRIGATION_FLOW_LPM: str = "irrigation_flow_lpm"
 
     _last_simulated_at: Optional[pd.Timestamp] = None
@@ -410,7 +409,7 @@ class SoilSimulation(SoilBase):
         seg_et: dict[str, pd.DataFrame],
         elapsed_s: float,
     ) -> FluxRates:
-        """Per-zone mass fluxes [kg/(m²·s)] constant over the callback window.
+        """Per-zone mass fluxes [kg/(m²·s)] constant over the advance window.
 
         Negative ET (radiative cooling) is clipped to zero.
         ``rain_flux = precip_mm / elapsed_s`` distributes precipitation mass-conservatively over substeps.

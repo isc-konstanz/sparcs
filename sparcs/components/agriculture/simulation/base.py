@@ -72,25 +72,21 @@ class FieldSimulation(Component):
     _lai_type: str = "grass"
     _evapo_rename: dict[str, str]
 
-    # Flow channel read as a logged series per tick; None = no irrigation wired.
     _irrigation_flow_channel: Any = None
-    # How far before a chunk the flow history is read, so watering that started
-    # before the span still forces its leading timesteps.
+    # Read-back so watering that started before a chunk still forces its first timesteps.
     _FLOW_LOOKBACK: pd.Timedelta = pd.Timedelta(days=1)
 
     # On the orchestrator, not a soil child: clipping at the chain entry delays everything downstream.
     _intake_delay: pd.Timedelta = pd.Timedelta(0)
 
-    # Wall-clock tick cadence ([field_simulation] interval/offset, minutes).
+    # Tick cadence in minutes ([field_simulation] interval/offset).
     _interval_min: int = 60
     _offset_min: int = 0
 
-    # Injected clock: the only wall-clock source for the cutoff and the tick
-    # loop, replaceable in tests.
+    # The only wall-clock source; inject in tests.
     _now: Callable[[], pd.Timestamp] = staticmethod(lambda: pd.Timestamp.now(tz="UTC"))
 
-    # Upper bound on one Event.wait so the loop re-reads the (injectable)
-    # clock and deactivate() joins promptly.
+    # Cap one Event.wait so the loop re-reads the clock and deactivate() joins promptly.
     _TICK_WAIT_MAX_S: float = 60.0
 
     _tick_thread: Optional[threading.Thread] = None
@@ -296,7 +292,7 @@ class FieldSimulation(Component):
 
     @staticmethod
     def _parse_intake_delay(configs: Configurations) -> pd.Timedelta:
-        """Parse ``[field_simulation] intake_delay`` (default ``0`` = feature off)."""
+        """Parse ``[field_simulation] intake_delay`` (default ``0`` = read up to now)."""
         return to_timedelta(configs.get("intake_delay", default="0min"))
 
     @staticmethod
@@ -313,19 +309,6 @@ class FieldSimulation(Component):
         if not 0 <= offset < interval:
             raise ValueError(f"[field_simulation] offset must be in [0, interval), got {offset}")
         return interval, offset
-
-    @staticmethod
-    def _clip_to_cutoff(frame: pd.DataFrame, cutoff: Optional[pd.Timestamp]) -> pd.DataFrame:
-        """Drop rows stamped after ``cutoff`` (inclusive keep); pure, no wall-clock.
-
-        ``cutoff is None`` returns ``frame`` unchanged. Otherwise returns the rows
-        at or before ``cutoff`` (possibly empty), so the caller's
-        ``now = frame.index[-1]`` stays a real data timestamp matched to its
-        forcing row rather than a synthesized wall-clock value.
-        """
-        if cutoff is None:
-            return frame
-        return frame.loc[frame.index <= cutoff]
 
     # -- wall-clock tick -------------------------------------------------------
 
@@ -457,8 +440,7 @@ class FieldSimulation(Component):
         if frame.empty:
             return frame
         frame = frame.rename(columns=self._evapo_rename)
-        frame = frame.loc[frame.index > start]
-        return self._clip_to_cutoff(frame, end)
+        return frame.loc[(frame.index > start) & (frame.index <= end)]
 
     def _weather_frame_valid(self, frame: pd.DataFrame) -> bool:
         missing = [
