@@ -14,6 +14,7 @@ Component/PDE stack is instantiated.
 
 import threading
 import time
+import types
 
 import pytest
 
@@ -91,22 +92,141 @@ def test_next_slot_depends_only_on_now():
     assert _sim()._next_slot(now) == _sim()._next_slot(now)
 
 
-# --- injected clock ---------------------------------------------------------
+# --- span computation (_on_tick) --------------------------------------------
 
 
-def test_replication_cutoff_uses_injected_clock():
+def _tick_sim(frontier, intake_delay=pd.Timedelta(0), interval_min: int = 60):
+    """A sim wired for _on_tick with a stub soil child and recording span reads."""
+    sim = _sim(interval_min=interval_min)
+    sim._intake_delay = intake_delay
+    sim._required_weather_keys = ()
+    sim.evapotranspiration = object()
+    sim._weather_channels = object()
+    sim.soil_simulation = types.SimpleNamespace(
+        _last_simulated_at=frontier,
+        advance=lambda et, now, seg: None,
+        simulate_loop=lambda et, seg: None,
+    )
+    sim._spans = []
+
+    def _record_span(start, end):
+        sim._spans.append((start, end))
+        return pd.DataFrame()
+
+    sim._read_weather_span = _record_span
+    return sim
+
+
+def test_on_tick_span_is_frontier_to_now_minus_intake_delay():
+    sim = _tick_sim(
+        frontier=pd.Timestamp("2026-07-12 10:00", tz="UTC"),
+        intake_delay=pd.Timedelta(minutes=30),
+    )
+    sim._on_tick(pd.Timestamp("2026-07-12 12:00", tz="UTC"))
+    assert sim._spans == [(pd.Timestamp("2026-07-12 10:00", tz="UTC"), pd.Timestamp("2026-07-12 11:30", tz="UTC"))]
+
+
+def test_on_tick_without_frontier_reads_one_interval_back():
+    sim = _tick_sim(frontier=None, interval_min=60)
+    sim._on_tick(pd.Timestamp("2026-07-12 12:00", tz="UTC"))
+    assert sim._spans == [(pd.Timestamp("2026-07-12 11:00", tz="UTC"), pd.Timestamp("2026-07-12 12:00", tz="UTC"))]
+
+
+def test_on_tick_is_noop_when_frontier_reaches_cutoff():
+    sim = _tick_sim(
+        frontier=pd.Timestamp("2026-07-12 12:00", tz="UTC"),
+        intake_delay=pd.Timedelta(minutes=30),
+    )
+    sim._on_tick(pd.Timestamp("2026-07-12 12:00", tz="UTC"))
+    assert sim._spans == []
+
+
+def test_on_tick_chunks_backlog_by_day():
+    sim = _tick_sim(frontier=pd.Timestamp("2026-07-10 06:00", tz="UTC"))
+    sim._on_tick(pd.Timestamp("2026-07-12 12:00", tz="UTC"))
+    assert sim._spans == [
+        (pd.Timestamp("2026-07-10 06:00", tz="UTC"), pd.Timestamp("2026-07-11 00:00", tz="UTC")),
+        (pd.Timestamp("2026-07-11 00:00", tz="UTC"), pd.Timestamp("2026-07-12 00:00", tz="UTC")),
+        (pd.Timestamp("2026-07-12 00:00", tz="UTC"), pd.Timestamp("2026-07-12 12:00", tz="UTC")),
+    ]
+
+
+def test_on_tick_advances_only_to_the_logged_data_frontier():
+    """Weather ends before the cutoff: the chain runs on what exists, no filling."""
+    sim = _tick_sim(frontier=pd.Timestamp("2026-07-12 10:00", tz="UTC"))
+    index = pd.date_range("2026-07-12 10:15", periods=3, freq="15min", tz="UTC")  # ends 10:45 < 12:00
+    weather = pd.DataFrame({"ghi": [100.0, 200.0, 300.0]}, index=index)
+    sim._read_weather_span = lambda start, end: weather
+    sim._run_chain = lambda frame: (frame, {})
+    advanced = []
+    sim.soil_simulation.simulate_loop = lambda et, seg: advanced.append(et.index[-1])
+
+    sim._on_tick(pd.Timestamp("2026-07-12 12:00", tz="UTC"))
+    assert advanced == [pd.Timestamp("2026-07-12 10:45", tz="UTC")]
+
+
+def test_on_tick_cold_start_uses_single_advance():
+    sim = _tick_sim(frontier=None)
+    index = pd.date_range("2026-07-12 11:15", periods=3, freq="15min", tz="UTC")
+    weather = pd.DataFrame({"ghi": [100.0, 200.0, 300.0]}, index=index)
+    sim._read_weather_span = lambda start, end: weather
+    sim._run_chain = lambda frame: (frame, {})
+    calls = []
+    sim.soil_simulation.advance = lambda et, now, seg: calls.append(("advance", now))
+    sim.soil_simulation.simulate_loop = lambda et, seg: calls.append(("loop", et.index[-1]))
+
+    sim._on_tick(pd.Timestamp("2026-07-12 12:00", tz="UTC"))
+    assert calls == [("advance", pd.Timestamp("2026-07-12 11:45", tz="UTC"))]
+
+
+# --- day chunking and span trim ----------------------------------------------
+
+
+def test_iter_day_chunks_splits_at_midnight():
+    chunks = list(
+        FieldSimulation._iter_day_chunks(
+            pd.Timestamp("2026-07-10 06:00", tz="UTC"),
+            pd.Timestamp("2026-07-11 03:00", tz="UTC"),
+        )
+    )
+    assert chunks == [
+        (pd.Timestamp("2026-07-10 06:00", tz="UTC"), pd.Timestamp("2026-07-11 00:00", tz="UTC")),
+        (pd.Timestamp("2026-07-11 00:00", tz="UTC"), pd.Timestamp("2026-07-11 03:00", tz="UTC")),
+    ]
+
+
+def test_iter_day_chunks_single_chunk_within_day():
+    chunks = list(
+        FieldSimulation._iter_day_chunks(
+            pd.Timestamp("2026-07-12 06:00", tz="UTC"),
+            pd.Timestamp("2026-07-12 09:00", tz="UTC"),
+        )
+    )
+    assert chunks == [(pd.Timestamp("2026-07-12 06:00", tz="UTC"), pd.Timestamp("2026-07-12 09:00", tz="UTC"))]
+
+
+def test_trim_span_renames_and_keeps_half_open_interval():
     sim = _sim()
-    sim._intake_delay = pd.Timedelta(minutes=30)
-    frozen = pd.Timestamp("2026-07-12 12:00", tz="UTC")
-    sim._now = lambda: frozen
-    assert sim._replication_cutoff() == frozen - pd.Timedelta(minutes=30)
+    sim._evapo_rename = {"weather.ghi": "ghi"}
+    index = pd.date_range("2026-07-12 10:00", periods=5, freq="15min", tz="UTC")
+    frame = pd.DataFrame({"weather.ghi": [1.0, 2.0, 3.0, 4.0, 5.0]}, index=index)
+
+    trimmed = sim._trim_span(frame, index[0], pd.Timestamp("2026-07-12 10:45", tz="UTC"))
+    assert list(trimmed.columns) == ["ghi"]
+    assert trimmed.index[0] == pd.Timestamp("2026-07-12 10:15", tz="UTC")  # start row excluded
+    assert trimmed.index[-1] == pd.Timestamp("2026-07-12 10:45", tz="UTC")  # end row kept
 
 
-def test_replication_cutoff_zero_delay_stays_none():
+def test_weather_frame_valid_flags_missing_required_column():
     sim = _sim()
-    sim._intake_delay = pd.Timedelta(0)
-    sim._now = lambda: pd.Timestamp("2026-07-12 12:00", tz="UTC")
-    assert sim._replication_cutoff() is None
+    sim._required_weather_keys = ("ghi", "temp_air")
+    frame = pd.DataFrame(
+        {"ghi": [1.0]},
+        index=pd.DatetimeIndex([pd.Timestamp("2026-07-12 10:00", tz="UTC")]),
+    )
+    assert sim._weather_frame_valid(frame) is False
+    frame["temp_air"] = 20.0
+    assert sim._weather_frame_valid(frame) is True
 
 
 # --- overrun skip -----------------------------------------------------------

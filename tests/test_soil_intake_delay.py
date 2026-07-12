@@ -10,8 +10,8 @@ config parse.
 Importing ``base`` pulls the full lories + FiPy/Gmsh stack; ``importorskip``
 keeps this out of environments that lack it (the full check runs on the box).
 The targets are a ``@staticmethod`` and a config parse, so no ``Component`` /
-PDE instantiation or solver run is needed -- the wall-clock read in
-``_replication_cutoff`` is deliberately kept out of the assertions.
+PDE instantiation or solver run is needed; the tick's wall-clock reads are
+covered in ``test_field_simulation_tick``.
 """
 
 import pytest

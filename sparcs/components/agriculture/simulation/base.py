@@ -276,12 +276,19 @@ class FieldSimulation(Component):
                     unique=True,
                 )
 
-        self.data.register(
-            self._weather_callback,
-            self._weather_channels,
-            how="any",
-            unique=True,
-        )
+        for channel in self._weather_channels:
+            key = channel.key
+            if (
+                key in self._required_weather_keys
+                and key not in self._OPTIONAL_WEATHER_KEYS
+                and not channel.has_logger()
+            ):
+                logger.warning(
+                    "%s: required weather channel '%s' has no logger configured; "
+                    "the wall-clock tick reads logged data and will never see it.",
+                    self.name,
+                    key,
+                )
 
         self._start_tick_thread()
 
@@ -310,16 +317,6 @@ class FieldSimulation(Component):
         if not 0 <= offset < interval:
             raise ValueError(f"[field_simulation] offset must be in [0, interval), got {offset}")
         return interval, offset
-
-    def _replication_cutoff(self) -> Optional[pd.Timestamp]:
-        """Wall-clock frontier the chain may consume up to: ``utcnow - intake_delay``.
-
-        ``None`` when ``intake_delay`` is zero, so the frame clip is skipped and
-        the live path stays byte-for-byte the pre-feature behavior.
-        """
-        if self._intake_delay == pd.Timedelta(0):
-            return None
-        return self._now() - self._intake_delay
 
     @staticmethod
     def _clip_to_cutoff(frame: pd.DataFrame, cutoff: Optional[pd.Timestamp]) -> pd.DataFrame:
@@ -389,28 +386,65 @@ class FieldSimulation(Component):
             self._tick_lock.release()
 
     def _on_tick(self, now: pd.Timestamp) -> None:
-        self._weather_callback(pd.DataFrame())
+        """Advance the chain over ``(frontier, now - intake_delay]`` from logged data.
 
-    def _weather_callback(self, data: pd.DataFrame) -> None:
-        if not self._weather_inputs_valid():
+        Reads in daily chunks so ``simulation_state`` persists as the frontier
+        ratchets and a crash redoes at most one chunk. Advances only as far as
+        logged weather reaches; gaps self-heal on later ticks.
+        """
+        if self.soil_simulation is None or self.evapotranspiration is None or self._weather_channels is None:
             return
-        frame = self._weather_channels.to_frame(unique=True)
+        cutoff = now - self._intake_delay
+        frontier = getattr(self.soil_simulation, "_last_simulated_at", None)
+        start = frontier if frontier is not None else cutoff - pd.Timedelta(minutes=self._interval_min)
+        if start >= cutoff:
+            return
+        for chunk_start, chunk_end in self._iter_day_chunks(start, cutoff):
+            weather = self._read_weather_span(chunk_start, chunk_end)
+            if weather.empty or not self._weather_frame_valid(weather):
+                continue
+            et_data, seg_et = self._run_chain(weather)
+            if self.soil_simulation._last_simulated_at is None:
+                # Cold start: one advance spins the PDE up at the newest row.
+                self.soil_simulation.advance(et_data, et_data.index[-1], seg_et)
+            else:
+                self.soil_simulation.simulate_loop(et_data, seg_et)
+
+    @staticmethod
+    def _iter_day_chunks(start: pd.Timestamp, end: pd.Timestamp):
+        """Yield ``(start, end]`` split at midnight boundaries, chronological."""
+        s = start
+        while s < end:
+            e = min((s + pd.Timedelta(days=1)).normalize(), end)
+            yield s, e
+            s = e
+
+    def _read_weather_span(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+        frame = self.data.read_logged(self._weather_channels, start=start, end=end, unique=True)
+        return self._trim_span(frame, start, end)
+
+    def _trim_span(self, frame: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+        """Rename logged columns to weather keys and keep rows in ``(start, end]``."""
         if frame.empty:
-            return
+            return frame
+        frame = frame.rename(columns=self._evapo_rename)
+        frame = frame.loc[frame.index > start]
+        return self._clip_to_cutoff(frame, end)
 
-        cutoff = self._replication_cutoff()
-        frame = self._clip_to_cutoff(frame, cutoff)
-        if frame.empty:
-            return
-
-        now = frame.index[-1]
-        last = getattr(self.soil_simulation, "_last_simulated_at", None)
-        if last is not None and now <= last:
-            return
-
-        et_data, seg_et = self._run_chain(frame.rename(columns=self._evapo_rename))
-        now = et_data.index[-1]
-        self.soil_simulation.advance(et_data, now, seg_et)
+    def _weather_frame_valid(self, frame: pd.DataFrame) -> bool:
+        missing = [
+            k
+            for k in self._required_weather_keys
+            if k not in self._OPTIONAL_WEATHER_KEYS and (k not in frame.columns or frame[k].isna().all())
+        ]
+        if missing:
+            logger.debug(
+                "%s: skipping chunk; weather columns missing or all-NaN: %s",
+                self.name,
+                missing,
+            )
+            return False
+        return True
 
     def _predict_callback(self, data: pd.DataFrame) -> None:
         """Timed predictor trigger, decoupled from the live-sim weather listener.
@@ -446,24 +480,6 @@ class FieldSimulation(Component):
             return pd.Timestamp(value)
         except (TypeError, ValueError):
             return None
-
-    def _weather_inputs_valid(self) -> bool:
-        if self._weather_channels is None:
-            return False
-        by_key = {c.key: c for c in self._weather_channels}
-        missing = [
-            k
-            for k in self._required_weather_keys
-            if k not in self._OPTIONAL_WEATHER_KEYS and (k not in by_key or not by_key[k].is_valid())
-        ]
-        if missing:
-            logger.debug(
-                "%s: skipping advance; weather channels not valid: %s",
-                self.name,
-                missing,
-            )
-            return False
-        return True
 
     def _run_chain(
         self,
