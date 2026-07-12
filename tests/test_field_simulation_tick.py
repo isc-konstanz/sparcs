@@ -179,6 +179,43 @@ def test_on_tick_cold_start_uses_single_advance():
     assert calls == [("advance", pd.Timestamp("2026-07-12 11:45", tz="UTC"))]
 
 
+# --- predictor on the tick ----------------------------------------------------
+
+
+def _predicting_sim(frontier):
+    """A _tick_sim whose soil stub moves its frontier on advance, with a spy predictor."""
+    sim = _tick_sim(frontier=frontier)
+    sim._read_forecast_epoch = lambda: None
+    predictions = []
+    sim.soil_predictor = types.SimpleNamespace(predict=lambda now, forecast_creation=None: predictions.append(now))
+    return sim, predictions
+
+
+def test_predict_runs_after_a_tick_that_advanced():
+    frontier = pd.Timestamp("2026-07-12 10:00", tz="UTC")
+    sim, predictions = _predicting_sim(frontier)
+    index = pd.date_range("2026-07-12 10:15", periods=3, freq="15min", tz="UTC")
+    sim._read_weather_span = lambda start, end: pd.DataFrame({"ghi": [1.0, 2.0, 3.0]}, index=index)
+    sim._run_chain = lambda frame: (frame, {})
+
+    def _advance_frontier(et, seg):
+        sim.soil_simulation._last_simulated_at = et.index[-1]
+
+    sim.soil_simulation.simulate_loop = _advance_frontier
+
+    sim._on_tick(pd.Timestamp("2026-07-12 12:00", tz="UTC"))
+    assert predictions == [pd.Timestamp("2026-07-12 10:45", tz="UTC")]
+
+
+def test_predict_not_called_after_a_noop_tick():
+    """No new logged data -> no advance -> the predictor is not invoked."""
+    frontier = pd.Timestamp("2026-07-12 10:00", tz="UTC")
+    sim, predictions = _predicting_sim(frontier)  # _read_weather_span returns empty
+
+    sim._on_tick(pd.Timestamp("2026-07-12 12:00", tz="UTC"))
+    assert predictions == []
+
+
 # --- day chunking and span trim ----------------------------------------------
 
 

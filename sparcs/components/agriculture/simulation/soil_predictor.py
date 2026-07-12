@@ -58,14 +58,12 @@ _DEFAULT_HORIZON: str = "24h"
 _DEFAULT_SAVE_FREQ: str = "1h"
 
 # Scheduling gate defaults -- the predictor's OWN cadence, distinct from
-# WeatherForecast's interval=60/offset=0 (do not inherit those). `interval`/
-# `offset` are the run-cadence config (daily at ~01:00 local); `cooldown` is
-# a separate notion, the lories listener-backpressure floor (base.py's
-# `data.register(..., interval=...)`), well below the run cadence so it never
-# gates the fixed daily boundary.
+# the field-simulation tick's interval=60/offset=0 (do not inherit those).
+# `interval`/`offset` are the run-cadence config (daily at ~01:00 local);
+# the tick calls predict() after every advance and this gate decides whether
+# a roll-out actually runs.
 _DEFAULT_INTERVAL_MIN: int = 1440
 _DEFAULT_OFFSET_MIN: int = 60
-_DEFAULT_COOLDOWN_MIN: int = 60
 
 # Drip-flow derivation defaults; mirrors the [soil_simulation] default of a
 # single already-per-metre line (SoilSimulation.configure's
@@ -187,12 +185,9 @@ class SoilPredictor(SoilBase):
     _save_trajectory_plot: bool = False
     _trajectory_plot_dir: str
 
-    # Scheduling gate: run cadence, own defaults (not WeatherForecast's).
+    # Scheduling gate: run cadence, own defaults (not the field-sim tick's).
     _interval_min: int
     _offset_min: int
-    # Per-listener backpressure floor (base.py's `data.register(..., interval=...)`);
-    # distinct from `_interval_min`, the run-cadence config above.
-    _cooldown_min: int
 
     # Last boundary `predict()` actually ran for; None before the first run.
     _last_boundary_run: Optional[pd.Timestamp] = None
@@ -326,7 +321,6 @@ class SoilPredictor(SoilBase):
 
         self._interval_min = configs.get_int("interval", default=_DEFAULT_INTERVAL_MIN)
         self._offset_min = configs.get_int("offset", default=_DEFAULT_OFFSET_MIN)
-        self._cooldown_min = configs.get_int("cooldown", default=_DEFAULT_COOLDOWN_MIN)
 
         model_block = self.context.configs.get_member("model", defaults={}, ensure_exists=True)
         soil_block = self.context.configs.get_member(SoilSimulation.TYPE, defaults={}, ensure_exists=True)
@@ -812,16 +806,6 @@ class SoilPredictor(SoilBase):
                 "enabled": True,
             },
         )
-
-    @property
-    def cooldown(self) -> pd.Timedelta:
-        """Per-listener backpressure floor for the ``_predict_callback`` registration
-        (``base.py``'s ``data.register(..., interval=...)``). Distinct from the
-        ``interval``/``offset`` run-cadence config above: this is a low floor (default
-        60 min) well below the daily cadence, so it never gates the fixed boundary --
-        it only protects against the listener re-dispatching on every live-sim tick.
-        """
-        return pd.Timedelta(minutes=self._cooldown_min)
 
     @staticmethod
     def _current_boundary(now: pd.Timestamp, tz, interval_min: int, offset_min: int) -> pd.Timestamp:
