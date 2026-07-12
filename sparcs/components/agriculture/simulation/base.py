@@ -10,14 +10,15 @@ Container component that owns the soil-simulation chain:
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional, Type, TypeVar
+import threading
+from typing import Any, Callable, Optional, Type, TypeVar
 
 import pandas as pd
 from lories import Component, Constant
 from lories.components.weather import Weather
 from lories.data import Channels
 from lories.typing import Configurations, Timestamp
-from lories.util import to_timedelta
+from lories.util import floor_date, to_timedelta
 from sparcs.components.agriculture.irrigation import Irrigation
 from sparcs.components.weather import validate_meteo_inputs
 
@@ -75,6 +76,22 @@ class FieldSimulation(Component):
     # On the orchestrator, not a soil child: clipping at the chain entry delays everything downstream.
     _intake_delay: pd.Timedelta = pd.Timedelta(0)
 
+    # Wall-clock tick cadence ([field_simulation] interval/offset, minutes).
+    _interval_min: int = 60
+    _offset_min: int = 0
+
+    # Injected clock: the only wall-clock source for the cutoff and the tick
+    # loop, replaceable in tests.
+    _now: Callable[[], pd.Timestamp] = staticmethod(lambda: pd.Timestamp.now(tz="UTC"))
+
+    # Upper bound on one Event.wait so the loop re-reads the (injectable)
+    # clock and deactivate() joins promptly.
+    _TICK_WAIT_MAX_S: float = 60.0
+
+    _tick_thread: Optional[threading.Thread] = None
+    _tick_interrupt: Optional[threading.Event] = None
+    _tick_lock: Optional[threading.Lock] = None
+
     _weather_channels: Optional[Channels] = None
     _required_weather_keys: tuple[str, ...] = ()
     _weather_default_warned: set[str]
@@ -115,6 +132,7 @@ class FieldSimulation(Component):
         self._bay_width = float(configs.get("bay_width", default=3.5))
 
         self._intake_delay = self._parse_intake_delay(configs)
+        self._interval_min, self._offset_min = self._parse_tick_schedule(configs)
 
         for c in self.VEGETATION_CHANNELS:
             self.data.add(c, aggregate="mean", logger={"enabled": False})
@@ -265,6 +283,12 @@ class FieldSimulation(Component):
             unique=True,
         )
 
+        self._start_tick_thread()
+
+    def deactivate(self) -> None:
+        self._stop_tick_thread()
+        super().deactivate()
+
     # -- replication frontier (intake_delay) ----------------------------------
 
     @staticmethod
@@ -272,16 +296,30 @@ class FieldSimulation(Component):
         """Parse ``[field_simulation] intake_delay`` (default ``0`` = feature off)."""
         return to_timedelta(configs.get("intake_delay", default="0min"))
 
+    @staticmethod
+    def _parse_tick_schedule(configs: Configurations) -> tuple[int, int]:
+        """Parse ``[field_simulation] interval``/``offset`` (minutes; 60/0).
+
+        Same vocabulary as ``WeatherForecast``: ticks fire at wall-clock slots
+        aligned to ``interval``, shifted by ``offset`` within the interval.
+        """
+        interval = int(configs.get("interval", default=60))
+        offset = int(configs.get("offset", default=0))
+        if interval < 1:
+            raise ValueError(f"[field_simulation] interval must be >= 1 minute, got {interval}")
+        if not 0 <= offset < interval:
+            raise ValueError(f"[field_simulation] offset must be in [0, interval), got {offset}")
+        return interval, offset
+
     def _replication_cutoff(self) -> Optional[pd.Timestamp]:
         """Wall-clock frontier the chain may consume up to: ``utcnow - intake_delay``.
 
         ``None`` when ``intake_delay`` is zero, so the frame clip is skipped and
-        the live path stays byte-for-byte the pre-feature behavior. This is the
-        only new wall-clock read.
+        the live path stays byte-for-byte the pre-feature behavior.
         """
         if self._intake_delay == pd.Timedelta(0):
             return None
-        return pd.Timestamp.now(tz="UTC") - self._intake_delay
+        return self._now() - self._intake_delay
 
     @staticmethod
     def _clip_to_cutoff(frame: pd.DataFrame, cutoff: Optional[pd.Timestamp]) -> pd.DataFrame:
@@ -295,6 +333,63 @@ class FieldSimulation(Component):
         if cutoff is None:
             return frame
         return frame.loc[frame.index <= cutoff]
+
+    # -- wall-clock tick -------------------------------------------------------
+
+    def _next_slot(self, now: pd.Timestamp) -> pd.Timestamp:
+        """First aligned slot strictly after ``now``.
+
+        Alignment is absolute (``floor_date`` on the site timezone + offset),
+        not relative to activation, so restarts do not shift the schedule.
+        """
+        timezone = getattr(self.location, "timezone", None)
+        slot = floor_date(now, timezone, freq=f"{self._interval_min}min")
+        slot += pd.Timedelta(minutes=self._offset_min)
+        while slot <= now:
+            slot += pd.Timedelta(minutes=self._interval_min)
+        return slot
+
+    def _start_tick_thread(self) -> None:
+        self._tick_interrupt = threading.Event()
+        self._tick_lock = threading.Lock()
+        self._tick_thread = threading.Thread(target=self._tick_loop, name=f"{self.name}-tick", daemon=True)
+        self._tick_thread.start()
+
+    def _stop_tick_thread(self) -> None:
+        if self._tick_interrupt is not None:
+            self._tick_interrupt.set()
+        if self._tick_thread is not None:
+            self._tick_thread.join(timeout=30.0)
+            if self._tick_thread.is_alive():
+                logger.warning("%s: tick thread did not stop within 30s.", self.name)
+            self._tick_thread = None
+
+    def _tick_loop(self) -> None:
+        slot = self._next_slot(self._now())
+        while not self._tick_interrupt.is_set():
+            now = self._now()
+            if now < slot:
+                wait_s = min((slot - now).total_seconds(), self._TICK_WAIT_MAX_S)
+                if self._tick_interrupt.wait(timeout=wait_s):
+                    break
+                continue
+            self._tick()
+            slot = self._next_slot(self._now())
+
+    def _tick(self) -> None:
+        """Run one slot; skip (never queue) when the previous run still holds the lock."""
+        if not self._tick_lock.acquire(blocking=False):
+            logger.warning("%s: previous tick still running; skipping slot.", self.name)
+            return
+        try:
+            self._on_tick(self._now())
+        except Exception:
+            logger.exception("%s: tick failed.", self.name)
+        finally:
+            self._tick_lock.release()
+
+    def _on_tick(self, now: pd.Timestamp) -> None:
+        self._weather_callback(pd.DataFrame())
 
     def _weather_callback(self, data: pd.DataFrame) -> None:
         if not self._weather_inputs_valid():
