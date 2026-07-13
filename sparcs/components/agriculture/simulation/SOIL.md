@@ -617,14 +617,15 @@ intake_delay = "0min"    # hold the whole chain this far behind wall-clock; defa
 **`interval`/`offset`** set the wall-clock tick: `FieldSimulation` runs on its
 own clock thread (started in `activate()`), firing at absolute aligned slots
 (`floor_date + offset`, the `WeatherForecast` pattern), so restarts do not
-shift the schedule. Each tick reads the **logged** weather over
-`(frontier, now - intake_delay]` (daily chunks on catch-up, so
-`SIMULATION_STATE` persists per chunk), runs the ET chain, steps the PDE
-per observation row, attaches the logged irrigation flow as a per-timestep
-series, and finally hands the new frontier to `SoilPredictor.predict()`.
-A tick advances only as far as logged data reaches; outages and gaps
-self-heal on later ticks. If a run overruns its slot, the next slot is
-skipped, never queued.
+shift the schedule. Each tick reads the weather over
+`(frontier, now - intake_delay]` **straight from the source connector** (a
+ranged `read(start, end)`, not a logger — the station DB / observation API
+already holds the history), in daily chunks on catch-up so `SIMULATION_STATE`
+persists per chunk, runs the ET chain, steps the PDE per observation row,
+attaches the irrigation flow (read the same way) as a per-timestep series, and
+finally hands the new frontier to `SoilPredictor.predict()`. A tick advances
+only as far as the recorded data reaches; outages and gaps self-heal on later
+ticks. If a run overruns its slot, the next slot is skipped, never queued.
 
 **`intake_delay`** holds the field simulation's data-consumption frontier a fixed
 duration behind wall-clock: each tick reads inputs up to `now_utc - intake_delay`,

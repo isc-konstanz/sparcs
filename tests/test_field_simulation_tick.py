@@ -179,6 +179,53 @@ def test_on_tick_cold_start_uses_single_advance():
     assert calls == [("advance", pd.Timestamp("2026-07-12 11:45", tz="UTC"))]
 
 
+# --- span reads come from the connector, not a logger -------------------------
+
+
+class _RecordingData:
+    """Stub ``self.data`` recording whether a span was read via the connector
+    (``read``) or a logger (``read_logged``)."""
+
+    def __init__(self):
+        self.calls = []
+
+    def read(self, channels, start=None, end=None, unique=False):
+        self.calls.append(("read", start, end, unique))
+        return pd.DataFrame()
+
+    def read_logged(self, *args, **kwargs):
+        self.calls.append(("read_logged",))
+        return pd.DataFrame()
+
+
+def test_read_weather_span_reads_connector_not_logger():
+    """Weather already lives in its source (kob_tracker station / Brightsky), so
+    the tick reads the span from the connector; it must not go through a logger."""
+    sim = _sim()
+    sim._weather_channels = object()
+    sim._evapo_rename = {}
+    sim._Component__data = _RecordingData()  # backs the read-only `data` property
+
+    start = pd.Timestamp("2026-07-12 10:00", tz="UTC")
+    end = pd.Timestamp("2026-07-12 11:00", tz="UTC")
+    sim._read_weather_span(start, end)
+
+    assert sim.data.calls == [("read", start, end, True)]
+
+
+def test_read_flow_span_reads_connector_not_logger():
+    """Irrigation flow is read from its connector over the (lookback, end] span too."""
+    sim = _sim()
+    sim._irrigation_flow_channel = types.SimpleNamespace(id="irrigation_flow")
+    sim._Component__data = _RecordingData()  # backs the read-only `data` property
+
+    index = pd.date_range("2026-07-12 10:00", periods=2, freq="30min", tz="UTC")
+    series = sim._read_flow_span(index[0], index[-1], index)
+
+    assert [c[0] for c in sim.data.calls] == ["read"]
+    assert list(series) == [0.0, 0.0]  # empty history aligns to zeros
+
+
 # --- predictor on the tick ----------------------------------------------------
 
 

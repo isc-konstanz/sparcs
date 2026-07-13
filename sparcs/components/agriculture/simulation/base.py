@@ -261,10 +261,10 @@ class FieldSimulation(Component):
                 self._irrigation_flow_channel = self.irrigation.data[Irrigation.FLOW]
             except KeyError:
                 self._irrigation_flow_channel = None
-            if self._irrigation_flow_channel is None or not self._irrigation_flow_channel.has_logger():
+            if self._irrigation_flow_channel is None or not self._irrigation_flow_channel.has_connector():
                 logger.warning(
                     "%s: irrigation is configured but its flow channel is missing or has "
-                    "no logger; the tick reads logged flow and will assume 0 l/min.",
+                    "no connector; the tick reads flow from its connector and will assume 0 l/min.",
                     self.name,
                 )
 
@@ -273,11 +273,11 @@ class FieldSimulation(Component):
             if (
                 key in self._required_weather_keys
                 and key not in self._OPTIONAL_WEATHER_KEYS
-                and not channel.has_logger()
+                and not channel.has_connector()
             ):
                 logger.warning(
-                    "%s: required weather channel '%s' has no logger configured; "
-                    "the wall-clock tick reads logged data and will never see it.",
+                    "%s: required weather channel '%s' has no connector configured; "
+                    "the wall-clock tick reads its span from the connector and will never see it.",
                     self.name,
                     key,
                 )
@@ -365,11 +365,11 @@ class FieldSimulation(Component):
             self._tick_lock.release()
 
     def _on_tick(self, now: pd.Timestamp) -> None:
-        """Advance the chain over ``(frontier, now - intake_delay]`` from logged data.
+        """Advance the chain over ``(frontier, now - intake_delay]`` from connector reads.
 
         Reads in daily chunks so ``simulation_state`` persists as the frontier
         ratchets and a crash redoes at most one chunk. Advances only as far as
-        logged weather reaches; gaps self-heal on later ticks.
+        the weather feed reaches; gaps self-heal on later ticks.
         """
         if self.soil_simulation is None or self.evapotranspiration is None or self._weather_channels is None:
             return
@@ -408,14 +408,18 @@ class FieldSimulation(Component):
             s = e
 
     def _read_weather_span(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
-        frame = self.data.read_logged(self._weather_channels, start=start, end=end, unique=True)
+        # Read the span straight from the weather connector (the kob_tracker
+        # station table, or the Brightsky observation API -- both honour the
+        # ranged read), not a logger: the source already holds the observed
+        # history, so there is nothing to re-log. read() issues a ranged SELECT.
+        frame = self.data.read(self._weather_channels, start=start, end=end, unique=True)
         return self._trim_span(frame, start, end)
 
     def _read_flow_span(self, start: pd.Timestamp, end: pd.Timestamp, index: pd.DatetimeIndex) -> pd.Series:
-        """Logged irrigation flow [l/min] aligned onto the weather timesteps."""
+        """Irrigation flow [l/min] read from its connector, aligned onto the weather timesteps."""
         if self._irrigation_flow_channel is None:
             return pd.Series(0.0, index=index)
-        frame = self.data.read_logged(
+        frame = self.data.read(
             Channels([self._irrigation_flow_channel]),
             start=start - self._FLOW_LOOKBACK,
             end=end,
@@ -436,7 +440,7 @@ class FieldSimulation(Component):
         return aligned.fillna(0.0).astype(float)
 
     def _trim_span(self, frame: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
-        """Rename logged columns to weather keys and keep rows in ``(start, end]``."""
+        """Rename connector columns to weather keys and keep rows in ``(start, end]``."""
         if frame.empty:
             return frame
         frame = frame.rename(columns=self._evapo_rename)

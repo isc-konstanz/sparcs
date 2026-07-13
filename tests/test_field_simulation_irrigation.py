@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Irrigation flow enters the soil PDE as a logged time series, not a latch.
+"""Irrigation flow enters the soil PDE as a time series read from its connector, not a latch.
 
-The wall-clock tick reads the flow channel's logged history over the same span
-as weather and aligns it onto the weather timesteps (backward ffill), so a
-tick's water forcing depends only on logged data, never on when the tick runs.
-NULL flow rows mean "not watering" and must become 0.0, never NaN, in the
-aligned series -- the series successor of the latch guard from commit 20431c7.
+The wall-clock tick reads the flow channel's history over the same span as
+weather (a ranged connector read) and aligns it onto the weather timesteps
+(backward ffill), so a tick's water forcing depends only on the recorded flow,
+never on when the tick runs. NULL flow rows mean "not watering" and must become
+0.0, never NaN, in the aligned series -- the series successor of the latch guard
+from commit 20431c7.
 
 Importing ``FieldSimulation`` pulls the full lories + soil (FiPy) stack;
 ``importorskip`` keeps this out of environments that lack it (the full check
