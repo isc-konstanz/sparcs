@@ -525,7 +525,17 @@ actuate irrigation.
   `timestamp` = edge time, `timestamp_creation` = run time, `id` ←
   `field_id`; `irrigation_state` bool) — one row per planned on/off
   transition, minute-exact; readers forward-fill between edges.
-- **Debug field plots (optional).** With `save_trajectory_plot = true`,
+- **Recommended-candidate field images (optional).** With `save_plot = true`
+  and a configured `logger`, the **recommended** candidate's soil-saturation
+  field snapshots are persisted as PNG bytes to `agri_field_forecast_image`
+  (PK `timestamp` = snapshot future time, `timestamp_creation` = run time,
+  `id` ← `field_id`; single `image` column) — the same direct-write /
+  never-`.set()` path as the tables above, reusing the bytes already rendered
+  for the in-memory `predict_plot` view (no re-render). **Recommended-only**,
+  not all candidates (the disk-only `save_candidate_field_plots` archive keeps
+  those). Snapshot cadence follows `save_freq` — coarsen it to thin the blob
+  volume (it also governs `predict_state`/`predict_plot`).
+- **Debug field plots (optional).** With `save_candidate_field_plots = true`,
   each run dumps the soil saturation field as a PNG at **every forecast
   step (hourly), for every watering candidate** on the ladder, into a
   per-run subdir `<data_dir>/soil_predictor/trajectory_<run>/`. Files are
@@ -626,6 +636,19 @@ attaches the irrigation flow (read the same way) as a per-timestep series, and
 finally hands the new frontier to `SoilPredictor.predict()`. A tick advances
 only as far as the recorded data reaches; outages and gaps self-heal on later
 ticks. If a run overruns its slot, the next slot is skipped, never queued.
+
+**Irrigation input (flow, with a state fallback).** The per-timestep l/min the
+PDE forces with comes from a fallback chain (`_irrigation_flow_lpm`): the metered
+flow whenever the meter reports rows over the span (a meter reporting 0 counts as
+"alive, not watering" and wins); else — when the physical meter is broken/silent —
+the on/off irrigation **state** (`Irrigation.STATE`) times a drip-derived design
+flow `design_flow_lpm = nozzle_count * nozzle_flow_lph / 60` from an explicit
+`[soil_simulation.drip]` block; else `0` for a genuinely rain-fed field. A field
+whose `[irrigation]` component is configured but wires **neither** a connected
+flow channel **nor** a connected state channel plus an explicit
+`[soil_simulation.drip]` block is a masked misconfiguration: `activate()` raises
+`ConfigurationUnavailableError` (before the tick thread starts) rather than
+silently forcing 0 l/min.
 
 **`intake_delay`** holds the field simulation's data-consumption frontier a fixed
 duration behind wall-clock: each tick reads inputs up to `now_utc - intake_delay`,

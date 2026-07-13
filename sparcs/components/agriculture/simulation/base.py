@@ -16,13 +16,14 @@ from typing import Any, Callable, Optional, Type, TypeVar
 import pandas as pd
 from lories import Component, Constant
 from lories.components.weather import Weather
+from lories.core import ConfigurationUnavailableError
 from lories.data import Channels
 from lories.typing import Configurations, Timestamp
 from lories.util import floor_date, to_timedelta
 from sparcs.components.agriculture.irrigation import Irrigation
 from sparcs.components.weather import validate_meteo_inputs
 
-from ._soil import MeshConfig, top_segment_names_from_mesh
+from ._soil import MeshConfig, design_flow_lpm, top_segment_names_from_mesh
 from .evapotranspiration import Evapotranspiration, SegmentProperties
 from .ground_shading import GroundShading
 from .soil import SoilSimulation
@@ -31,6 +32,12 @@ from .soil_predictor import SoilPredictor
 logger = logging.getLogger(__name__)
 
 _C = TypeVar("_C", bound=Component)
+
+# Drip design-flow defaults (mirror SoilPredictor's) used when a [soil_simulation.drip]
+# block is present but omits a key. A meaningful state-driven feed needs the block set
+# explicitly -- these keep the arithmetic well-defined, not correct for any real field.
+_DEFAULT_NOZZLE_COUNT: int = 1
+_DEFAULT_NOZZLE_FLOW_LPH: float = 1.0
 
 
 # Monthly LAI lookup tables keyed by `lai_type` config option.
@@ -73,6 +80,13 @@ class FieldSimulation(Component):
     _evapo_rename: dict[str, str]
 
     _irrigation_flow_channel: Any = None
+    # On/off state feed: multiplied by the drip design flow when the meter is
+    # silent/absent (broken meter). None = no state channel wired.
+    _irrigation_state_channel: Any = None
+    # Whole-field design flow [l/min] from [soil_simulation.drip]; 0.0 = no drip block.
+    _design_flow_lpm: float = 0.0
+    # True only when [soil_simulation.drip] was declared explicitly (not defaulted).
+    _drip_explicit: bool = False
     # Read-back so watering that started before a chunk still forces its first timesteps.
     _FLOW_LOOKBACK: pd.Timedelta = pd.Timedelta(days=1)
 
@@ -143,6 +157,15 @@ class FieldSimulation(Component):
             soil_block = configs.get_member(SoilSimulation.TYPE, defaults=defaults)
             mesh_block = soil_block.get_member("mesh", defaults={}, ensure_exists=True)
             self._mesh_config = MeshConfig(mesh_block, bay_width=self._bay_width)
+
+            # Drip design flow [l/min] for the state-driven feed (broken meter).
+            # has_member() is checked BEFORE ensure_exists=True materializes the block.
+            self._drip_explicit = soil_block.has_member("drip")
+            drip_block = soil_block.get_member("drip", defaults={}, ensure_exists=True)
+            self._design_flow_lpm = design_flow_lpm(
+                drip_block.get_int("nozzle_count", default=_DEFAULT_NOZZLE_COUNT),
+                drip_block.get_float("nozzle_flow_lph", default=_DEFAULT_NOZZLE_FLOW_LPH),
+            )
 
         self._register_segment_channels()
 
@@ -255,18 +278,9 @@ class FieldSimulation(Component):
                 unique=True,
             )
 
-        self._irrigation_flow_channel = None
-        if self.irrigation is not None:
-            try:
-                self._irrigation_flow_channel = self.irrigation.data[Irrigation.FLOW]
-            except KeyError:
-                self._irrigation_flow_channel = None
-            if self._irrigation_flow_channel is None or not self._irrigation_flow_channel.has_connector():
-                logger.warning(
-                    "%s: irrigation is configured but its flow channel is missing or has "
-                    "no connector; the tick reads flow from its connector and will assume 0 l/min.",
-                    self.name,
-                )
+        self._irrigation_flow_channel = self._resolve_irrigation_channel(Irrigation.FLOW)
+        self._irrigation_state_channel = self._resolve_irrigation_channel(Irrigation.STATE)
+        self._validate_irrigation_input()
 
         for channel in self._weather_channels:
             key = channel.key
@@ -287,6 +301,42 @@ class FieldSimulation(Component):
     def deactivate(self) -> None:
         self._stop_tick_thread()
         super().deactivate()
+
+    # -- irrigation input (flow meter, with state x design-flow fallback) ------
+
+    def _resolve_irrigation_channel(self, constant: Constant) -> Any:
+        """Resolve one irrigation channel (FLOW or STATE) from the sibling
+        Irrigation component, or None when irrigation or that channel is absent."""
+        if self.irrigation is None:
+            return None
+        try:
+            return self.irrigation.data[constant]
+        except KeyError:
+            return None
+
+    def _validate_irrigation_input(self) -> None:
+        """Refuse to start (before any tick) a field whose irrigation is configured
+        but has no usable input: neither a connected flow meter nor a connected
+        on/off state channel backed by an explicit [soil_simulation.drip] block. A
+        rain-fed field (no [irrigation] block at all) is left alone -- 0 l/min is
+        the deliberate answer there, not a masked misconfiguration.
+        """
+        if self.irrigation is None:
+            return
+        flow_wired = self._irrigation_flow_channel is not None and self._irrigation_flow_channel.has_connector()
+        state_wired = (
+            self._irrigation_state_channel is not None
+            and self._irrigation_state_channel.has_connector()
+            and self._drip_explicit
+        )
+        if not (flow_wired or state_wired):
+            raise ConfigurationUnavailableError(
+                f"{self.name}: irrigation is configured but no usable input is wired. "
+                "Wire the metered feed ([irrigation.data.channels.flow] with a connector), "
+                "or the on/off state feed ([irrigation.data.channels.state] with a connector "
+                "PLUS a [soil_simulation.drip] block giving nozzle_count and nozzle_flow_lph). "
+                "Refusing to start on a silent 0 l/min fallback."
+            )
 
     # -- replication frontier (intake_delay) ----------------------------------
 
@@ -383,7 +433,9 @@ class FieldSimulation(Component):
             if weather.empty or not self._weather_frame_valid(weather):
                 continue
             et_data, seg_et = self._run_chain(weather)
-            et_data[SoilSimulation.IRRIGATION_FLOW_LPM] = self._read_flow_span(chunk_start, chunk_end, et_data.index)
+            et_data[SoilSimulation.IRRIGATION_FLOW_LPM] = self._irrigation_flow_lpm(
+                chunk_start, chunk_end, et_data.index
+            )
             if self.soil_simulation._last_simulated_at is None:
                 # Cold start: one advance spins the PDE up at the newest row.
                 self.soil_simulation.advance(et_data, et_data.index[-1], seg_et)
@@ -415,12 +467,61 @@ class FieldSimulation(Component):
         frame = self.data.read(self._weather_channels, start=start, end=end, unique=True)
         return self._trim_span(frame, start, end)
 
-    def _read_flow_span(self, start: pd.Timestamp, end: pd.Timestamp, index: pd.DatetimeIndex) -> pd.Series:
-        """Irrigation flow [l/min] read from its connector, aligned onto the weather timesteps."""
+    def _irrigation_flow_lpm(self, start: pd.Timestamp, end: pd.Timestamp, index: pd.DatetimeIndex) -> pd.Series:
+        """Irrigation flow [l/min] on ``index`` via the fallback chain: the metered
+        flow when the meter is reporting over the span, else the on/off state x the
+        drip design flow (broken/absent meter), else 0.0 (a rain-fed field with no
+        irrigation input -- the only unwired case ``activate()`` lets start).
+
+        A meter that reports 0 counts as "alive, not watering" and wins over the
+        state feed; only a meter that reported NO rows at all falls back to state.
+
+        The state feed requires an EXPLICIT [soil_simulation.drip] block (same
+        invariant _validate_irrigation_input enforces at startup): without it the
+        design flow would be the placeholder default (~0.017 l/min), so a bare
+        meter gap on a flow-primary field must read as 0 (not watering), never a
+        fabricated forcing.
+        """
+        measured = self._read_measured_flow(start, end, index)
+        if measured is not None:
+            return measured
+        if self._irrigation_state_channel is not None and self._drip_explicit:
+            return self._read_state_span(start, end, index) * self._design_flow_lpm
+        return pd.Series(0.0, index=index)
+
+    def _read_measured_flow(
+        self, start: pd.Timestamp, end: pd.Timestamp, index: pd.DatetimeIndex
+    ) -> Optional[pd.Series]:
+        """Metered flow [l/min] aligned onto ``index``, or None when the flow
+        channel is unwired or the meter reported no usable rows over the span (a
+        dead/absent meter -- the caller then falls back to the state feed)."""
         if self._irrigation_flow_channel is None:
-            return pd.Series(0.0, index=index)
+            return None
         frame = self.data.read(
             Channels([self._irrigation_flow_channel]),
+            start=start - self._FLOW_LOOKBACK,
+            end=end,
+            unique=True,
+        )
+        if frame.empty or frame.iloc[:, 0].isna().all():
+            return None
+        return self._align_flow(frame, index)
+
+    def _read_flow_span(self, start: pd.Timestamp, end: pd.Timestamp, index: pd.DatetimeIndex) -> pd.Series:
+        """Irrigation flow [l/min] aligned onto the weather timesteps, or an all-0.0
+        series when the meter channel is unwired or silent. Thin wrapper over
+        ``_read_measured_flow``; the fallback chain uses ``_irrigation_flow_lpm``."""
+        measured = self._read_measured_flow(start, end, index)
+        return measured if measured is not None else pd.Series(0.0, index=index)
+
+    def _read_state_span(self, start: pd.Timestamp, end: pd.Timestamp, index: pd.DatetimeIndex) -> pd.Series:
+        """Irrigation on/off state read from its connector, aligned onto the weather
+        timesteps as 0.0/1.0. Backward-filled; NULL rows and leading gaps read as
+        0.0 (off), same guard as ``_align_flow`` -- NaN must never reach the PDE."""
+        if self._irrigation_state_channel is None:
+            return pd.Series(0.0, index=index)
+        frame = self.data.read(
+            Channels([self._irrigation_state_channel]),
             start=start - self._FLOW_LOOKBACK,
             end=end,
             unique=True,
