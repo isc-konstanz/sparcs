@@ -412,9 +412,9 @@ primitives (`apply_source`, `solve`, `snapshot`, `set_state`,
 Two components consume it:
 
 - `SoilSimulation` — the live driver. Owns channel registration,
-  plotting (`progress.png` / `progress.html` auto-refresh),
-  mass-balance accounting, the cold-start spin-up, and the wall-clock
-  walk.
+  progress plotting (rendered to its `SOIL_PROGRESS_IMAGE` DB blob
+  channel; no filesystem output), mass-balance accounting, the
+  cold-start spin-up, and the wall-clock walk.
 - `SoilPredictor` — forecast roll-outs over the planning horizon.
   Uses the same PDE core. Rolls the Richards equation forward over the
   weather forecast to answer two questions: the zero-irrigation "what
@@ -525,29 +525,22 @@ actuate irrigation.
   `timestamp` = edge time, `timestamp_creation` = run time, `id` ←
   `field_id`; `irrigation_state` bool) — one row per planned on/off
   transition, minute-exact; readers forward-fill between edges.
-- **Recommended-candidate field images (optional).** With `save_plot = true`
-  and a configured `logger`, the **recommended** candidate's soil-saturation
-  field snapshots are persisted as PNG bytes to `agri_field_forecast_image`
-  (PK `timestamp` = snapshot future time, `timestamp_creation` = run time,
-  `id` ← `field_id`; single `image` column) — the same direct-write /
-  never-`.set()` path as the tables above, reusing the bytes already rendered
-  for the in-memory `predict_plot` view (no re-render). **Recommended-only**,
-  not all candidates (the disk-only `save_candidate_field_plots` archive keeps
-  those). Snapshot cadence follows `save_freq` — coarsen it to thin the blob
-  volume (it also governs `predict_state`/`predict_plot`).
-- **Debug field plots (optional).** With `save_candidate_field_plots = true`,
-  each run dumps the soil saturation field as a PNG at **every forecast
-  step (hourly), for every watering candidate** on the ladder, into a
-  per-run subdir `<data_dir>/soil_predictor/trajectory_<run>/`. Files are
-  `<slug>_<step>.png` (e.g. `30-0min_20260706T140000.png`); the
-  recommended candidate's files carry a `CHOSEN_` prefix. Each candidate
-  is re-rolled independently from the initial condition (the ground-truth
-  `_rollout_independent` path) with a snapshot sink that renders inline,
-  so nothing touches the parallel/caterpillar forecast roll-out and no
-  full-mesh series is held in memory. Off by default; when on it
-  re-simulates the whole ladder — **slow and disk-heavy** (candidates ×
-  forecast steps PNGs per run), for debugging only — but never blocks or
-  aborts the forecast/recommendation already published.
+- **Recommended-candidate field images (optional).** With `[plot] enabled`
+  (default on) and a configured `logger`, the **recommended** candidate's
+  soil-saturation field snapshots are persisted as PNG bytes to
+  `agri_field_forecast_image` (PK `timestamp` = snapshot future time,
+  `timestamp_creation` = run time, `id` ← `field_id`; single `image` column) —
+  the same direct-write / never-`.set()` path as the tables above, reusing the
+  bytes already rendered for the in-memory `predict_plot` view (no re-render).
+  **Recommended candidate only.** Snapshot cadence follows `[plot] interval`;
+  coarsen it to thin the blob volume. Field/progress PNGs go **only** to the DB —
+  there is no filesystem sink.
+- **State blobs (optional, debug).** With `[state] save = true` and a `logger`,
+  the recommended candidate's full solver state is persisted (`predict_state`) at
+  the independent `[state] interval` cadence, decoupled from `[plot]` (a state
+  blob is not a plot). Both sinks draw from one snapshot dict captured at the
+  union of the two cadences; `_publish_results` re-derives each sink's timestamps
+  with `_cadence_subset`.
 
 **Consumer migration.** The all-`0min` rung reproduces today's
 zero-irrigation forecast. A dashboard reading the in-memory
@@ -622,7 +615,25 @@ run schedule and the replication knob sit one level up on the parent
 interval     = 60        # wall-clock tick cadence, minutes; ticks fire at aligned slots
 offset       = 0         # minutes within the interval (interval=60, offset=5 -> xx:05)
 intake_delay = "0min"    # hold the whole chain this far behind wall-clock; default 0
+
+  [field_simulation.plot]   # cascades to every subcomponent (soil / ground_shading /
+    enabled  = true         # soil_predictor) as its default; each child overrides via
+    interval = "1h"         # its own [<type>.plot]. Same mechanism as [model].
 ```
+
+**Plotting (`[plot]`).** Every simulation subcomponent that renders progress
+frames — `SoilSimulation`, `GroundShading`, and the `SoilPredictor` chosen
+candidate — reads one shared `[plot]` block: `enabled` (default on; `SoilPredictor`
+included) gates plotting, `interval` sets the render cadence. Frames persist
+**only** to each component's DB blob channel — there is no `live`/`save`/`show`
+filesystem output. Set `[plot]` on `[field_simulation]` to configure all three at
+once (it cascades via `Component._build_defaults`), or per-child under
+`[soil_simulation.plot]` / `[ground_shading.plot]` / `[soil_predictor.plot]`; a
+child block overrides the field-level default per key, and each component keeps a
+per-component code default interval (`SoilSimulation` `5min`, the others `1h`) as
+the final fallback. The `SoilPredictor` additionally reads a separate
+`[soil_predictor.state]` block (`save` + `interval`) for its optional
+`predict_state` blobs — decoupled from `[plot]`, since a state blob is not a plot.
 
 **`interval`/`offset`** set the wall-clock tick: `FieldSimulation` runs on its
 own clock thread (started in `activate()`), firing at absolute aligned slots
