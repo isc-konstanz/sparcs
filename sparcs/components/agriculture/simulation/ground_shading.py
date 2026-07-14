@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import io
 import logging
-import os
-import threading
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -365,8 +363,7 @@ class GroundShading(Component):
     # Soil mesh top-segment x-ranges in pvfactors coords; None if no mesh is wired.
     _segment_ranges: Optional[dict[str, tuple[float, float]]] = None
 
-    # --- Plot state ----------------------------------------------------------
-    _plot_progress: bool = False
+    # --- Plot state (_plot_config is None when plotting is disabled) ----------
     _plot_config: Optional[plot_style.PlotConfig] = None
     _plot_fig: Any = None
     _plot_axes: Any = None
@@ -420,18 +417,9 @@ class GroundShading(Component):
 
     def _configure_plot(self, configs: Configurations) -> None:
         """Read the ``[plot]`` block and register SHADING_PROGRESS_IMAGE when enabled."""
-        self._plot_progress = configs.get_bool("plot_progress", default=True)
-        if not self._plot_progress:
+        self._plot_config = plot_style.load_plot_config(configs, default_interval="1h")
+        if self._plot_config is None:
             return
-
-        default_dir = str(configs.dirs.data.joinpath("ground_shading"))
-        self._plot_config = plot_style.PlotConfig(
-            configs.get_member("plot", defaults={}, ensure_exists=True),
-            default_dir=default_dir,
-            default_interval="1h",
-        )
-        if self._plot_config.save or self._plot_config.live:
-            os.makedirs(self._plot_config.dir, exist_ok=True)
         self.data.add(
             GroundShading.SHADING_PROGRESS_IMAGE,
             aggregate="last",
@@ -890,7 +878,7 @@ class GroundShading(Component):
         """Throttle renders by PlotConfig.interval and forward to _render_progress.
         ``sun_state`` is ``(solar_zenith, solar_azimuth, axis_azimuth)`` for shadow projection.
         """
-        if not self._plot_progress or self._plot_config is None:
+        if self._plot_config is None:
             return
         if not plot_style.render_due(self._last_plot_ts, ts, self._plot_config.interval):
             return
@@ -899,27 +887,14 @@ class GroundShading(Component):
             self._render_progress(ts, ground, pv_rows, sun_state)
         except Exception:  # noqa: BLE001
             logger.exception("%s: progress-plot render failed; disabling.", self.name)
-            self._plot_progress = False
+            self._plot_config = None
 
     def _init_progress_figure(self) -> None:
         """Create the matplotlib figure once; reuse across renders.
-        Forces Agg backend on worker threads (interactive backends require the main thread).
+        The evaluate() call runs on the field tick's worker thread, so render headless.
         """
-        on_main_thread = threading.current_thread() is threading.main_thread()
-        if not on_main_thread:
-            if self._plot_config.show:
-                logger.warning(
-                    "%s: progress plot 'show' disabled; runs on a worker "
-                    "thread (matplotlib GUI requires the main thread). Use "
-                    "'live = true' to view ground_shading.png in a browser.",
-                    self.name,
-                )
-                self._plot_config.show = False
-            if matplotlib.get_backend().lower() not in ("agg", "module://matplotlib_inline.backend_inline"):
-                matplotlib.use("Agg", force=True)
-
-        if self._plot_config.show:
-            plt.ion()
+        if matplotlib.get_backend().lower() not in ("agg", "module://matplotlib_inline.backend_inline"):
+            matplotlib.use("Agg", force=True)
         x_extent = 2.0 * self._plot_x_half
         y_extent = self._plot_y_max - self._plot_y_min
         fig, ax = plt.subplots(
@@ -943,7 +918,7 @@ class GroundShading(Component):
         sun_state: tuple[float, float, Optional[float]],
     ) -> None:
         """Draw the 2-D scene: ground coloured by qinc, PV rows in black, shadow projection lines.
-        Persists PNG to SHADING_PROGRESS_IMAGE and optionally to disk per PlotConfig.
+        Persists the PNG to the SHADING_PROGRESS_IMAGE DB blob channel.
         """
         if self._plot_fig is None:
             self._init_progress_figure()
@@ -1057,27 +1032,8 @@ class GroundShading(Component):
         timezone = getattr(getattr(self.context, "location", None), "timezone", None)
         ax.set_title(plot_style.format_progress_title("Ground shading", ts, tz=timezone))
 
-        if self._plot_config.show:
-            try:
-                self._plot_fig.canvas.draw_idle()
-                plt.pause(0.001)
-            except Exception:  # noqa: BLE001
-                pass
-
         buf = io.BytesIO()
         self._plot_fig.savefig(buf, dpi=plot_style.DPI, format="png")
         png_bytes = buf.getvalue()
 
         self.data[GroundShading.SHADING_PROGRESS_IMAGE].set(ts, png_bytes)
-
-        if self._plot_config.live:
-            target = os.path.join(self._plot_config.dir, "ground_shading.png")
-            tmp = target + ".tmp"
-            with open(tmp, "wb") as f:
-                f.write(png_bytes)
-            os.replace(tmp, target)
-
-        if self._plot_config.save:
-            fname = ts.strftime("%Y%m%dT%H%M%S") + ".png"
-            with open(os.path.join(self._plot_config.dir, fname), "wb") as f:
-                f.write(png_bytes)

@@ -21,10 +21,11 @@ _soil = pytest.importorskip("sparcs.components.agriculture.simulation.soil")
 SoilSimulation = _soil.SoilSimulation
 
 
-def _sim(interval: str = "1h", *, plot_progress: bool = True) -> SoilSimulation:
+def _sim(interval: str = "1h", *, plot_enabled: bool = True) -> SoilSimulation:
     sim = object.__new__(SoilSimulation)
-    sim._plot_progress = plot_progress
-    sim._plot_config = types.SimpleNamespace(interval=pd.Timedelta(interval))
+    # _plot_config is None exactly when plotting is disabled (the gate the real
+    # _render_progress_if_due checks); otherwise it carries the render interval.
+    sim._plot_config = types.SimpleNamespace(interval=pd.Timedelta(interval)) if plot_enabled else None
     sim._last_plot_simtime = None
     sim._rendered = []
     sim._render_progress = sim._rendered.append  # stub the heavy PNG render
@@ -58,8 +59,8 @@ def test_render_skipped_before_interval_elapses():
     assert sim._rendered == [pd.Timestamp("2026-07-12 10:00", tz="UTC")]
 
 
-def test_no_render_when_plot_progress_disabled():
-    sim = _sim("1h", plot_progress=False)
+def test_no_render_when_plotting_disabled():
+    sim = _sim("1h", plot_enabled=False)
     sim._render_progress_if_due(pd.Timestamp("2026-07-12 10:00", tz="UTC"))
     assert sim._rendered == []
 

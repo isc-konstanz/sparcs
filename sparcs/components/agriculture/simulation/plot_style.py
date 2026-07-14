@@ -9,6 +9,7 @@ fixed width, equal-aspect axes, shared margins, plasma colormap, and timestamp t
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Optional
 
 from matplotlib.colors import Normalize
@@ -30,25 +31,36 @@ def render_due(last: Optional[pd.Timestamp], now: pd.Timestamp, interval: pd.Tim
     return last is None or (now - last) >= interval
 
 
+@dataclass
 class PlotConfig:
-    """Progress-plot output settings shared by ``SoilSimulation`` and ``GroundShading``.
+    """Progress-plot cadence shared by the field-simulation subcomponents
+    (``SoilSimulation``, ``GroundShading``, ``SoilPredictor``).
 
-    ``interval``: minimum time between renders (per-component default via
-    ``default_interval``). ``live``: overwrite a single PNG in ``dir``. ``save``:
-    archive one timestamped PNG per render. ``show``: pop a matplotlib window
-    (main thread only). ``dir``: output directory (default ``default_dir``).
+    Rendered PNGs persist only to their DB blob channel; there is no filesystem
+    sink. ``interval`` is the minimum time between renders.
     """
 
-    def __init__(self, configs: Configurations, default_dir: str, default_interval: str):
-        interval = configs.get("interval", default=default_interval)
-        if isinstance(interval, (int, float)):
-            self.interval: pd.Timedelta = pd.Timedelta(seconds=float(interval))
-        else:
-            self.interval: pd.Timedelta = pd.Timedelta(interval)
-        self.live: bool = configs.get_bool("live", default=True)
-        self.save: bool = configs.get_bool("save", default=False)
-        self.show: bool = configs.get_bool("show", default=False)
-        self.dir: str = configs.get("dir", default=default_dir)
+    interval: pd.Timedelta
+
+
+def load_plot_config(configs: Configurations, *, default_interval: str) -> Optional[PlotConfig]:
+    """Read a ``[plot]`` block into a :class:`PlotConfig`, or ``None`` when
+    plotting is disabled (``enabled = false``).
+
+    ``enabled`` and ``interval`` cascade from a field-level ``[plot]`` block via
+    ``FieldSimulation._build_defaults`` and are overridable per subcomponent;
+    ``default_interval`` is the per-component final fallback. An ``int``/``float``
+    ``interval`` is read as seconds, a string/``Timedelta`` as a duration.
+    """
+    plot = configs.get_member("plot", defaults={}, ensure_exists=True)
+    if not plot.get_bool("enabled", default=True):
+        return None
+    interval = plot.get("interval", default=default_interval)
+    if isinstance(interval, (int, float)):
+        interval = pd.Timedelta(seconds=float(interval))
+    else:
+        interval = pd.Timedelta(interval)
+    return PlotConfig(interval=interval)
 
 
 # Style constants

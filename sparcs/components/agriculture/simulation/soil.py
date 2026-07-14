@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
-import threading
 from typing import Any, Optional
 
 import matplotlib
@@ -162,8 +160,7 @@ class SoilSimulation(SoilBase):
     _simulating: bool = False
     _strip_flux_warned: bool = False
 
-    # Progress-plot state
-    _plot_progress: bool = False
+    # Progress-plot state; _plot_config is None when plotting is disabled.
     _plot_fig: Any = None
     _plot_ax: Any = None
     _last_plot_simtime: Optional[pd.Timestamp] = None
@@ -223,19 +220,11 @@ class SoilSimulation(SoilBase):
             os.makedirs(structure_dir, exist_ok=True)
             self._plot_mesh(os.path.join(structure_dir, "mesh.png"))
 
-        self._plot_progress = configs.get_bool("plot_progress", default=True)
-        if self._plot_progress:
-            default_plot_dir = str(configs.dirs.data.joinpath("soil_simulation"))
-            self._plot_config = plot_style.PlotConfig(
-                configs.get_member("plot", defaults={}, ensure_exists=True),
-                default_dir=default_plot_dir,
-                default_interval="5min",
-            )
+        self._plot_config = plot_style.load_plot_config(configs, default_interval="5min")
+        if self._plot_config is not None:
             self._last_plot_simtime = None
             self._plot_fig = None
             self._plot_ax = None
-            if self._plot_config.save or self._plot_config.live:
-                os.makedirs(self._plot_config.dir, exist_ok=True)
             self._register_progress_image_channel()
 
         self._pde = self._build_pde()
@@ -293,7 +282,7 @@ class SoilSimulation(SoilBase):
             # Include the surface ponds so pond build-up/drain-down does not
             # masquerade as bottom drainage in the balance diagnostics.
             storage_before = self._total_water() + self._pde.surface_water()
-            interval = self._plot_config.interval if self._plot_progress else None
+            interval = self._plot_config.interval if self._plot_config is not None else None
             clip_total = ClipDiagnostics()
             self._walk(
                 rates=rates,
@@ -785,45 +774,29 @@ class SoilSimulation(SoilBase):
         single long ``advance``. The first render (``_last_plot_simtime is None``)
         always fires so a fresh run isn't blank until the first interval passes.
         """
-        if not self._plot_progress:
+        if self._plot_config is None:
             return
         if plot_style.render_due(self._last_plot_simtime, now, self._plot_config.interval):
             self._render_progress_safe(now)
 
     def _render_progress_safe(self, sim_t: pd.Timestamp) -> None:
         """Render at sim_t with error containment; a single render failure
-        disables progress plotting for the rest of the run rather than
-        crashing the solver."""
+        disables progress plotting for the rest of the run (``_plot_config`` set
+        to None) rather than crashing the solver."""
         self._last_plot_simtime = sim_t
         try:
             self._render_progress(sim_t)
         except Exception:  # noqa: BLE001
             logger.exception("%s: progress-plot render failed; disabling.", self.name)
-            self._plot_progress = False
+            self._plot_config = None
 
     def _init_progress_figure(self) -> None:
-        on_main_thread = threading.current_thread() is threading.main_thread()
-        has_display = sys.platform != "linux" or bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
-        can_show = self._plot_config.show and on_main_thread and has_display
-
-        if self._plot_config.show and not can_show:
-            reason = "solver runs on a worker thread" if not on_main_thread else "no GUI display available"
-            logger.warning(
-                "%s: progress plot 'show' disabled (%s). Use 'live = true' and "
-                "open progress.html in a browser for a live view.",
-                self.name,
-                reason,
-            )
-            self._plot_config.show = False
-
-        if not can_show and matplotlib.get_backend().lower() not in (
+        # The solver runs on the field tick's worker thread, so render headless.
+        if matplotlib.get_backend().lower() not in (
             "agg",
             "module://matplotlib_inline.backend_inline",
         ):
             matplotlib.use("Agg", force=True)
-
-        if self._plot_config.show:
-            plt.ion()
         fig, ax, norm = plot_render.init_rel_sat_figure(
             self._mesh_config.width,
             self._mesh_config.height,
@@ -831,35 +804,6 @@ class SoilSimulation(SoilBase):
         self._plot_fig = fig
         self._plot_ax = ax
         self._plot_norm = norm
-
-        if self._plot_config.live:
-            self._write_progress_html()
-            logger.info(
-                "%s: live progress at file://%s/progress.html (refreshes every 2s)",
-                self.name,
-                self._plot_config.dir,
-            )
-
-    def _write_progress_html(self) -> None:
-        html = (
-            "<!DOCTYPE html>\n<html><head><meta charset='utf-8'>"
-            "<title>Soil simulation progress</title><style>"
-            "body{background:#111;margin:0;padding:1em;font-family:sans-serif;color:#ccc;}"
-            "img{max-width:100%;height:auto;display:block;margin:0 auto;}"
-            ".meta{text-align:center;padding:0.5em;font-size:0.9em;}"
-            "</style></head><body>"
-            "<div class='meta'>auto-refresh every 2s, last reload: <span id='t'></span></div>"
-            "<img id='plot' src='progress.png'>"
-            "<script>"
-            "function r(){const i=document.getElementById('plot');"
-            "i.src='progress.png?t='+Date.now();"
-            "document.getElementById('t').textContent=new Date().toLocaleTimeString();}"
-            "setInterval(r,2000);r();"
-            "</script></body></html>\n"
-        )
-        path = os.path.join(self._plot_config.dir, "progress.html")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(html)
 
     def _render_progress(self, sim_t: pd.Timestamp) -> None:
         if self._plot_fig is None:
@@ -875,24 +819,4 @@ class SoilSimulation(SoilBase):
             sim_t,
             tz=timezone,
         )
-
-        if self._plot_config.show:
-            try:
-                self._plot_fig.canvas.draw_idle()
-                plt.pause(0.001)
-            except Exception:  # noqa: BLE001
-                pass
-
         self.data[SoilSimulation.SOIL_PROGRESS_IMAGE].set(sim_t, png_bytes)
-
-        if self._plot_config.live:
-            target = os.path.join(self._plot_config.dir, "progress.png")
-            tmp = target + ".tmp"
-            with open(tmp, "wb") as f:
-                f.write(png_bytes)
-            os.replace(tmp, target)
-
-        if self._plot_config.save:
-            fname = sim_t.strftime("%Y%m%dT%H%M%S") + ".png"
-            with open(os.path.join(self._plot_config.dir, fname), "wb") as f:
-                f.write(png_bytes)
