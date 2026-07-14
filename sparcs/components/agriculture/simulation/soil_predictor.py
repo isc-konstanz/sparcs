@@ -56,7 +56,9 @@ from ._soil import (
 logger = logging.getLogger(__name__)
 
 _DEFAULT_HORIZON: str = "24h"
-_DEFAULT_SAVE_FREQ: str = "1h"
+# Default snapshot cadence, shared by the [plot] interval (chosen-candidate field
+# images) and the [state] interval (predict_state blobs); each overridable.
+_DEFAULT_SNAPSHOT_INTERVAL: str = "1h"
 
 # Scheduling gate defaults -- the predictor's OWN cadence, distinct from
 # the field-simulation tick's interval=60/offset=0 (do not inherit those).
@@ -185,21 +187,20 @@ class SoilPredictor(SoilBase):
     # shape as `agri_field_forecast_irrigation` (PK `timestamp` = snapshot future time,
     # `timestamp_creation` = run time, `id` <- field_id; single value column
     # `image`), and the same single shared `timestamp_creation` twin -- one field
-    # per component, so no per-probe twins. Recommended-only (NOT all candidates:
-    # the disk-only `save_candidate_field_plots` archive keeps those). Reuses the
+    # per component, so no per-probe twins. Recommended candidate only. Reuses the
     # bytes already rendered for the in-memory `predict_plot` channel -- see
-    # `_publish_results`/`predict`. Gated by `save_plot` AND a configured logger.
+    # `_publish_results`/`predict`. Gated by `[plot] enabled` AND a configured logger.
     _IMAGE_TABLE_NAME: str = "agri_field_forecast_image"
     _IMAGE_KEY: str = "predict_image"
     _IMAGE_COLUMN: str = "image"
     _IMAGE_TIMESTAMP_CREATION_KEY: str = "predict_image_timestamp_creation"
 
     _horizon: pd.Timedelta
-    _save_freq: pd.Timedelta
+    # Chosen-candidate field-plot cadence lives in _plot_config (None = plotting off);
+    # state-blob capture has its own [state] gate + interval (both snapshot the roll-out).
+    _plot_config: Optional[plot_style.PlotConfig] = None
+    _state_freq: pd.Timedelta
     _save_state: bool
-    _save_plot: bool
-    _save_candidate_field_plots: bool = False
-    _trajectory_plot_dir: str
 
     # Scheduling gate: run cadence, own defaults (not the field-sim tick's).
     _interval_min: int
@@ -319,22 +320,16 @@ class SoilPredictor(SoilBase):
         self._mesh_config = mesh_config
 
         self._horizon = to_timedelta(configs.get("horizon", default=_DEFAULT_HORIZON))
-        self._save_freq = to_timedelta(configs.get("save_freq", default=_DEFAULT_SAVE_FREQ))
-        self._save_state = configs.get_bool("save_state", default=False)
-        self._save_plot = configs.get_bool("save_plot", default=False)
 
-        # Debug dump of the soil saturation FIELD (a cross-section PNG per forecast
-        # step, hourly) for every watering candidate on the ladder -- candidates x
-        # steps PNGs per run, in a per-run subdir on disk. NOT tension-trajectory
-        # curves (hence the honest name). Off by default: when on it re-simulates
-        # the whole ladder (slow, disk-heavy) but never blocks or aborts the forecast.
-        self._save_candidate_field_plots = configs.get_bool("save_candidate_field_plots", default=False)
-        if self._save_candidate_field_plots:
-            self._trajectory_plot_dir = configs.get(
-                "plot.dir",
-                default=str(configs.dirs.data.joinpath("soil_predictor")),
-            )
-            os.makedirs(self._trajectory_plot_dir, exist_ok=True)
+        # Chosen-candidate field images: [plot] enabled (default on) + [plot] interval.
+        # None when disabled. Shares the shared subcomponent [plot] vocabulary.
+        self._plot_config = plot_style.load_plot_config(configs, default_interval=_DEFAULT_SNAPSHOT_INTERVAL)
+
+        # State-blob capture (predict_state, debug/replay): its own [state] block,
+        # decoupled from [plot] -- a state blob is not a plot.
+        state = configs.get_member("state", defaults={}, ensure_exists=True)
+        self._save_state = state.get_bool("save", default=False)
+        self._state_freq = to_timedelta(state.get("interval", default=_DEFAULT_SNAPSHOT_INTERVAL))
 
         self._interval_min = configs.get_int("interval", default=_DEFAULT_INTERVAL_MIN)
         self._offset_min = configs.get_int("offset", default=_DEFAULT_OFFSET_MIN)
@@ -467,7 +462,7 @@ class SoilPredictor(SoilBase):
         self._channel_keys = self._register_predict_channels(self._probes)
         if self._save_state:
             self._register_state_channel()
-        if self._save_plot:
+        if self._plot_config is not None:
             self._register_plot_channel()
         self._register_diagnostic_channels()
 
@@ -498,8 +493,8 @@ class SoilPredictor(SoilBase):
             ) = self._register_detail_channels(self._probes, probe_identities)
             self._register_irrigation_channels()
             # The recommended candidate's field plots persist only when they are
-            # also rendered (save_plot) -- no point declaring the table otherwise.
-            if self._save_plot:
+            # also rendered (plotting enabled) -- no point declaring the table otherwise.
+            if self._plot_config is not None:
                 self._register_image_channels()
 
     # --- Channel registration helpers (data.add() kwargs, unit-testable) -------
@@ -834,7 +829,8 @@ class SoilPredictor(SoilBase):
         contract as `_register_irrigation_channels`; these two channels are DISTINCT
         from the in-memory `predict_plot` channel (which stays `.set()` for Dash),
         so the auto-log path never fires for them. Only called when
-        `self._logger_id is not None` AND `self._save_plot` (see configure())."""
+        `self._logger_id is not None` AND plotting is enabled (`self._plot_config
+        is not None`; see configure())."""
         self.data.add(
             self._IMAGE_KEY,
             type=bytes,
@@ -976,9 +972,9 @@ class SoilPredictor(SoilBase):
         published = False
         chosen: Optional[tuple[pd.Timedelta, ...]] = None
         ladder_traj: dict = {}
-        # The recommended candidate's rendered field plots (save_index, png bytes),
+        # The recommended candidate's rendered field plots (plot_index, png bytes),
         # reused for the agri_field_forecast_image write below; None unless the grid
-        # path published with save_plot on.
+        # path published with plotting enabled.
         recommended_plot: Optional[tuple[pd.DatetimeIndex, list[bytes]]] = None
         horizon_start = et_data.index[0]
         horizon_end = et_data.index[-1]
@@ -1066,8 +1062,8 @@ class SoilPredictor(SoilBase):
 
         # Secondary watering-grid writes -- the agri_field_forecast header, the
         # agri_soil_forecast detail rows (ALL candidates), the chosen candidate's
-        # agri_field_forecast_irrigation edge rows, the recommended candidate's
-        # agri_field_forecast_image field plots, and the debug field plots.
+        # agri_field_forecast_irrigation edge rows, and the recommended candidate's
+        # agri_field_forecast_image field plots.
         # Best-effort and only when the grid path produced a recommendation: a
         # failure here never affects the forecast already published on the main
         # channels above. `now` is the run time (every run's rows are kept, keyed
@@ -1086,7 +1082,6 @@ class SoilPredictor(SoilBase):
                 if recommended_plot is not None:
                     save_index, plot_values = recommended_plot
                     self._write_image_table(self._build_image_frame(save_index, plot_values, now))
-                self._write_trajectory_fields(ic_rel_sat, et_data, seg_et, horizon_start, horizon_end, chosen, now)
             except Exception:  # noqa: BLE001
                 logger.exception(
                     "%s: header/detail/irrigation/image-write failed (now=%s, creation=%s); "
@@ -1806,17 +1801,28 @@ class SoilPredictor(SoilBase):
         trajectories: dict[str, list[float]] = {p.channel_id: [] for p in self._probes}
         snapshots: dict[pd.Timestamp, np.ndarray] = {}
         diagnostics: dict[str, list[float]] = {c.key: [] for c in _DIAGNOSTIC_CONSTANTS}
-        last_save_ts: Optional[pd.Timestamp] = None
-        capture_snapshots = self._save_state or self._save_plot
+        # One snapshot dict captured at the UNION of the plot and state cadences; the
+        # per-sink subsets are re-derived in _publish_results (_cadence_subset). Plot
+        # and state have independent intervals, so a snapshot is taken whenever either
+        # is due, and each sink writes only its own due timestamps.
+        plot_interval = self._plot_config.interval if self._plot_config is not None else None
+        last_plot_ts: Optional[pd.Timestamp] = None
+        last_state_ts: Optional[pd.Timestamp] = None
+        capture_snapshots = self._save_state or plot_interval is not None
 
         def _maybe_snapshot(ts: pd.Timestamp) -> None:
-            nonlocal last_save_ts
+            nonlocal last_plot_ts, last_state_ts
             if not capture_snapshots:
                 return
-            if not plot_style.render_due(last_save_ts, ts, self._save_freq):
+            plot_due = plot_interval is not None and plot_style.render_due(last_plot_ts, ts, plot_interval)
+            state_due = self._save_state and plot_style.render_due(last_state_ts, ts, self._state_freq)
+            if not (plot_due or state_due):
                 return
             snapshots[ts] = self._pde.snapshot()
-            last_save_ts = ts
+            if plot_due:
+                last_plot_ts = ts
+            if state_due:
+                last_state_ts = ts
 
         if len(idx) > 0:
             timestamps.append(idx[0])
@@ -1927,10 +1933,14 @@ class SoilPredictor(SoilBase):
         forecast_creation: pd.Timestamp,
     ) -> Optional[tuple[pd.DatetimeIndex, list[bytes]]]:
         """Publish the (recommended or zero-flow) forecast on the in-memory
-        channels. Returns the rendered ``(save_index, png_bytes)`` when
-        ``save_plot`` produced plot snapshots, else None -- the caller persists
-        that recommended-candidate render to ``agri_field_forecast_image`` without
-        re-rendering (see ``predict``)."""
+        channels. Returns the rendered ``(plot_index, png_bytes)`` when plotting
+        is enabled and produced snapshots, else None -- the caller persists that
+        recommended-candidate render to ``agri_field_forecast_image`` without
+        re-rendering (see ``predict``).
+
+        ``snapshots`` is captured at the union of the plot and state cadences;
+        ``_cadence_subset`` re-derives each sink's own timestamps so the
+        ``[plot] interval`` and ``[state] interval`` stay independent."""
         if not timestamps:
             return None
 
@@ -1960,18 +1970,20 @@ class SoilPredictor(SoilBase):
         if not snapshots:
             return None
 
-        save_index = pd.DatetimeIndex(sorted(snapshots), name="timestamp")
+        full_index = pd.DatetimeIndex(sorted(snapshots), name="timestamp")
 
         if self._save_state:
-            state_values = [self._encode_state(snapshots[t]) for t in save_index]
+            state_index = self._cadence_subset(full_index, self._state_freq)
+            state_values = [self._encode_state(snapshots[t]) for t in state_index]
             self.data[self._STATE_CHANNEL_KEY].set(
-                save_index[0],
-                pd.Series(state_values, index=save_index, dtype=object),
+                state_index[0],
+                pd.Series(state_values, index=state_index, dtype=object),
             )
 
-        if self._save_plot:
+        if self._plot_config is not None:
+            plot_index = self._cadence_subset(full_index, self._plot_config.interval)
             plot_values: list[bytes] = []
-            for t in save_index:
+            for t in plot_index:
                 try:
                     plot_values.append(self._render_snapshot_png(snapshots[t], t))
                 except Exception:  # noqa: BLE001
@@ -1984,12 +1996,31 @@ class SoilPredictor(SoilBase):
                     break
             if plot_values:
                 self.data[self._PLOT_CHANNEL_KEY].set(
-                    save_index[0],
-                    pd.Series(plot_values, index=save_index, dtype=object),
+                    plot_index[0],
+                    pd.Series(plot_values, index=plot_index, dtype=object),
                 )
-                return save_index, plot_values
+                return plot_index, plot_values
 
         return None
+
+    @staticmethod
+    def _cadence_subset(index: pd.DatetimeIndex, interval: pd.Timedelta) -> pd.DatetimeIndex:
+        """The subset of ``index`` (assumed sorted) at ``interval`` cadence: the
+        first timestamp, each one at least ``interval`` past the previously kept,
+        and always the last (so the forecast's final frame is persisted).
+
+        Reproduces the live ``render_due`` throttle over the captured union of
+        snapshot timestamps, letting the plot and state sinks apply their own
+        interval to the shared snapshot dict without a second roll-out."""
+        kept: list[pd.Timestamp] = []
+        last: Optional[pd.Timestamp] = None
+        for ts in index:
+            if plot_style.render_due(last, ts, interval):
+                kept.append(ts)
+                last = ts
+        if len(index) > 0 and index[-1] not in kept:
+            kept.append(index[-1])
+        return pd.DatetimeIndex(kept, name="timestamp")
 
     # Header + detail forecast-table publishing (the watering-grid outputs)
 
@@ -2388,79 +2419,6 @@ class SoilPredictor(SoilBase):
             return self.data[self._HEADER_FORECAST_ID_KEY].logger._get_registrator()
         except Exception:  # noqa: BLE001
             return None
-
-    @staticmethod
-    def _candidate_slug(candidate: tuple[pd.Timedelta, ...]) -> str:
-        """Filesystem-safe per-window-minutes slug for a ladder candidate, e.g.
-        ``(30 min, 0 min)`` -> ``30-0min``. Used in debug field-plot filenames."""
-        return "-".join(f"{c.total_seconds() / 60:g}" for c in candidate) + "min"
-
-    def _write_trajectory_fields(
-        self,
-        ic_rel_sat: np.ndarray,
-        et_data: pd.DataFrame,
-        seg_et: dict[str, pd.DataFrame],
-        horizon_start: pd.Timestamp,
-        horizon_end: pd.Timestamp,
-        chosen: tuple[pd.Timedelta, ...],
-        run_timestamp: pd.Timestamp,
-    ) -> None:
-        """Debug dump: save the soil saturation field as a PNG at every forecast
-        timestamp (hourly), for every watering candidate on the ladder, into a
-        per-run subdirectory of the on-disk plot dir. Gated by `save_candidate_field_plots`.
-
-        Each candidate is re-rolled independently from the initial condition (the
-        ground-truth path ``_rollout_independent`` uses), with a snapshot sink that
-        renders and writes each hourly field inline -- so this never accumulates the
-        full mesh across steps, and never touches the parallel/caterpillar forecast
-        roll-out above. Warns and skips (never raises), per-candidate and overall: a
-        debug-plot failure must never abort the forecast/recommendation already
-        published. Off by default; when on it re-simulates the whole ladder and
-        writes candidates x forecast-steps PNGs -- slow and disk-heavy, debug only.
-        """
-        if not self._save_candidate_field_plots:
-            return
-
-        run_dir = os.path.join(self._trajectory_plot_dir, f"trajectory_{run_timestamp:%Y%m%dT%H%M%S}")
-        try:
-            os.makedirs(run_dir, exist_ok=True)
-        except OSError:
-            logger.exception("%s: creating the trajectory field-plot dir '%s' failed.", self.name, run_dir)
-            return
-
-        idx = et_data.index
-        written = 0
-        for candidate in self._ladder:
-            slug = self._candidate_slug(candidate)
-            is_chosen = candidate == chosen
-            prefix = f"{'CHOSEN_' if is_chosen else ''}{slug}"
-            label = slug + (" (recommended)" if is_chosen else "")
-
-            def _sink(ts: pd.Timestamp, *, _prefix: str = prefix, _label: str = label) -> None:
-                nonlocal written
-                png = self._render_snapshot_png(self._pde.snapshot(), ts, title=f"Candidate {_label}")
-                path = os.path.join(run_dir, f"{_prefix}_{ts:%Y%m%dT%H%M%S}.png")
-                with open(path, "wb") as handle:
-                    handle.write(png)
-                written += 1
-
-            try:
-                self._pde.set_state(ic_rel_sat)
-                on_intervals = self._build_flow_schedule(
-                    self._windows, list(candidate), self._flow_m3s, horizon_start, horizon_end
-                )
-                self._roll_segment(idx, et_data, seg_et, on_intervals, snapshot_sink=_sink)
-            except Exception:  # noqa: BLE001
-                logger.exception("%s: field-plot re-roll for candidate %s failed; skipping it.", self.name, slug)
-                continue
-
-        logger.debug(
-            "%s: trajectory field plots written: %d PNGs across %d candidates in %s.",
-            self.name,
-            written,
-            len(self._ladder),
-            run_dir,
-        )
 
     @staticmethod
     def _encode_state(rel_sat: np.ndarray) -> bytes:

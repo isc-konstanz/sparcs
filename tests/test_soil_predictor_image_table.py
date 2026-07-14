@@ -26,6 +26,12 @@ _PNG_A = b"\x89PNG\r\n\x1a\nA"
 _PNG_B = b"\x89PNG\r\n\x1a\nB"
 
 
+def _plot_config(interval: str = "1h"):
+    """A PlotConfig enabling the chosen-candidate plot at ``interval`` (plotting
+    on == _plot_config is not None, the gate _publish_results checks)."""
+    return soil_predictor.plot_style.PlotConfig(interval=pd.Timedelta(interval))
+
+
 def _save_index(periods: int = 2) -> pd.DatetimeIndex:
     return pd.date_range("2026-07-03 02:00", periods=periods, freq="6h", tz=_TZ, name="timestamp")
 
@@ -182,13 +188,13 @@ def test_write_image_table_renames_to_channel_ids_and_never_calls_set(monkeypatc
 
 
 def test_publish_results_returns_rendered_plot_for_reuse(monkeypatch):
-    """save_plot on -> _publish_results renders once, sets predict_plot, and
-    RETURNS (save_index, png bytes) so predict() can persist without re-rendering."""
+    """plotting on -> _publish_results renders once, sets predict_plot, and
+    RETURNS (plot_index, png bytes) so predict() can persist without re-rendering."""
     predictor = object.__new__(SoilPredictor)
     predictor._name = "test_predictor"
     predictor._channel_keys = {}
     predictor._save_state = False
-    predictor._save_plot = True
+    predictor._plot_config = _plot_config()
 
     fake_data = _FakeDataAccess(
         [SoilPredictor._TIMESTAMP_CREATION_KEY, SoilPredictor._PLOT_CHANNEL_KEY]
@@ -217,12 +223,12 @@ def test_publish_results_returns_rendered_plot_for_reuse(monkeypatch):
     assert fake_data[SoilPredictor._PLOT_CHANNEL_KEY].calls
 
 
-def test_publish_results_returns_none_when_save_plot_off(monkeypatch):
+def test_publish_results_returns_none_when_plotting_off(monkeypatch):
     predictor = object.__new__(SoilPredictor)
     predictor._name = "test_predictor"
     predictor._channel_keys = {}
     predictor._save_state = False
-    predictor._save_plot = False
+    predictor._plot_config = None
 
     fake_data = _FakeDataAccess(
         [SoilPredictor._TIMESTAMP_CREATION_KEY] + [c.key for c in soil_predictor._DIAGNOSTIC_CONSTANTS]
@@ -243,7 +249,7 @@ def test_publish_results_returns_none_when_render_fails(monkeypatch):
     predictor._name = "test_predictor"
     predictor._channel_keys = {}
     predictor._save_state = False
-    predictor._save_plot = True
+    predictor._plot_config = _plot_config()
 
     fake_data = _FakeDataAccess(
         [SoilPredictor._TIMESTAMP_CREATION_KEY, SoilPredictor._PLOT_CHANNEL_KEY]
@@ -262,3 +268,61 @@ def test_publish_results_returns_none_when_render_fails(monkeypatch):
 
     assert predictor._publish_results([], [], list(index), snapshots, diagnostics, index[0]) is None
     assert fake_data[SoilPredictor._PLOT_CHANNEL_KEY].calls == []
+
+
+# --- dual-cadence snapshot subsets ([plot] interval vs [state] interval) ------
+
+
+@pytest.mark.parametrize(
+    "hours, interval, expected_hours",
+    [
+        ([0, 1, 2, 3, 4], "2h", [0, 2, 4]),  # coarser cadence thins the union
+        ([0, 1, 2], "1h", [0, 1, 2]),  # cadence == spacing keeps all
+        ([0, 1, 2, 3], "2h", [0, 2, 3]),  # final always kept (3h is off the 2h grid)
+        ([0], "1h", [0]),  # single frame
+    ],
+)
+def test_cadence_subset(hours, interval, expected_hours):
+    base = pd.Timestamp("2026-07-03 00:00", tz=_TZ)
+    index = pd.DatetimeIndex([base + pd.Timedelta(hours=h) for h in hours], name="timestamp")
+    subset = SoilPredictor._cadence_subset(index, pd.Timedelta(interval))
+    assert list(subset) == [base + pd.Timedelta(hours=h) for h in expected_hours]
+
+
+def test_cadence_subset_empty():
+    empty = pd.DatetimeIndex([], name="timestamp")
+    assert list(SoilPredictor._cadence_subset(empty, pd.Timedelta("1h"))) == []
+
+
+def test_publish_results_plot_and_state_use_independent_cadences(monkeypatch):
+    """State blobs follow [state] interval and plot images follow [plot] interval,
+    both re-derived from the one union-captured snapshot dict."""
+    predictor = object.__new__(SoilPredictor)
+    predictor._name = "test_predictor"
+    predictor._channel_keys = {}
+    predictor._save_state = True
+    predictor._state_freq = pd.Timedelta("1h")
+    predictor._plot_config = _plot_config("2h")
+
+    fake_data = _FakeDataAccess(
+        [
+            SoilPredictor._TIMESTAMP_CREATION_KEY,
+            SoilPredictor._STATE_CHANNEL_KEY,
+            SoilPredictor._PLOT_CHANNEL_KEY,
+        ]
+        + [c.key for c in soil_predictor._DIAGNOSTIC_CONSTANTS]
+    )
+    monkeypatch.setattr(SoilPredictor, "data", property(lambda self: fake_data))
+    monkeypatch.setattr(SoilPredictor, "_render_snapshot_png", lambda self, arr, t, **_k: b"png")
+    monkeypatch.setattr(SoilPredictor, "_encode_state", staticmethod(lambda arr: b"state"))
+
+    index = pd.date_range("2026-07-03 00:00", periods=5, freq="1h", tz=_TZ)  # hourly union
+    snapshots = {t: np.zeros(3) for t in index}
+    diagnostics = {c.key: [float("nan")] * len(index) for c in soil_predictor._DIAGNOSTIC_CONSTANTS}
+
+    predictor._publish_results([], [], list(index), snapshots, diagnostics, index[0])
+
+    state_series = fake_data[SoilPredictor._STATE_CHANNEL_KEY].calls[-1][1]
+    plot_series = fake_data[SoilPredictor._PLOT_CHANNEL_KEY].calls[-1][1]
+    assert list(state_series.index) == list(index)  # every hour
+    assert list(plot_series.index) == [index[0], index[2], index[4]]  # every 2h

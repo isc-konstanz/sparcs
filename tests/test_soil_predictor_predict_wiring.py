@@ -131,7 +131,6 @@ def _make_predictor(windows, calls, last_simulated_at=pd.Timestamp("2026-07-03 0
     p._write_detail_table = lambda *a, **k: calls.append("write_detail_table")
     p._build_irrigation_frame = _build_irrigation_frame
     p._write_irrigation_table = lambda *a, **k: calls.append("write_irrigation_table")
-    p._write_trajectory_fields = lambda *a, **k: calls.append("write_fields")
     return p
 
 
@@ -169,11 +168,11 @@ def test_predict_grid_block_invokes_all_collaborators(caplog):
 
 
 def test_predict_writes_image_table_when_publish_returns_a_render(caplog):
-    """When _publish_results returns a rendered (save_index, pngs) tuple (save_plot
+    """When _publish_results returns a rendered (plot_index, pngs) tuple (plotting
     on), predict() persists it via _build_image_frame -> _write_image_table, after
-    the irrigation write and before the debug field dump. With no render (the
-    default stub returns None) the image write is skipped (covered by the happy
-    path above, where 'write_image_table' never appears)."""
+    the irrigation write. With no render (the default stub returns None) the image
+    write is skipped (covered by the happy path above, where 'write_image_table'
+    never appears)."""
     calls = []
     predictor = _make_predictor([object()], calls)
     save_index = pd.DatetimeIndex([pd.Timestamp("2026-07-03 02:00", tz=_TZ)], name="timestamp")
@@ -188,7 +187,7 @@ def test_predict_writes_image_table_when_publish_returns_a_render(caplog):
     assert "build_image_frame" in calls
     assert "write_image_table" in calls
     assert "image-write" not in caplog.text.lower(), f"secondary write try/except swallowed an error: {caplog.text}"
-    assert calls.index("write_irrigation_table") < calls.index("write_image_table") < calls.index("write_fields")
+    assert calls.index("write_irrigation_table") < calls.index("write_image_table")
 
 
 def test_predict_publishes_resolved_chosen_when_recommendation_is_nonzero(caplog):
