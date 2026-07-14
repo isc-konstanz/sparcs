@@ -13,7 +13,7 @@ row per candidate per run (durations, window starts, ``is_recommended``,
 ``agri_soil_forecast``. There is no separate recommendation table -- the
 chosen candidate is the header row with ``is_recommended = True``. The
 chosen candidate's watering schedule is additionally persisted as
-state-transition edge rows in ``agri_field_irrigation`` (one row per planned
+state-transition edge rows in ``agri_field_forecast_irrigation`` (one row per planned
 on/off change, minute-exact). The in-memory ``predict_<probe>`` channels (and
 the debug ``predict_state`` / ``predict_plot`` blobs) stay available for
 Dash/debugging but are no longer logged.
@@ -166,7 +166,7 @@ class SoilPredictor(SoilBase):
     _DETAIL_FORECAST_ID_SUFFIX: str = "_forecast_id"
 
     # --- Irrigation-plan table (direct connector write) ------------------------
-    # `agri_field_irrigation`: the chosen candidate's watering schedule as
+    # `agri_field_forecast_irrigation`: the chosen candidate's watering schedule as
     # state-transition edge rows (one row per on/off edge), indexed at the edge's
     # OWN timestamp -- unlike the header table, this index varies per row, like
     # the detail table's future timestamps. `timestamp_creation` is the
@@ -175,14 +175,14 @@ class SoilPredictor(SoilBase):
     # value channel is needed: this table has a single field per predictor
     # component (field_id cascades component-wide via config, not per-row), so
     # there is no per-probe soil_id to disambiguate.
-    _IRRIGATION_TABLE_NAME: str = "agri_field_irrigation"
+    _IRRIGATION_TABLE_NAME: str = "agri_field_forecast_irrigation"
     _IRRIGATION_STATE_KEY: str = "irrigation_state"
     _IRRIGATION_TIMESTAMP_CREATION_KEY: str = "irrigation_timestamp_creation"
 
     # --- Recommended-candidate field-plot image table (direct connector write) --
     # `agri_field_forecast_image`: the RECOMMENDED candidate's soil-saturation
     # field snapshots as PNG bytes, one row per saved snapshot. Same field-level
-    # shape as `agri_field_irrigation` (PK `timestamp` = snapshot future time,
+    # shape as `agri_field_forecast_irrigation` (PK `timestamp` = snapshot future time,
     # `timestamp_creation` = run time, `id` <- field_id; single value column
     # `image`), and the same single shared `timestamp_creation` twin -- one field
     # per component, so no per-probe twins. Recommended-only (NOT all candidates:
@@ -480,7 +480,7 @@ class SoilPredictor(SoilBase):
             )
 
         # Header (`agri_field_forecast`) + detail (`agri_soil_forecast`) +
-        # irrigation-plan (`agri_field_irrigation`) tables (direct connector
+        # irrigation-plan (`agri_field_forecast_irrigation`) tables (direct connector
         # write). Skipped entirely when no `logger` is configured (degrade,
         # don't crash) -- see the module docstring.
         self._header_window_min_keys = []
@@ -796,7 +796,7 @@ class SoilPredictor(SoilBase):
         return tension_keys, creation_keys, forecast_id_keys
 
     def _register_irrigation_channels(self) -> None:
-        """`agri_field_irrigation`: the chosen candidate's watering schedule as
+        """`agri_field_forecast_irrigation`: the chosen candidate's watering schedule as
         state-transition edge rows. Same never-`.set()` / logger-gated contract
         as `_register_header_channels`; only called when `self._logger_id is
         not None` (see configure()). Only one field per predictor component, so
@@ -1066,7 +1066,7 @@ class SoilPredictor(SoilBase):
 
         # Secondary watering-grid writes -- the agri_field_forecast header, the
         # agri_soil_forecast detail rows (ALL candidates), the chosen candidate's
-        # agri_field_irrigation edge rows, the recommended candidate's
+        # agri_field_forecast_irrigation edge rows, the recommended candidate's
         # agri_field_forecast_image field plots, and the debug field plots.
         # Best-effort and only when the grid path produced a recommendation: a
         # failure here never affects the forecast already published on the main
@@ -2135,7 +2135,7 @@ class SoilPredictor(SoilBase):
         horizon_end: pd.Timestamp,
         run_timestamp: pd.Timestamp,
     ) -> pd.DataFrame:
-        """Build the ``agri_field_irrigation`` edge-row frame for the CHOSEN
+        """Build the ``agri_field_forecast_irrigation`` edge-row frame for the CHOSEN
         candidate's watering schedule: one ``(on_ts, True)`` row and one
         ``(off_ts, False)`` row per MERGED on-interval, both stamped with
         ``run_timestamp``. Re-derives the schedule via ``_build_flow_schedule``
@@ -2304,7 +2304,7 @@ class SoilPredictor(SoilBase):
         }
 
     def _write_irrigation_table(self, frame: pd.DataFrame) -> None:
-        """Direct-write the ``agri_field_irrigation`` edge-row frame."""
+        """Direct-write the ``agri_field_forecast_irrigation`` edge-row frame."""
         self._write_direct_frame(frame, self._irrigation_id_by_key, "irrigation table")
 
     def _build_image_frame(

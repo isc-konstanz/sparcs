@@ -1075,7 +1075,8 @@ class GroundShading(Component):
         ax.set_ylim(self._plot_y_min, self._plot_y_max)
 
         plot_style.apply_axes_style(ax)
-        ax.set_title(plot_style.format_progress_title("Ground shading", ts, suffix=f"mode: {self._mode}"))
+        timezone = getattr(getattr(self.context, "location", None), "timezone", None)
+        ax.set_title(plot_style.format_progress_title("Ground shading", ts, tz=timezone))
 
         if self._plot_config.show:
             try:

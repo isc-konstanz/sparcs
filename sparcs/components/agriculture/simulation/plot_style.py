@@ -9,8 +9,6 @@ fixed width, equal-aspect axes, shared margins, plasma colormap, and timestamp t
 
 from __future__ import annotations
 
-from typing import Optional
-
 from matplotlib.colors import Normalize
 
 import numpy as np
@@ -75,12 +73,30 @@ def apply_axes_style(ax) -> None:
     ax.grid(True, alpha=GRID_ALPHA)
 
 
-def format_progress_title(label: str, ts: pd.Timestamp, suffix: Optional[str] = None) -> str:
-    """``"<label> — YYYY-MM-DD HH:MM[ (<suffix>)]"`` — the shared title format."""
-    base = f"{label} — {ts.strftime(TIMESTAMP_FORMAT)}"
-    if suffix:
-        return f"{base} ({suffix})"
-    return base
+def _localize_timestamp(ts: pd.Timestamp, tz) -> pd.Timestamp:
+    """Return ``ts`` in the site timezone ``tz``. A naive ``ts`` is assumed UTC;
+    ``tz=None`` returns ``ts`` unchanged (naive stays naive → no offset shown)."""
+    if tz is None:
+        return ts
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    return ts.tz_convert(tz)
+
+
+def _offset_suffix(ts: pd.Timestamp) -> str:
+    """`` +HH:MM`` for a tz-aware ``ts`` (colon-form offset), or ``""`` when naive."""
+    raw = ts.strftime("%z")  # "+0200" / "-0500", or "" when naive
+    return f" {raw[:3]}:{raw[3:]}" if raw else ""
+
+
+def format_progress_title(label: str, ts: pd.Timestamp, *, tz=None) -> str:
+    """``"<label> — YYYY-MM-DD HH:MM[ +HH:MM]"`` — the shared title format.
+
+    ``tz`` (an IANA name or ``tzinfo``, from ``location.timezone``) renders the
+    timestamp in site-local time with a colon-form offset; a naive ``ts`` is
+    assumed UTC. ``tz=None`` keeps ``ts`` as-is with no offset."""
+    ts = _localize_timestamp(ts, tz)
+    return f"{label} — {ts.strftime(TIMESTAMP_FORMAT)}{_offset_suffix(ts)}"
 
 
 class SmoothstepNorm(Normalize):

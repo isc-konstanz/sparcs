@@ -6,7 +6,7 @@ Unit tests for the ``agri_field_forecast_image`` table: the RECOMMENDED
 candidate's soil-saturation field snapshots persisted as PNG bytes
 (``SoilPredictor._build_image_frame``), channel-registered
 (``_register_image_channels``) and direct-written (``_write_image_table``) the
-same never-``.set()`` / logger-gated way ``agri_field_irrigation`` is, plus the
+same never-``.set()`` / logger-gated way ``agri_field_forecast_irrigation`` is, plus the
 ``_publish_results`` -> reuse-the-rendered-bytes handshake that feeds it.
 
 Importing ``soil_predictor`` pulls the full lories + soil (FiPy/Gmsh) stack via

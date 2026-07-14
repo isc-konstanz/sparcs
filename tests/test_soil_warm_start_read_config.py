@@ -56,13 +56,13 @@ def test_kob_fixture_simulation_state_read_keys_are_top_level():
 
     channel = conf["data"]["channels"]["simulation_state"]
     assert channel.get("connector") == "mariadb"
-    assert channel.get("table") == "agri_field_simulation_state"
+    assert channel.get("table") == "agri_field_simulation_soil_state"
     assert channel.get("column") == "state"
     # The read-side table/column must not live (only) inside a nested
     # connector sub-block — the SQL read path cannot see them there.
     assert not isinstance(channel.get("connector"), dict)
     # Write side unchanged: the logger block keeps its own table.
-    assert channel["logger"]["table"] == "agri_field_simulation_state"
+    assert channel["logger"]["table"] == "agri_field_simulation_soil_state"
 
 
 # --- framework semantics the fixture shape relies on --------------------------
@@ -177,7 +177,7 @@ def _build_channel(connector, **top):
         key="simulation_state",
         type=bytes,
         connector=connector,
-        logger={"enabled": True, "column": "state", "table": "agri_field_simulation_state"},
+        logger={"enabled": True, "column": "state", "table": "agri_field_simulation_soil_state"},
         **top,
     )
 
@@ -185,17 +185,17 @@ def _build_channel(connector, **top):
 def test_top_level_table_and_column_resolve_on_the_raw_read_channel():
     channel = _build_channel(
         connector="mariadb",
-        table="agri_field_simulation_state",
+        table="agri_field_simulation_soil_state",
         column="state",
     )
 
-    assert channel.get("table") == "agri_field_simulation_state"
+    assert channel.get("table") == "agri_field_simulation_soil_state"
     assert channel.get("column") == "state"
     assert channel.has_connector("mariadb")
     # Write side is untouched by the top-level read keys: the logger flatten
     # still resolves the same table/column.
     logged = channel.from_logger()
-    assert logged.get("table") == "agri_field_simulation_state"
+    assert logged.get("table") == "agri_field_simulation_soil_state"
     assert logged.get("column") == "state"
 
 
@@ -205,7 +205,7 @@ def test_nested_connector_block_keys_are_invisible_to_the_read_path():
     would fall back to the channel group — while has_connector() still
     passes, hiding the misconfiguration from the configure-time warning."""
     channel = _build_channel(
-        connector={"connector": "mariadb", "table": "agri_field_simulation_state", "column": "state"},
+        connector={"connector": "mariadb", "table": "agri_field_simulation_soil_state", "column": "state"},
     )
 
     assert channel.get("table") is None

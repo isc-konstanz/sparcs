@@ -849,6 +849,7 @@ class SoilSimulation(SoilBase):
         if self._plot_fig is None:
             self._init_progress_figure()
 
+        timezone = getattr(getattr(self.context, "location", None), "timezone", None)
         png_bytes = plot_render.render_rel_sat_png(
             self._plot_fig,
             self._plot_ax,
@@ -856,6 +857,7 @@ class SoilSimulation(SoilBase):
             self._pde.mesh,
             self._pde.rel_sat.value,
             sim_t,
+            tz=timezone,
         )
 
         if self._plot_config.show:

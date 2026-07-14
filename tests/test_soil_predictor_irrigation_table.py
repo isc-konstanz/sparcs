@@ -2,7 +2,7 @@
 """sparcs.tests.test_soil_predictor_irrigation_table
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Unit tests for the ``agri_field_irrigation`` edge-row table: the chosen
+Unit tests for the ``agri_field_forecast_irrigation`` edge-row table: the chosen
 candidate's watering schedule, persisted as state-transition rows
 (``SoilPredictor._build_irrigation_frame``) and channel-registered
 (``SoilPredictor._register_irrigation_channels``) the same never-``.set()`` /
@@ -210,7 +210,7 @@ def _bare_predictor_for_registration(monkeypatch, **extra) -> tuple:
 
 def test_register_irrigation_channels_binds_irrigation_table(monkeypatch):
     """Both channels route to the configured logger connector's
-    agri_field_irrigation table with logger.enabled=True (direct-write path);
+    agri_field_forecast_irrigation table with logger.enabled=True (direct-write path);
     irrigation_state is a plain data column (not primary), and
     timestamp_creation is the primary/non-nullable PK partner with a
     'timestamp_creation' column override (its channel key differs from the

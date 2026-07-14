@@ -83,6 +83,7 @@ def render_rel_sat_png(
     sim_t: pd.Timestamp,
     *,
     title: str = "Relative saturation",
+    tz=None,
 ) -> bytes:
     """Render ``rel_sat_values`` (one value per FiPy cell) onto ``fig``/``ax`` and return PNG bytes."""
     x, y = mesh.cellCenters
@@ -99,7 +100,7 @@ def render_rel_sat_png(
     ax.contourf(xi, yi, zi, levels=15, cmap=plot_style.COLORMAP, norm=norm)
     ax.contour(xi, yi, zi, levels=15, linewidths=0.5, colors="k")
     plot_style.apply_axes_style(ax)
-    ax.set_title(plot_style.format_progress_title(title, sim_t))
+    ax.set_title(plot_style.format_progress_title(title, sim_t, tz=tz))
 
     buf = io.BytesIO()
     fig.savefig(buf, dpi=plot_style.DPI, format="png")

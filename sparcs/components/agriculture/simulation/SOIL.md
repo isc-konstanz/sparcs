@@ -521,7 +521,7 @@ actuate irrigation.
   **direct connector write**, because the automatic log path collapses
   duplicate timestamps; the trajectory channels are never `.set()`, so the
   auto flush stays silent for them. The chosen candidate's watering schedule
-  is additionally persisted as **edge rows** on `agri_field_irrigation` (PK
+  is additionally persisted as **edge rows** on `agri_field_forecast_irrigation` (PK
   `timestamp` = edge time, `timestamp_creation` = run time, `id` ←
   `field_id`; `irrigation_state` bool) — one row per planned on/off
   transition, minute-exact; readers forward-fill between edges.
