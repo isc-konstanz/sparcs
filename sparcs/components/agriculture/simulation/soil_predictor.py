@@ -38,7 +38,7 @@ from lories.typing import Configurations
 from lories.util import floor_date, to_timedelta
 from sparcs.components.agriculture.simulation.soil import SoilSimulation
 
-from . import plot_render
+from . import plot_render, plot_style
 from ._soil import (
     ClipDiagnostics,
     FluxRates,
@@ -1813,7 +1813,7 @@ class SoilPredictor(SoilBase):
             nonlocal last_save_ts
             if not capture_snapshots:
                 return
-            if last_save_ts is not None and (ts - last_save_ts) < self._save_freq:
+            if not plot_style.render_due(last_save_ts, ts, self._save_freq):
                 return
             snapshots[ts] = self._pde.snapshot()
             last_save_ts = ts

@@ -9,10 +9,47 @@ fixed width, equal-aspect axes, shared margins, plasma colormap, and timestamp t
 
 from __future__ import annotations
 
+from typing import Optional
+
 from matplotlib.colors import Normalize
 
 import numpy as np
 import pandas as pd
+from lories.typing import Configurations
+
+# Progress-plot config + render cadence
+
+
+def render_due(last: Optional[pd.Timestamp], now: pd.Timestamp, interval: pd.Timedelta) -> bool:
+    """True when a progress frame is due: none has rendered yet (``last is None``)
+    or at least ``interval`` has elapsed since the last render at ``last``.
+
+    Pure and side-effect-free: each caller owns its own last-timestamp state and
+    performs the render + state update itself.
+    """
+    return last is None or (now - last) >= interval
+
+
+class PlotConfig:
+    """Progress-plot output settings shared by ``SoilSimulation`` and ``GroundShading``.
+
+    ``interval``: minimum time between renders (per-component default via
+    ``default_interval``). ``live``: overwrite a single PNG in ``dir``. ``save``:
+    archive one timestamped PNG per render. ``show``: pop a matplotlib window
+    (main thread only). ``dir``: output directory (default ``default_dir``).
+    """
+
+    def __init__(self, configs: Configurations, default_dir: str, default_interval: str):
+        interval = configs.get("interval", default=default_interval)
+        if isinstance(interval, (int, float)):
+            self.interval: pd.Timedelta = pd.Timedelta(seconds=float(interval))
+        else:
+            self.interval: pd.Timedelta = pd.Timedelta(interval)
+        self.live: bool = configs.get_bool("live", default=True)
+        self.save: bool = configs.get_bool("save", default=False)
+        self.show: bool = configs.get_bool("show", default=False)
+        self.dir: str = configs.get("dir", default=default_dir)
+
 
 # Style constants
 

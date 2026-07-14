@@ -29,7 +29,7 @@ from lories.data import Channels
 from lories.typing import Configurations
 from lories.util import to_timedelta
 
-from . import plot_render
+from . import plot_render, plot_style
 from ._anchor import AnchorConfig, AnchorSensor, SensorOverrides, anchor_update
 from ._soil import (
     SE_MAX,
@@ -38,7 +38,6 @@ from ._soil import (
     FluxRates,
     MeshConfig,
     PDEConfig,
-    PlotConfig,
     ProbeSpec,
     SoilBase,
     apply_surface_forcing,
@@ -148,7 +147,7 @@ class SoilSimulation(SoilBase):
     # a flux, so it is excluded from the mass-balance residual.
     WATER_ANCHOR = Constant(float, "anchor", "Anchor Assimilation Increment", "kg/m", context="water")
 
-    _plot_config: Optional[PlotConfig] = None
+    _plot_config: Optional[plot_style.PlotConfig] = None
 
     # Irrigation strip fluxes above this are almost certainly a unit or
     # normalization error (mis-scaled irrigation_flow values, or a wrong
@@ -227,9 +226,10 @@ class SoilSimulation(SoilBase):
         self._plot_progress = configs.get_bool("plot_progress", default=True)
         if self._plot_progress:
             default_plot_dir = str(configs.dirs.data.joinpath("soil_simulation"))
-            self._plot_config = PlotConfig(
+            self._plot_config = plot_style.PlotConfig(
                 configs.get_member("plot", defaults={}, ensure_exists=True),
                 default_dir=default_plot_dir,
+                default_interval="5min",
             )
             self._last_plot_simtime = None
             self._plot_fig = None
@@ -487,7 +487,7 @@ class SoilSimulation(SoilBase):
             if plot_interval is None:
                 return
             sim_t = sim_t0 + pd.Timedelta(seconds=t_offset)
-            if self._last_plot_simtime is None or (sim_t - self._last_plot_simtime) >= plot_interval:
+            if plot_style.render_due(self._last_plot_simtime, sim_t, plot_interval):
                 self._render_progress_safe(sim_t)
 
         result = self._pde.walk_window(
@@ -787,7 +787,7 @@ class SoilSimulation(SoilBase):
         """
         if not self._plot_progress:
             return
-        if self._last_plot_simtime is None or (now - self._last_plot_simtime) >= self._plot_config.interval:
+        if plot_style.render_due(self._last_plot_simtime, now, self._plot_config.interval):
             self._render_progress_safe(now)
 
     def _render_progress_safe(self, sim_t: pd.Timestamp) -> None:

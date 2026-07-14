@@ -510,20 +510,6 @@ class ProbeSpec:
     weights: np.ndarray
 
 
-@dataclass
-class PlotConfig:
-    def __init__(self, configs: Configurations, default_dir: str):
-        interval = configs.get("interval", default="5min")
-        if isinstance(interval, (int, float)):
-            self.interval: pd.Timedelta = pd.Timedelta(seconds=float(interval))
-        else:
-            self.interval: pd.Timedelta = pd.Timedelta(interval)
-        self.live: bool = configs.get_bool("live", default=True)
-        self.save: bool = configs.get_bool("save", default=False)
-        self.show: bool = configs.get_bool("show", default=False)
-        self.dir: str = configs.get("dir", default=default_dir)
-
-
 class SoilPDECore:
     """Shared FiPy / Richards-equation core for both the live solver and predictor.
 

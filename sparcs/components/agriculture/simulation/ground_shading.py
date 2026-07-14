@@ -192,28 +192,6 @@ def _open_sky_ghi(pv_df: pd.DataFrame) -> np.ndarray:
 
 
 @dataclass
-class PlotConfig:
-    """Plot output settings.
-
-    ``interval``: minimum time between renders.
-    ``live``: overwrite a single ``ground_shading.png``.
-    ``save``: archive one timestamped PNG per render.
-    ``show``: pop a matplotlib window (main thread only).
-    """
-
-    def __init__(self, configs: Configurations, default_dir: str):
-        interval = configs.get("interval", default="1h")
-        if isinstance(interval, (int, float)):
-            self.interval: pd.Timedelta = pd.Timedelta(seconds=float(interval))
-        else:
-            self.interval: pd.Timedelta = pd.Timedelta(interval)
-        self.live: bool = configs.get_bool("live", default=True)
-        self.save: bool = configs.get_bool("save", default=False)
-        self.show: bool = configs.get_bool("show", default=False)
-        self.dir: str = configs.get("dir", default=default_dir)
-
-
-@dataclass
 class _TrackerConfig:
     axis_tilt: float  # rotation-axis tilt from horizontal [deg]
     axis_azimuth: float  # rotation-axis bearing [deg], 180 = N–S axis
@@ -389,7 +367,7 @@ class GroundShading(Component):
 
     # --- Plot state ----------------------------------------------------------
     _plot_progress: bool = False
-    _plot_config: Optional[PlotConfig] = None
+    _plot_config: Optional[plot_style.PlotConfig] = None
     _plot_fig: Any = None
     _plot_axes: Any = None
     _last_plot_ts: Optional[pd.Timestamp] = None
@@ -447,9 +425,10 @@ class GroundShading(Component):
             return
 
         default_dir = str(configs.dirs.data.joinpath("ground_shading"))
-        self._plot_config = PlotConfig(
+        self._plot_config = plot_style.PlotConfig(
             configs.get_member("plot", defaults={}, ensure_exists=True),
             default_dir=default_dir,
+            default_interval="1h",
         )
         if self._plot_config.save or self._plot_config.live:
             os.makedirs(self._plot_config.dir, exist_ok=True)
@@ -913,7 +892,7 @@ class GroundShading(Component):
         """
         if not self._plot_progress or self._plot_config is None:
             return
-        if self._last_plot_ts is not None and (ts - self._last_plot_ts) < self._plot_config.interval:
+        if not plot_style.render_due(self._last_plot_ts, ts, self._plot_config.interval):
             return
         self._last_plot_ts = ts
         try:
