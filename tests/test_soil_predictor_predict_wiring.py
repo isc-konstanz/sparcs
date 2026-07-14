@@ -168,6 +168,29 @@ def test_predict_grid_block_invokes_all_collaborators(caplog):
     assert calls.index("write_detail_table") < calls.index("build_irrigation_frame")
 
 
+def test_predict_writes_image_table_when_publish_returns_a_render(caplog):
+    """When _publish_results returns a rendered (save_index, pngs) tuple (save_plot
+    on), predict() persists it via _build_image_frame -> _write_image_table, after
+    the irrigation write and before the debug field dump. With no render (the
+    default stub returns None) the image write is skipped (covered by the happy
+    path above, where 'write_image_table' never appears)."""
+    calls = []
+    predictor = _make_predictor([object()], calls)
+    save_index = pd.DatetimeIndex([pd.Timestamp("2026-07-03 02:00", tz=_TZ)], name="timestamp")
+    predictor._publish_results = lambda *a, **k: calls.append("publish_results") or (save_index, [b"png"])
+    predictor._build_image_frame = lambda *a, **k: calls.append("build_image_frame") or pd.DataFrame()
+    predictor._write_image_table = lambda *a, **k: calls.append("write_image_table")
+    now = pd.Timestamp("2026-07-03 01:30", tz=_TZ)
+
+    with caplog.at_level(logging.ERROR):
+        predictor.predict(now, forecast_creation=now)
+
+    assert "build_image_frame" in calls
+    assert "write_image_table" in calls
+    assert "image-write" not in caplog.text.lower(), f"secondary write try/except swallowed an error: {caplog.text}"
+    assert calls.index("write_irrigation_table") < calls.index("write_image_table") < calls.index("write_fields")
+
+
 def test_predict_publishes_resolved_chosen_when_recommendation_is_nonzero(caplog):
     """When the selector picks a NON-zero candidate, predict() re-solves that single
     candidate (to recover its snapshots + diagnostics) and publishes ITS roll on the

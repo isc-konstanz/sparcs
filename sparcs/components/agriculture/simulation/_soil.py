@@ -59,6 +59,17 @@ SE_MAX: float = 0.999  # effective-saturation ceiling for source clipping
 IRR_HEADROOM_EPS: float = 1e-4
 
 
+def design_flow_lpm(nozzle_count: int, nozzle_flow_lph: float) -> float:
+    """Whole-field design flow [l/min] from the drip layout: nozzle output x count.
+
+    The single source for the drip-derived flow, shared by the live sim (which
+    feeds it when the physical meter is unavailable) and the predictor's
+    ``_derive_flow_m3s`` (which normalizes it per out-of-plane metre). Same
+    l/min unit the physical flow meter reports.
+    """
+    return nozzle_count * nozzle_flow_lph / 60.0
+
+
 @dataclass
 class SolveResult:
     """One Picard sweep loop's outcome.

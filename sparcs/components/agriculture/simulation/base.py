@@ -10,18 +10,20 @@ Container component that owns the soil-simulation chain:
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional, Type, TypeVar
+import threading
+from typing import Any, Callable, Optional, Type, TypeVar
 
 import pandas as pd
 from lories import Component, Constant
 from lories.components.weather import Weather
+from lories.core import ConfigurationUnavailableError
 from lories.data import Channels
 from lories.typing import Configurations, Timestamp
-from lories.util import to_timedelta
+from lories.util import floor_date, to_timedelta
 from sparcs.components.agriculture.irrigation import Irrigation
 from sparcs.components.weather import validate_meteo_inputs
 
-from ._soil import MeshConfig, top_segment_names_from_mesh
+from ._soil import MeshConfig, design_flow_lpm, top_segment_names_from_mesh
 from .evapotranspiration import Evapotranspiration, SegmentProperties
 from .ground_shading import GroundShading
 from .soil import SoilSimulation
@@ -30,6 +32,12 @@ from .soil_predictor import SoilPredictor
 logger = logging.getLogger(__name__)
 
 _C = TypeVar("_C", bound=Component)
+
+# Drip design-flow defaults (mirror SoilPredictor's) used when a [soil_simulation.drip]
+# block is present but omits a key. A meaningful state-driven feed needs the block set
+# explicitly -- these keep the arithmetic well-defined, not correct for any real field.
+_DEFAULT_NOZZLE_COUNT: int = 1
+_DEFAULT_NOZZLE_FLOW_LPH: float = 1.0
 
 
 # Monthly LAI lookup tables keyed by `lai_type` config option.
@@ -70,10 +78,34 @@ class FieldSimulation(Component):
 
     _lai_type: str = "grass"
     _evapo_rename: dict[str, str]
-    _irrigation_flow_lpm: float = 0.0
+
+    _irrigation_flow_channel: Any = None
+    # On/off state feed: multiplied by the drip design flow when the meter is
+    # silent/absent (broken meter). None = no state channel wired.
+    _irrigation_state_channel: Any = None
+    # Whole-field design flow [l/min] from [soil_simulation.drip]; 0.0 = no drip block.
+    _design_flow_lpm: float = 0.0
+    # True only when [soil_simulation.drip] was declared explicitly (not defaulted).
+    _drip_explicit: bool = False
+    # Read-back so watering that started before a chunk still forces its first timesteps.
+    _FLOW_LOOKBACK: pd.Timedelta = pd.Timedelta(days=1)
 
     # On the orchestrator, not a soil child: clipping at the chain entry delays everything downstream.
     _intake_delay: pd.Timedelta = pd.Timedelta(0)
+
+    # Tick cadence in minutes ([field_simulation] interval/offset).
+    _interval_min: int = 60
+    _offset_min: int = 0
+
+    # The only wall-clock source; inject in tests.
+    _now: Callable[[], pd.Timestamp] = staticmethod(lambda: pd.Timestamp.now(tz="UTC"))
+
+    # Cap one Event.wait so the loop re-reads the clock and deactivate() joins promptly.
+    _TICK_WAIT_MAX_S: float = 60.0
+
+    _tick_thread: Optional[threading.Thread] = None
+    _tick_interrupt: Optional[threading.Event] = None
+    _tick_lock: Optional[threading.Lock] = None
 
     _weather_channels: Optional[Channels] = None
     _required_weather_keys: tuple[str, ...] = ()
@@ -115,6 +147,7 @@ class FieldSimulation(Component):
         self._bay_width = float(configs.get("bay_width", default=3.5))
 
         self._intake_delay = self._parse_intake_delay(configs)
+        self._interval_min, self._offset_min = self._parse_tick_schedule(configs)
 
         for c in self.VEGETATION_CHANNELS:
             self.data.add(c, aggregate="mean", logger={"enabled": False})
@@ -124,6 +157,15 @@ class FieldSimulation(Component):
             soil_block = configs.get_member(SoilSimulation.TYPE, defaults=defaults)
             mesh_block = soil_block.get_member("mesh", defaults={}, ensure_exists=True)
             self._mesh_config = MeshConfig(mesh_block, bay_width=self._bay_width)
+
+            # Drip design flow [l/min] for the state-driven feed (broken meter).
+            # has_member() is checked BEFORE ensure_exists=True materializes the block.
+            self._drip_explicit = soil_block.has_member("drip")
+            drip_block = soil_block.get_member("drip", defaults={}, ensure_exists=True)
+            self._design_flow_lpm = design_flow_lpm(
+                drip_block.get_int("nozzle_count", default=_DEFAULT_NOZZLE_COUNT),
+                drip_block.get_float("nozzle_flow_lph", default=_DEFAULT_NOZZLE_FLOW_LPH),
+            )
 
         self._register_segment_channels()
 
@@ -236,102 +278,289 @@ class FieldSimulation(Component):
                 unique=True,
             )
 
-        if self.soil_predictor is not None:
-            self.data.register(
-                self._predict_callback,
-                Channels([soil_data.simulation_state]),
-                how="any",
-                unique=True,
-                interval=self.soil_predictor.cooldown,
-            )
+        self._irrigation_flow_channel = self._resolve_irrigation_channel(Irrigation.FLOW)
+        self._irrigation_state_channel = self._resolve_irrigation_channel(Irrigation.STATE)
+        self._validate_irrigation_input()
 
-        if self.irrigation is not None:
-            try:
-                flow_channel = self.irrigation.data[Irrigation.FLOW]
-            except KeyError:
-                flow_channel = None
-            if flow_channel is not None:
-                self.data.register(
-                    self._irrigation_callback,
-                    Channels([flow_channel]),
-                    how="any",
-                    unique=True,
+        for channel in self._weather_channels:
+            key = channel.key
+            if (
+                key in self._required_weather_keys
+                and key not in self._OPTIONAL_WEATHER_KEYS
+                and not channel.has_connector()
+            ):
+                logger.warning(
+                    "%s: required weather channel '%s' has no connector configured; "
+                    "the wall-clock tick reads its span from the connector and will never see it.",
+                    self.name,
+                    key,
                 )
 
-        self.data.register(
-            self._weather_callback,
-            self._weather_channels,
-            how="any",
-            unique=True,
+        self._start_tick_thread()
+
+    def deactivate(self) -> None:
+        self._stop_tick_thread()
+        super().deactivate()
+
+    # -- irrigation input (flow meter, with state x design-flow fallback) ------
+
+    def _resolve_irrigation_channel(self, constant: Constant) -> Any:
+        """Resolve one irrigation channel (FLOW or STATE) from the sibling
+        Irrigation component, or None when irrigation or that channel is absent."""
+        if self.irrigation is None:
+            return None
+        try:
+            return self.irrigation.data[constant]
+        except KeyError:
+            return None
+
+    def _validate_irrigation_input(self) -> None:
+        """Refuse to start (before any tick) a field whose irrigation is configured
+        but has no usable input: neither a connected flow meter nor a connected
+        on/off state channel backed by an explicit [soil_simulation.drip] block. A
+        rain-fed field (no [irrigation] block at all) is left alone -- 0 l/min is
+        the deliberate answer there, not a masked misconfiguration.
+        """
+        if self.irrigation is None:
+            return
+        flow_wired = self._irrigation_flow_channel is not None and self._irrigation_flow_channel.has_connector()
+        state_wired = (
+            self._irrigation_state_channel is not None
+            and self._irrigation_state_channel.has_connector()
+            and self._drip_explicit
         )
+        if not (flow_wired or state_wired):
+            raise ConfigurationUnavailableError(
+                f"{self.name}: irrigation is configured but no usable input is wired. "
+                "Wire the metered feed ([irrigation.data.channels.flow] with a connector), "
+                "or the on/off state feed ([irrigation.data.channels.state] with a connector "
+                "PLUS a [soil_simulation.drip] block giving nozzle_count and nozzle_flow_lph). "
+                "Refusing to start on a silent 0 l/min fallback."
+            )
 
     # -- replication frontier (intake_delay) ----------------------------------
 
     @staticmethod
     def _parse_intake_delay(configs: Configurations) -> pd.Timedelta:
-        """Parse ``[field_simulation] intake_delay`` (default ``0`` = feature off)."""
+        """Parse ``[field_simulation] intake_delay`` (default ``0`` = read up to now)."""
         return to_timedelta(configs.get("intake_delay", default="0min"))
 
-    def _replication_cutoff(self) -> Optional[pd.Timestamp]:
-        """Wall-clock frontier the chain may consume up to: ``utcnow - intake_delay``.
+    @staticmethod
+    def _parse_tick_schedule(configs: Configurations) -> tuple[int, int]:
+        """Parse ``[field_simulation] interval``/``offset`` (minutes; 60/0).
 
-        ``None`` when ``intake_delay`` is zero, so the frame clip is skipped and
-        the live path stays byte-for-byte the pre-feature behavior. This is the
-        only new wall-clock read.
+        Same vocabulary as ``WeatherForecast``: ticks fire at wall-clock slots
+        aligned to ``interval``, shifted by ``offset`` within the interval.
         """
-        if self._intake_delay == pd.Timedelta(0):
-            return None
-        return pd.Timestamp.now(tz="UTC") - self._intake_delay
+        interval = int(configs.get("interval", default=60))
+        offset = int(configs.get("offset", default=0))
+        if interval < 1:
+            raise ValueError(f"[field_simulation] interval must be >= 1 minute, got {interval}")
+        if not 0 <= offset < interval:
+            raise ValueError(f"[field_simulation] offset must be in [0, interval), got {offset}")
+        return interval, offset
+
+    # -- wall-clock tick -------------------------------------------------------
+
+    def _next_slot(self, now: pd.Timestamp) -> pd.Timestamp:
+        """First aligned slot strictly after ``now``.
+
+        Alignment is absolute (``floor_date`` on the site timezone + offset),
+        not relative to activation, so restarts do not shift the schedule.
+        """
+        timezone = getattr(self.location, "timezone", None)
+        slot = floor_date(now, timezone, freq=f"{self._interval_min}min")
+        slot += pd.Timedelta(minutes=self._offset_min)
+        while slot <= now:
+            slot += pd.Timedelta(minutes=self._interval_min)
+        return slot
+
+    def _start_tick_thread(self) -> None:
+        self._tick_interrupt = threading.Event()
+        self._tick_lock = threading.Lock()
+        self._tick_thread = threading.Thread(target=self._tick_loop, name=f"{self.name}-tick", daemon=True)
+        self._tick_thread.start()
+
+    def _stop_tick_thread(self) -> None:
+        if self._tick_interrupt is not None:
+            self._tick_interrupt.set()
+        if self._tick_thread is not None:
+            self._tick_thread.join(timeout=30.0)
+            if self._tick_thread.is_alive():
+                logger.warning("%s: tick thread did not stop within 30s.", self.name)
+            self._tick_thread = None
+
+    def _tick_loop(self) -> None:
+        slot = self._next_slot(self._now())
+        while not self._tick_interrupt.is_set():
+            now = self._now()
+            if now < slot:
+                wait_s = min((slot - now).total_seconds(), self._TICK_WAIT_MAX_S)
+                if self._tick_interrupt.wait(timeout=wait_s):
+                    break
+                continue
+            self._tick()
+            slot = self._next_slot(self._now())
+
+    def _tick(self) -> None:
+        """Run one slot; skip (never queue) when the previous run still holds the lock."""
+        if not self._tick_lock.acquire(blocking=False):
+            logger.warning("%s: previous tick still running; skipping slot.", self.name)
+            return
+        try:
+            self._on_tick(self._now())
+        except Exception:
+            logger.exception("%s: tick failed.", self.name)
+        finally:
+            self._tick_lock.release()
+
+    def _on_tick(self, now: pd.Timestamp) -> None:
+        """Advance the chain over ``(frontier, now - intake_delay]`` from connector reads.
+
+        Reads in daily chunks so ``simulation_state`` persists as the frontier
+        ratchets and a crash redoes at most one chunk. Advances only as far as
+        the weather feed reaches; gaps self-heal on later ticks.
+        """
+        if self.soil_simulation is None or self.evapotranspiration is None or self._weather_channels is None:
+            return
+        cutoff = now - self._intake_delay
+        frontier = getattr(self.soil_simulation, "_last_simulated_at", None)
+        start = frontier if frontier is not None else cutoff - pd.Timedelta(minutes=self._interval_min)
+        if start >= cutoff:
+            return
+        for chunk_start, chunk_end in self._iter_day_chunks(start, cutoff):
+            weather = self._read_weather_span(chunk_start, chunk_end)
+            if weather.empty or not self._weather_frame_valid(weather):
+                continue
+            et_data, seg_et = self._run_chain(weather)
+            et_data[SoilSimulation.IRRIGATION_FLOW_LPM] = self._irrigation_flow_lpm(
+                chunk_start, chunk_end, et_data.index
+            )
+            if self.soil_simulation._last_simulated_at is None:
+                # Cold start: one advance spins the PDE up at the newest row.
+                self.soil_simulation.advance(et_data, et_data.index[-1], seg_et)
+            else:
+                self.soil_simulation.simulate_loop(et_data, seg_et)
+
+        # The predictor's own interval/offset gate decides whether a roll-out runs.
+        new_frontier = self.soil_simulation._last_simulated_at
+        if self.soil_predictor is not None and new_frontier is not None and new_frontier != frontier:
+            self.soil_predictor.predict(
+                new_frontier,
+                forecast_creation=self._read_forecast_epoch(),
+            )
 
     @staticmethod
-    def _clip_to_cutoff(frame: pd.DataFrame, cutoff: Optional[pd.Timestamp]) -> pd.DataFrame:
-        """Drop rows stamped after ``cutoff`` (inclusive keep); pure, no wall-clock.
+    def _iter_day_chunks(start: pd.Timestamp, end: pd.Timestamp):
+        """Yield ``(start, end]`` split at midnight boundaries, chronological."""
+        s = start
+        while s < end:
+            e = min((s + pd.Timedelta(days=1)).normalize(), end)
+            yield s, e
+            s = e
 
-        ``cutoff is None`` returns ``frame`` unchanged. Otherwise returns the rows
-        at or before ``cutoff`` (possibly empty), so the caller's
-        ``now = frame.index[-1]`` stays a real data timestamp matched to its
-        forcing row rather than a synthesized wall-clock value.
+    def _read_weather_span(self, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+        # Read the span straight from the weather connector (the kob_tracker
+        # station table, or the Brightsky observation API -- both honour the
+        # ranged read), not a logger: the source already holds the observed
+        # history, so there is nothing to re-log. read() issues a ranged SELECT.
+        frame = self.data.read(self._weather_channels, start=start, end=end, unique=True)
+        return self._trim_span(frame, start, end)
+
+    def _irrigation_flow_lpm(self, start: pd.Timestamp, end: pd.Timestamp, index: pd.DatetimeIndex) -> pd.Series:
+        """Irrigation flow [l/min] on ``index`` via the fallback chain: the metered
+        flow when the meter is reporting over the span, else the on/off state x the
+        drip design flow (broken/absent meter), else 0.0 (a rain-fed field with no
+        irrigation input -- the only unwired case ``activate()`` lets start).
+
+        A meter that reports 0 counts as "alive, not watering" and wins over the
+        state feed; only a meter that reported NO rows at all falls back to state.
+
+        The state feed requires an EXPLICIT [soil_simulation.drip] block (same
+        invariant _validate_irrigation_input enforces at startup): without it the
+        design flow would be the placeholder default (~0.017 l/min), so a bare
+        meter gap on a flow-primary field must read as 0 (not watering), never a
+        fabricated forcing.
         """
-        if cutoff is None:
-            return frame
-        return frame.loc[frame.index <= cutoff]
+        measured = self._read_measured_flow(start, end, index)
+        if measured is not None:
+            return measured
+        if self._irrigation_state_channel is not None and self._drip_explicit:
+            return self._read_state_span(start, end, index) * self._design_flow_lpm
+        return pd.Series(0.0, index=index)
 
-    def _weather_callback(self, data: pd.DataFrame) -> None:
-        if not self._weather_inputs_valid():
-            return
-        frame = self._weather_channels.to_frame(unique=True)
-        if frame.empty:
-            return
-
-        cutoff = self._replication_cutoff()
-        frame = self._clip_to_cutoff(frame, cutoff)
-        if frame.empty:
-            return
-
-        now = frame.index[-1]
-        last = getattr(self.soil_simulation, "_last_simulated_at", None)
-        if last is not None and now <= last:
-            return
-
-        et_data, seg_et = self._run_chain(frame.rename(columns=self._evapo_rename))
-        now = et_data.index[-1]
-        self.soil_simulation.advance(et_data, now, seg_et)
-
-    def _predict_callback(self, data: pd.DataFrame) -> None:
-        """Timed predictor trigger, decoupled from the live-sim weather listener.
-
-        Registered on ``SoilSimulation``'s ``SIMULATION_STATE`` channel (published by
-        ``advance()`` after every tick) so the heavy roll-out never runs on the
-        weather-callback thread; the per-listener ``cooldown`` (``activate()``) plus
-        the predictor's own daily self-gate (``SoilPredictor.predict``) keep this cheap.
-        """
-        if self.soil_predictor is None or data.empty:
-            return
-        now = data.index[-1]
-        self.soil_predictor.predict(
-            now,
-            forecast_creation=self._read_forecast_epoch(),
+    def _read_measured_flow(
+        self, start: pd.Timestamp, end: pd.Timestamp, index: pd.DatetimeIndex
+    ) -> Optional[pd.Series]:
+        """Metered flow [l/min] aligned onto ``index``, or None when the flow
+        channel is unwired or the meter reported no usable rows over the span (a
+        dead/absent meter -- the caller then falls back to the state feed)."""
+        if self._irrigation_flow_channel is None:
+            return None
+        frame = self.data.read(
+            Channels([self._irrigation_flow_channel]),
+            start=start - self._FLOW_LOOKBACK,
+            end=end,
+            unique=True,
         )
+        if frame.empty or frame.iloc[:, 0].isna().all():
+            return None
+        return self._align_flow(frame, index)
+
+    def _read_flow_span(self, start: pd.Timestamp, end: pd.Timestamp, index: pd.DatetimeIndex) -> pd.Series:
+        """Irrigation flow [l/min] aligned onto the weather timesteps, or an all-0.0
+        series when the meter channel is unwired or silent. Thin wrapper over
+        ``_read_measured_flow``; the fallback chain uses ``_irrigation_flow_lpm``."""
+        measured = self._read_measured_flow(start, end, index)
+        return measured if measured is not None else pd.Series(0.0, index=index)
+
+    def _read_state_span(self, start: pd.Timestamp, end: pd.Timestamp, index: pd.DatetimeIndex) -> pd.Series:
+        """Irrigation on/off state read from its connector, aligned onto the weather
+        timesteps as 0.0/1.0. Backward-filled; NULL rows and leading gaps read as
+        0.0 (off), same guard as ``_align_flow`` -- NaN must never reach the PDE."""
+        if self._irrigation_state_channel is None:
+            return pd.Series(0.0, index=index)
+        frame = self.data.read(
+            Channels([self._irrigation_state_channel]),
+            start=start - self._FLOW_LOOKBACK,
+            end=end,
+            unique=True,
+        )
+        return self._align_flow(frame, index)
+
+    @staticmethod
+    def _align_flow(frame: pd.DataFrame, index: pd.DatetimeIndex) -> pd.Series:
+        """Backward-fill flow rows onto ``index``: each timestep gets the most
+        recent flow at or before it. NULL rows and leading gaps read as 0.0
+        (not watering) -- NaN must never reach the PDE source (cf. 20431c7)."""
+        if frame.empty:
+            return pd.Series(0.0, index=index)
+        series = frame.iloc[:, 0].sort_index()
+        series = series[~series.index.duplicated(keep="last")]
+        aligned = series.reindex(index, method="ffill")
+        return aligned.fillna(0.0).astype(float)
+
+    def _trim_span(self, frame: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+        """Rename connector columns to weather keys and keep rows in ``(start, end]``."""
+        if frame.empty:
+            return frame
+        frame = frame.rename(columns=self._evapo_rename)
+        return frame.loc[(frame.index > start) & (frame.index <= end)]
+
+    def _weather_frame_valid(self, frame: pd.DataFrame) -> bool:
+        missing = [
+            k
+            for k in self._required_weather_keys
+            if k not in self._OPTIONAL_WEATHER_KEYS and (k not in frame.columns or frame[k].isna().all())
+        ]
+        if missing:
+            logger.debug(
+                "%s: skipping chunk; weather columns missing or all-NaN: %s",
+                self.name,
+                missing,
+            )
+            return False
+        return True
 
     def _read_forecast_epoch(self) -> Optional[pd.Timestamp]:
         forecast_sub = getattr(self.weather, "forecast", None)
@@ -351,24 +580,6 @@ class FieldSimulation(Component):
             return pd.Timestamp(value)
         except (TypeError, ValueError):
             return None
-
-    def _weather_inputs_valid(self) -> bool:
-        if self._weather_channels is None:
-            return False
-        by_key = {c.key: c for c in self._weather_channels}
-        missing = [
-            k
-            for k in self._required_weather_keys
-            if k not in self._OPTIONAL_WEATHER_KEYS and (k not in by_key or not by_key[k].is_valid())
-        ]
-        if missing:
-            logger.debug(
-                "%s: skipping advance; weather channels not valid: %s",
-                self.name,
-                missing,
-            )
-            return False
-        return True
 
     def _run_chain(
         self,
@@ -504,16 +715,6 @@ class FieldSimulation(Component):
         if data.empty or self.soil_simulation is None:
             return
         self.soil_simulation.apply_state_blob(data.iloc[0, 0], data.index[0])
-
-    def _irrigation_callback(self, data: pd.DataFrame) -> None:
-        try:
-            flow = float(data.iloc[-1, 0])
-        except (ValueError, TypeError, IndexError):
-            flow = 0.0
-        # A NULL flow row means "not watering". ``float(np.nan)`` does not raise,
-        # so without this guard a NaN latches into the PDE source (soil.py) and
-        # poisons it -- the live analog of the bench asof-latch fix (20431c7).
-        self._irrigation_flow_lpm = 0.0 if pd.isna(flow) else flow
 
     def _prepare_weather(self, data: pd.DataFrame) -> pd.DataFrame:
         return validate_meteo_inputs(data, self.location)

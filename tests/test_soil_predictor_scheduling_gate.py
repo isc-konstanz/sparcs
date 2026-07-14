@@ -3,13 +3,14 @@
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Unit tests for issue 02: the ``interval``/``offset`` scheduling gate that makes the
-predictor run once per day at a configured site-local time, and the ``cooldown``
-property that feeds the per-listener backpressure floor in ``base.py``.
+predictor run once per day at a configured site-local time. The field-simulation
+tick calls ``predict()`` after every advance; this gate decides whether a
+roll-out actually runs.
 
 Importing ``soil_predictor`` pulls the full lories + soil (FiPy/Gmsh) stack via
 ``soil.py``; ``importorskip`` keeps this out of environments that lack it (the
-full check runs on the box). ``_current_boundary`` and ``cooldown`` are pure/
-config-only seams, exercised without any PDE/Component instantiation.
+full check runs on the box). ``_current_boundary`` is a pure seam, exercised
+without any PDE/Component instantiation.
 """
 
 import pytest
@@ -253,20 +254,3 @@ def test_predict_gate_site_local_two_timezones_same_instant_gate_differently():
     assert la._last_boundary_run == pd.Timestamp("2026-07-03 01:00", tz="America/Los_Angeles")
     # Different absolute instants despite being "the same 01:00 local boundary" label.
     assert berlin._last_boundary_run.tz_convert("UTC") != la._last_boundary_run.tz_convert("UTC")
-
-
-# --- cooldown property --------------------------------------------------------
-
-
-def test_cooldown_default_is_sixty_minutes():
-    predictor = object.__new__(SoilPredictor)
-    predictor._cooldown_min = soil_predictor._DEFAULT_COOLDOWN_MIN
-
-    assert predictor.cooldown == pd.Timedelta(minutes=60)
-
-
-def test_cooldown_reflects_configured_value():
-    predictor = object.__new__(SoilPredictor)
-    predictor._cooldown_min = 15
-
-    assert predictor.cooldown == pd.Timedelta(minutes=15)

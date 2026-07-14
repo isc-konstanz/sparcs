@@ -3,7 +3,7 @@
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Tests for the debug trajectory field-dump's control logic:
-``SoilPredictor._write_trajectory_fields`` -- gating on ``save_trajectory_plot``,
+``SoilPredictor._write_trajectory_fields`` -- gating on ``save_candidate_field_plots``,
 one soil-field PNG per forecast step per candidate, per-run subdir, chosen-candidate
 naming, and degrade-on-failure (a debug plot must never abort the forecast). The
 PDE walk (``_roll_segment``) and the matplotlib render (``_render_snapshot_png``)
@@ -42,7 +42,7 @@ def _forecast_index(periods: int = 3) -> pd.DatetimeIndex:
 def _make_predictor(tmp_path, enabled=True, ladder=None):
     p = object.__new__(SoilPredictor)
     p._name = "test_predictor"
-    p._save_trajectory_plot = enabled
+    p._save_candidate_field_plots = enabled
     p._trajectory_plot_dir = str(tmp_path)
     p._ladder = ladder if ladder is not None else [(_td(0),), (_td(30),)]
     p._windows = ["w0"]  # opaque here: _build_flow_schedule is stubbed

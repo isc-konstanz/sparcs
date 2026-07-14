@@ -48,6 +48,7 @@ from ._soil import (
     SoilBase,
     SoilPDECore,
     apply_surface_forcing,
+    design_flow_lpm,
     ensure_mesh,
     resolve_probes,
 )
@@ -58,14 +59,12 @@ _DEFAULT_HORIZON: str = "24h"
 _DEFAULT_SAVE_FREQ: str = "1h"
 
 # Scheduling gate defaults -- the predictor's OWN cadence, distinct from
-# WeatherForecast's interval=60/offset=0 (do not inherit those). `interval`/
-# `offset` are the run-cadence config (daily at ~01:00 local); `cooldown` is
-# a separate notion, the lories listener-backpressure floor (base.py's
-# `data.register(..., interval=...)`), well below the run cadence so it never
-# gates the fixed daily boundary.
+# the field-simulation tick's interval=60/offset=0 (do not inherit those).
+# `interval`/`offset` are the run-cadence config (daily at ~01:00 local);
+# the tick calls predict() after every advance and this gate decides whether
+# a roll-out actually runs.
 _DEFAULT_INTERVAL_MIN: int = 1440
 _DEFAULT_OFFSET_MIN: int = 60
-_DEFAULT_COOLDOWN_MIN: int = 60
 
 # Drip-flow derivation defaults; mirrors the [soil_simulation] default of a
 # single already-per-metre line (SoilSimulation.configure's
@@ -180,19 +179,31 @@ class SoilPredictor(SoilBase):
     _IRRIGATION_STATE_KEY: str = "irrigation_state"
     _IRRIGATION_TIMESTAMP_CREATION_KEY: str = "irrigation_timestamp_creation"
 
+    # --- Recommended-candidate field-plot image table (direct connector write) --
+    # `agri_field_forecast_image`: the RECOMMENDED candidate's soil-saturation
+    # field snapshots as PNG bytes, one row per saved snapshot. Same field-level
+    # shape as `agri_field_irrigation` (PK `timestamp` = snapshot future time,
+    # `timestamp_creation` = run time, `id` <- field_id; single value column
+    # `image`), and the same single shared `timestamp_creation` twin -- one field
+    # per component, so no per-probe twins. Recommended-only (NOT all candidates:
+    # the disk-only `save_candidate_field_plots` archive keeps those). Reuses the
+    # bytes already rendered for the in-memory `predict_plot` channel -- see
+    # `_publish_results`/`predict`. Gated by `save_plot` AND a configured logger.
+    _IMAGE_TABLE_NAME: str = "agri_field_forecast_image"
+    _IMAGE_KEY: str = "predict_image"
+    _IMAGE_COLUMN: str = "image"
+    _IMAGE_TIMESTAMP_CREATION_KEY: str = "predict_image_timestamp_creation"
+
     _horizon: pd.Timedelta
     _save_freq: pd.Timedelta
     _save_state: bool
     _save_plot: bool
-    _save_trajectory_plot: bool = False
+    _save_candidate_field_plots: bool = False
     _trajectory_plot_dir: str
 
-    # Scheduling gate: run cadence, own defaults (not WeatherForecast's).
+    # Scheduling gate: run cadence, own defaults (not the field-sim tick's).
     _interval_min: int
     _offset_min: int
-    # Per-listener backpressure floor (base.py's `data.register(..., interval=...)`);
-    # distinct from `_interval_min`, the run-cadence config above.
-    _cooldown_min: int
 
     # Last boundary `predict()` actually ran for; None before the first run.
     _last_boundary_run: Optional[pd.Timestamp] = None
@@ -312,12 +323,13 @@ class SoilPredictor(SoilBase):
         self._save_state = configs.get_bool("save_state", default=False)
         self._save_plot = configs.get_bool("save_plot", default=False)
 
-        # Debug dump of the soil saturation field at every forecast step (hourly),
-        # for every watering candidate on the ladder -- candidates x steps PNGs per
-        # run, in a per-run subdir on disk. Off by default: when on it re-simulates
+        # Debug dump of the soil saturation FIELD (a cross-section PNG per forecast
+        # step, hourly) for every watering candidate on the ladder -- candidates x
+        # steps PNGs per run, in a per-run subdir on disk. NOT tension-trajectory
+        # curves (hence the honest name). Off by default: when on it re-simulates
         # the whole ladder (slow, disk-heavy) but never blocks or aborts the forecast.
-        self._save_trajectory_plot = configs.get_bool("save_trajectory_plot", default=False)
-        if self._save_trajectory_plot:
+        self._save_candidate_field_plots = configs.get_bool("save_candidate_field_plots", default=False)
+        if self._save_candidate_field_plots:
             self._trajectory_plot_dir = configs.get(
                 "plot.dir",
                 default=str(configs.dirs.data.joinpath("soil_predictor")),
@@ -326,7 +338,6 @@ class SoilPredictor(SoilBase):
 
         self._interval_min = configs.get_int("interval", default=_DEFAULT_INTERVAL_MIN)
         self._offset_min = configs.get_int("offset", default=_DEFAULT_OFFSET_MIN)
-        self._cooldown_min = configs.get_int("cooldown", default=_DEFAULT_COOLDOWN_MIN)
 
         model_block = self.context.configs.get_member("model", defaults={}, ensure_exists=True)
         soil_block = self.context.configs.get_member(SoilSimulation.TYPE, defaults={}, ensure_exists=True)
@@ -486,6 +497,10 @@ class SoilPredictor(SoilBase):
                 self._detail_forecast_id_keys,
             ) = self._register_detail_channels(self._probes, probe_identities)
             self._register_irrigation_channels()
+            # The recommended candidate's field plots persist only when they are
+            # also rendered (save_plot) -- no point declaring the table otherwise.
+            if self._save_plot:
+                self._register_image_channels()
 
     # --- Channel registration helpers (data.add() kwargs, unit-testable) -------
 
@@ -813,15 +828,40 @@ class SoilPredictor(SoilBase):
             },
         )
 
-    @property
-    def cooldown(self) -> pd.Timedelta:
-        """Per-listener backpressure floor for the ``_predict_callback`` registration
-        (``base.py``'s ``data.register(..., interval=...)``). Distinct from the
-        ``interval``/``offset`` run-cadence config above: this is a low floor (default
-        60 min) well below the daily cadence, so it never gates the fixed boundary --
-        it only protects against the listener re-dispatching on every live-sim tick.
-        """
-        return pd.Timedelta(minutes=self._cooldown_min)
+    def _register_image_channels(self) -> None:
+        """`agri_field_forecast_image`: the recommended candidate's field-plot PNGs.
+        Same never-`.set()` / logger-gated / single-`timestamp_creation`-twin
+        contract as `_register_irrigation_channels`; these two channels are DISTINCT
+        from the in-memory `predict_plot` channel (which stays `.set()` for Dash),
+        so the auto-log path never fires for them. Only called when
+        `self._logger_id is not None` AND `self._save_plot` (see configure())."""
+        self.data.add(
+            self._IMAGE_KEY,
+            type=bytes,
+            name="Predicted soil field image",
+            unit="png",
+            aggregate="last",
+            logger={
+                "connector": self._logger_id,
+                "table": self._IMAGE_TABLE_NAME,
+                "column": self._IMAGE_COLUMN,
+                "enabled": True,
+            },
+        )
+        self.data.add(
+            self._IMAGE_TIMESTAMP_CREATION_KEY,
+            name="Predicted image run timestamp",
+            type=pd.Timestamp,
+            aggregate="last",
+            logger={
+                "connector": self._logger_id,
+                "table": self._IMAGE_TABLE_NAME,
+                "column": "timestamp_creation",
+                "primary": True,
+                "nullable": False,
+                "enabled": True,
+            },
+        )
 
     @staticmethod
     def _current_boundary(now: pd.Timestamp, tz, interval_min: int, offset_min: int) -> pd.Timestamp:
@@ -936,6 +976,10 @@ class SoilPredictor(SoilBase):
         published = False
         chosen: Optional[tuple[pd.Timedelta, ...]] = None
         ladder_traj: dict = {}
+        # The recommended candidate's rendered field plots (save_index, png bytes),
+        # reused for the agri_field_forecast_image write below; None unless the grid
+        # path published with save_plot on.
+        recommended_plot: Optional[tuple[pd.DatetimeIndex, list[bytes]]] = None
         horizon_start = et_data.index[0]
         horizon_end = et_data.index[-1]
 
@@ -973,7 +1017,7 @@ class SoilPredictor(SoilBase):
                     )
                     ch_trajectories = self._trajectories_to_tension(ch_trajectories)
 
-                self._publish_results(
+                recommended_plot = self._publish_results(
                     ch_trajectories,
                     self._probes,
                     ch_timestamps,
@@ -1022,13 +1066,15 @@ class SoilPredictor(SoilBase):
 
         # Secondary watering-grid writes -- the agri_field_forecast header, the
         # agri_soil_forecast detail rows (ALL candidates), the chosen candidate's
-        # agri_field_irrigation edge rows, and the debug field plots. Best-effort
-        # and only when the grid path produced a recommendation: a failure here
-        # never affects the forecast already published on the main channels
-        # above. `now` is the run time (every run's rows are kept, keyed by it --
-        # see _build_header_frame / _build_detail_frame / _build_irrigation_frame);
-        # `forecast_creation` (the weather issue time) is persisted only as the
-        # header's weather_creation data column.
+        # agri_field_irrigation edge rows, the recommended candidate's
+        # agri_field_forecast_image field plots, and the debug field plots.
+        # Best-effort and only when the grid path produced a recommendation: a
+        # failure here never affects the forecast already published on the main
+        # channels above. `now` is the run time (every run's rows are kept, keyed
+        # by it -- see _build_header_frame / _build_detail_frame /
+        # _build_irrigation_frame / _build_image_frame); `forecast_creation` (the
+        # weather issue time) is persisted only as the header's weather_creation
+        # data column.
         if published and chosen is not None:
             try:
                 header_frame = self._build_header_frame(self._ladder, chosen, now, forecast_creation)
@@ -1037,10 +1083,13 @@ class SoilPredictor(SoilBase):
                 self._write_detail_table(detail_frame)
                 irrigation_frame = self._build_irrigation_frame(chosen, horizon_start, horizon_end, now)
                 self._write_irrigation_table(irrigation_frame)
+                if recommended_plot is not None:
+                    save_index, plot_values = recommended_plot
+                    self._write_image_table(self._build_image_frame(save_index, plot_values, now))
                 self._write_trajectory_fields(ic_rel_sat, et_data, seg_et, horizon_start, horizon_end, chosen, now)
             except Exception:  # noqa: BLE001
                 logger.exception(
-                    "%s: header/detail/irrigation-write failed (now=%s, creation=%s); "
+                    "%s: header/detail/irrigation/image-write failed (now=%s, creation=%s); "
                     "the forecast published on the main channels is unaffected.",
                     self.name,
                     now,
@@ -1107,12 +1156,11 @@ class SoilPredictor(SoilBase):
         """Fixed design flow from the drip layout: nozzle output x count, normalized
         per out-of-plane metre of row.
 
-        Mirrors the live sim's inline arithmetic in
-        ``SoilSimulation._compute_flux_rates``, but the meter is DERIVED from the
-        layout here instead of read from the live flow meter.
+        The l/min core is the shared ``design_flow_lpm`` (also fed to the live sim
+        when its physical meter is unavailable); here it is DERIVED from the layout
+        instead of read from the meter and normalized to m³/s per metre of row.
         """
-        flow_lpm = nozzle_count * nozzle_flow_lph / 60.0
-        return flow_lpm / (60_000.0 * total_drip_line_length_m)
+        return design_flow_lpm(nozzle_count, nozzle_flow_lph) / (60_000.0 * total_drip_line_length_m)
 
     @staticmethod
     def _build_flow_schedule(
@@ -1877,9 +1925,14 @@ class SoilPredictor(SoilBase):
         snapshots: dict[pd.Timestamp, np.ndarray],
         diagnostics: dict[str, list[float]],
         forecast_creation: pd.Timestamp,
-    ) -> None:
+    ) -> Optional[tuple[pd.DatetimeIndex, list[bytes]]]:
+        """Publish the (recommended or zero-flow) forecast on the in-memory
+        channels. Returns the rendered ``(save_index, png_bytes)`` when
+        ``save_plot`` produced plot snapshots, else None -- the caller persists
+        that recommended-candidate render to ``agri_field_forecast_image`` without
+        re-rendering (see ``predict``)."""
         if not timestamps:
-            return
+            return None
 
         index = pd.DatetimeIndex(timestamps, name="timestamp")
 
@@ -1905,7 +1958,7 @@ class SoilPredictor(SoilBase):
             )
 
         if not snapshots:
-            return
+            return None
 
         save_index = pd.DatetimeIndex(sorted(snapshots), name="timestamp")
 
@@ -1934,6 +1987,9 @@ class SoilPredictor(SoilBase):
                     save_index[0],
                     pd.Series(plot_values, index=save_index, dtype=object),
                 )
+                return save_index, plot_values
+
+        return None
 
     # Header + detail forecast-table publishing (the watering-grid outputs)
 
@@ -2251,6 +2307,41 @@ class SoilPredictor(SoilBase):
         """Direct-write the ``agri_field_irrigation`` edge-row frame."""
         self._write_direct_frame(frame, self._irrigation_id_by_key, "irrigation table")
 
+    def _build_image_frame(
+        self,
+        save_index: pd.DatetimeIndex,
+        plot_values: list[bytes],
+        run_timestamp: pd.Timestamp,
+    ) -> pd.DataFrame:
+        """Build the ``agri_field_forecast_image`` frame: one PNG-bytes row per
+        recommended-candidate snapshot, indexed at the snapshot's future
+        timestamp, every row stamped with ``run_timestamp`` (the run time, the
+        ``timestamp_creation`` PK partner). ``save_index`` and ``plot_values`` are
+        the aligned pair ``_publish_results`` returned (rendered once, reused
+        here). Pure and unit-testable: no ``Channel``/connector access; column
+        NAMES are the bare channel keys, renamed to ids by ``_write_image_table``.
+        """
+        columns = [self._IMAGE_KEY, self._IMAGE_TIMESTAMP_CREATION_KEY]
+        rows: list[dict[str, Any]] = []
+        index: list[pd.Timestamp] = []
+        for ts, png in zip(save_index, plot_values):
+            rows.append({self._IMAGE_KEY: png, self._IMAGE_TIMESTAMP_CREATION_KEY: run_timestamp})
+            index.append(ts)
+        if not rows:
+            return pd.DataFrame(columns=columns)
+        frame = pd.DataFrame.from_records(rows, index=pd.DatetimeIndex(index, name="timestamp"))
+        return frame.loc[:, columns]
+
+    def _image_id_by_key(self) -> dict[str, str]:
+        return {
+            self._IMAGE_KEY: self.data[self._IMAGE_KEY].id,
+            self._IMAGE_TIMESTAMP_CREATION_KEY: self.data[self._IMAGE_TIMESTAMP_CREATION_KEY].id,
+        }
+
+    def _write_image_table(self, frame: pd.DataFrame) -> None:
+        """Direct-write the ``agri_field_forecast_image`` frame."""
+        self._write_direct_frame(frame, self._image_id_by_key, "image table")
+
     def _resolve_logger_connector(self, logger_id: str) -> Optional[Any]:
         """Resolve the connector for the header/detail direct-writes.
 
@@ -2316,7 +2407,7 @@ class SoilPredictor(SoilBase):
     ) -> None:
         """Debug dump: save the soil saturation field as a PNG at every forecast
         timestamp (hourly), for every watering candidate on the ladder, into a
-        per-run subdirectory of the on-disk plot dir. Gated by `save_trajectory_plot`.
+        per-run subdirectory of the on-disk plot dir. Gated by `save_candidate_field_plots`.
 
         Each candidate is re-rolled independently from the initial condition (the
         ground-truth path ``_rollout_independent`` uses), with a snapshot sink that
@@ -2327,7 +2418,7 @@ class SoilPredictor(SoilBase):
         published. Off by default; when on it re-simulates the whole ladder and
         writes candidates x forecast-steps PNGs -- slow and disk-heavy, debug only.
         """
-        if not self._save_trajectory_plot:
+        if not self._save_candidate_field_plots:
             return
 
         run_dir = os.path.join(self._trajectory_plot_dir, f"trajectory_{run_timestamp:%Y%m%dT%H%M%S}")
