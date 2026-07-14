@@ -303,9 +303,11 @@ class SoilSimulation(SoilBase):
                 plot_interval=interval,
             )
 
-            # Final unconditional render so the throttle doesn't swallow the last dt-step.
-            if self._plot_progress:
-                self._render_progress_safe(now)
+            # End-of-window render, interval-gated: simulate_loop calls advance
+            # once per (minute-resolution) weather row, so an unconditional render
+            # here would emit one frame per minute no matter what [plot] interval
+            # says. Gate on the shared _last_plot_simtime (see _render_progress_if_due).
+            self._render_progress_if_due(now)
 
             # Snapshot the PDE-only storage change before anchoring so the
             # mass-balance residual sees the solver alone, not the correction.
@@ -773,6 +775,20 @@ class SoilSimulation(SoilBase):
             fig.savefig(save_path, dpi=200)
             logger.info("%s: wrote mesh structure to %s", self.name, save_path)
         plt.close(fig)
+
+    def _render_progress_if_due(self, now: pd.Timestamp) -> None:
+        """Render the end-of-window frame only if a plot interval has elapsed.
+
+        ``_last_plot_simtime`` is shared with the in-walk throttle and advanced
+        by ``_render_progress_safe``, so gating here makes ``[plot] interval``
+        govern the per-row ``simulate_loop`` path too, not just the substeps of a
+        single long ``advance``. The first render (``_last_plot_simtime is None``)
+        always fires so a fresh run isn't blank until the first interval passes.
+        """
+        if not self._plot_progress:
+            return
+        if self._last_plot_simtime is None or (now - self._last_plot_simtime) >= self._plot_config.interval:
+            self._render_progress_safe(now)
 
     def _render_progress_safe(self, sim_t: pd.Timestamp) -> None:
         """Render at sim_t with error containment; a single render failure
