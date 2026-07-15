@@ -56,6 +56,7 @@ from sparcs.components.agriculture.simulation._anchor import (
     AnchorConfig,
     AnchorSensor,
     anchor_update,
+    latest_reading_at,
 )
 from sparcs.components.agriculture.simulation._soil import (
     SE_MAX,
@@ -415,16 +416,9 @@ def _anchor_replay_step(pde: SoilPDECore, t_now: pd.Timestamp, last_anchored: di
         return
 
     def read(sensor: AnchorSensor):
-        series = _W_ANCHOR_HISTORY.get(sensor.key)
-        if series is None or len(series) == 0:
-            return None, float("nan")
-        prior = series.loc[:t_now]
-        if len(prior) == 0:
-            return None, float("nan")
-        value = float(prior.iloc[-1])
-        if not np.isfinite(value):
-            return None, float("nan")
-        return prior.index[-1], value
+        # Same contemporaneous lookup the live tick uses (shared _anchor helper): the
+        # latest reading at or before t_now, so a held-out sensor scores identically.
+        return latest_reading_at(_W_ANCHOR_HISTORY.get(sensor.key), t_now)
 
     result = anchor_update(
         np.asarray(pde.rel_sat.value),

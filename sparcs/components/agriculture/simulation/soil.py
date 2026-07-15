@@ -28,7 +28,7 @@ from lories.typing import Configurations
 from lories.util import to_timedelta
 
 from . import plot_render, plot_style
-from ._anchor import AnchorConfig, AnchorSensor, SensorOverrides, anchor_update
+from ._anchor import AnchorConfig, AnchorSensor, SensorOverrides, anchor_update, latest_reading_at
 from ._soil import (
     SE_MAX,
     SE_MIN,
@@ -111,6 +111,7 @@ def _parse_anchor_config(configs: Configurations) -> AnchorConfig:
         r_vertical=float(configs.get("r_vertical", default=0.2)),
         staleness=to_timedelta(configs.get("staleness", default="6h")),
         sensors=sensors,
+        min_tension_hpa=float(configs.get("min_tension_hpa", default=1.0)),
     )
 
 
@@ -251,14 +252,7 @@ class SoilSimulation(SoilBase):
 
         self._simulating = True
         try:
-            if self._discover_sensor_probes_enabled and not self._sensor_probes_ready:
-                try:
-                    self._discover_sensor_probes()
-                except Exception:
-                    # Discovery is dormant infra for the anchor; never let it
-                    # break the live solve tick. Mark ready so it does not retry.
-                    self._sensor_probes_ready = True
-                    logger.exception("%s: sensor-probe discovery failed; continuing", self.name)
+            self._ensure_sensor_probes()
             # Cold start: spin up with current weather to approximate steady state.
             if self._last_simulated_at is None:
                 elapsed = self._ode_config.cold_start
@@ -529,10 +523,15 @@ class SoilSimulation(SoilBase):
         # stays off unless a config explicitly enables it.
         self._sensor_probes = []
         self._sensor_probes_ready = False
-        # Anchor sensors + their live tension channels + per-sensor "last anchored
-        # at" map, populated by _discover_sensor_probes on first advance().
+        # Anchor sensors + their tension channels + per-sensor data context (for the
+        # per-tick ranged read) + "last anchored at" map, populated by
+        # _discover_sensor_probes on first advance(). ``_anchor_history`` holds the
+        # per-sensor tension series load_anchor_history() range-reads each tick, so
+        # each reading is assimilated at its own timestamp (see _read_history_tension).
         self._anchor_sensors: list[AnchorSensor] = []
         self._anchor_channels: dict[str, Any] = {}
+        self._anchor_data: dict[str, Any] = {}
+        self._anchor_history: dict[str, pd.Series] = {}
         self._last_anchored: dict[str, pd.Timestamp] = {}
         # Enabling [anchor] drives discovery on, so the operator sets one switch.
         self._discover_sensor_probes_enabled = (
@@ -642,6 +641,7 @@ class SoilSimulation(SoilBase):
         found: list[ProbeSpec] = []
         anchor_sensors: list[AnchorSensor] = []
         anchor_channels: dict[str, Any] = {}
+        anchor_data: dict[str, Any] = {}
         for comp in _walk_components(field):
             if not isinstance(comp, SoilMoisture):
                 continue
@@ -651,6 +651,9 @@ class SoilSimulation(SoilBase):
                 found.append(resolve_probe_from_sensor(comp, self._mesh_fipy, self._mesh_config))
                 anchor_sensors.append(AnchorSensor(key=comp.key, x_offset_cm=comp.x_offset, depth_cm=comp.depth))
                 anchor_channels[comp.key] = comp.data[SoilMoisture.WATER_TENSION]
+                # Keep the sensor's data context so load_anchor_history can issue a
+                # ranged tension read through its connector each tick.
+                anchor_data[comp.key] = comp.data
             except Exception:
                 logger.exception(
                     "%s: failed to derive probe from sensor %s",
@@ -660,16 +663,62 @@ class SoilSimulation(SoilBase):
         self._sensor_probes = found
         self._anchor_sensors = anchor_sensors
         self._anchor_channels = anchor_channels
+        self._anchor_data = anchor_data
         if found:
             logger.info("%s: discovered %d sensor probe(s) for anchoring", self.name, len(found))
 
-    def _read_live_tension(self, sensor: AnchorSensor) -> tuple[Optional[pd.Timestamp], float]:
-        """Live backend for anchor_update: the sensor's latest valid water-tension
-        reading as ``(timestamp, hPa)``, or ``(None, nan)`` when it has none."""
-        channel = self._anchor_channels.get(sensor.key)
-        if channel is None or not channel.is_valid():
-            return None, float("nan")
-        return channel.timestamp, float(channel.value)
+    def _ensure_sensor_probes(self) -> None:
+        """Run anchor sensor-probe discovery once, when enabled. Idempotent (guarded
+        by ``_sensor_probes_ready``); a failure marks ready so it never retries or
+        breaks the solve tick."""
+        if not self._discover_sensor_probes_enabled or self._sensor_probes_ready:
+            return
+        try:
+            self._discover_sensor_probes()
+        except Exception:
+            self._sensor_probes_ready = True
+            logger.exception("%s: sensor-probe discovery failed; continuing", self.name)
+
+    def load_anchor_history(self, start: pd.Timestamp, end: pd.Timestamp) -> None:
+        """Range-read each anchor sensor's tension over ``(start - lookback, end]`` for
+        this tick, so the anchor assimilates each reading at its own timestamp rather
+        than smearing the latest value across the window. ``lookback`` is the widest
+        sensor staleness, so a reading just before ``start`` still covers the opening
+        rows; ``anchor_update``'s staleness gate drops anything too old. No-op when
+        anchoring is off or no sensor was discovered; a per-sensor read failure leaves
+        that sensor unanchored (predict-only) rather than breaking the tick."""
+        self._anchor_history = {}
+        self._ensure_sensor_probes()
+        if not (self._anchor_cfg.enabled and self._anchor_sensors):
+            return
+        lookback = max(
+            (self._anchor_cfg.sensor_staleness(s.key) for s in self._anchor_sensors),
+            default=pd.Timedelta(0),
+        )
+        read_start = start - lookback
+        for sensor in self._anchor_sensors:
+            data = self._anchor_data.get(sensor.key)
+            channel = self._anchor_channels.get(sensor.key)
+            if data is None or channel is None:
+                continue
+            try:
+                frame = data.read(Channels([channel]), start=read_start, end=end, unique=True)
+            except Exception:
+                logger.exception("%s: anchor history read failed for %s", self.name, sensor.key)
+                continue
+            if frame is None or frame.empty:
+                continue
+            series = frame.iloc[:, 0].dropna().sort_index()
+            series = series[~series.index.duplicated(keep="last")]
+            if not series.empty:
+                self._anchor_history[sensor.key] = series
+
+    def _read_history_tension(self, sensor: AnchorSensor, now: pd.Timestamp) -> tuple[Optional[pd.Timestamp], float]:
+        """Assimilation backend: the tensiometer reading contemporaneous with sim step
+        ``now`` -- the latest at or before it from this tick's ranged read
+        (:meth:`load_anchor_history`), or ``(None, nan)`` when none. Replaces the old
+        single-latest live read so each reading anchors at its own time."""
+        return latest_reading_at(self._anchor_history.get(sensor.key), now)
 
     def _apply_anchor(self, now: pd.Timestamp, water_after_walk: float) -> None:
         """Nudge the post-walk saturation field toward fresh tensiometer readings.
@@ -686,7 +735,7 @@ class SoilSimulation(SoilBase):
             np.asarray(self._pde.rel_sat.value),
             np.asarray(self._pde.mesh.cellCenters),
             sensors,
-            self._read_live_tension,
+            lambda sensor: self._read_history_tension(sensor, now),
             now,
             self._anchor_cfg,
             self._pde.soil_model,

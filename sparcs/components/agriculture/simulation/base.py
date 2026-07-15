@@ -439,6 +439,9 @@ class FieldSimulation(Component):
             et_data[SoilSimulation.IRRIGATION_FLOW_LPM] = self._irrigation_flow_lpm(
                 chunk_start, chunk_end, et_data.index
             )
+            # Range-read the tensiometers over this chunk so the anchor assimilates
+            # each reading at its own timestamp (no-op when anchoring is off).
+            self.soil_simulation.load_anchor_history(chunk_start, chunk_end)
             if self.soil_simulation._last_simulated_at is None:
                 # Cold start: one advance spins the PDE up at the newest row.
                 self.soil_simulation.advance(et_data, et_data.index[-1], seg_et)

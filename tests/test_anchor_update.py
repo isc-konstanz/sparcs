@@ -29,7 +29,7 @@ S30 = AnchorSensor(key="s30", x_offset_cm=0.0, depth_cm=30.0)
 S60 = AnchorSensor(key="s60", x_offset_cm=0.0, depth_cm=60.0)
 
 
-def _cfg(staleness="1h", sensors=None):
+def _cfg(staleness="1h", sensors=None, min_tension=0.0):
     return AnchorConfig(
         enabled=True,
         sigma_sys=0.1,
@@ -38,6 +38,7 @@ def _cfg(staleness="1h", sensors=None):
         r_vertical=0.5,
         staleness=pd.Timedelta(staleness),
         sensors=sensors if sensors is not None else {"s30": None, "s60": None},
+        min_tension_hpa=min_tension,
     )
 
 
@@ -126,6 +127,14 @@ def test_per_sensor_radii_override_changes_reach():
     wide = _run({"s30": (NOW, 300.0)}, cfg=_cfg(sensors={"s30": SensorOverrides(r_vertical=0.5)}))
     assert np.isclose(narrow.se_new[1], 0.6)  # 30 cm below is outside r_v = 0.1
     assert not np.isclose(wide.se_new[1], 0.6)  # inside r_v = 0.5 -> pulled
+
+
+def test_dead_sensor_zero_tension_is_rejected():
+    """A disconnected tensiometer reads ~0 hPa (= saturation); the floor drops it so
+    it cannot drag the probe to saturation, while a real dry reading still anchors."""
+    assert _run({"s30": (NOW, 0.0)}, cfg=_cfg(min_tension=1.0)) is None
+    assert _run({"s30": (NOW, -0.3)}, cfg=_cfg(min_tension=1.0)) is None  # signed, still ~0
+    assert _run({"s30": (NOW, 300.0)}, cfg=_cfg(min_tension=1.0)) is not None
 
 
 def test_per_sensor_staleness_override_gates_independently():

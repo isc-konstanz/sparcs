@@ -106,6 +106,7 @@ def _tick_sim(frontier, intake_delay=pd.Timedelta(0), interval_min: int = 60):
         _last_simulated_at=frontier,
         advance=lambda et, now, seg: None,
         simulate_loop=lambda et, seg: None,
+        load_anchor_history=lambda start, end: None,
     )
     sim._spans = []
 

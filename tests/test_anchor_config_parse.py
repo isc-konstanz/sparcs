@@ -43,6 +43,11 @@ def test_anchor_is_off_by_default():
     assert cfg.staleness == pd.Timedelta("6h")
 
 
+def test_min_tension_floor_default_and_override():
+    assert _parse_anchor_config(_Cfg({})).min_tension_hpa == 1.0  # dead-sensor floor on by default
+    assert _parse_anchor_config(_Cfg({"min_tension_hpa": 0.0})).min_tension_hpa == 0.0
+
+
 def test_allowlist_and_overrides_parse():
     cfg = _parse_anchor_config(
         _Cfg({"enabled": True, "sensors": ["soil_3", "soil_4"], "sigma_sys": 0.1, "r_vertical": 0.15})
