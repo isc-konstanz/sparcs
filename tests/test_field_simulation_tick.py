@@ -152,6 +152,21 @@ def test_on_tick_chunks_backlog_by_day():
     ]
 
 
+def test_on_tick_aligns_a_location_tz_frontier_to_the_utc_clock():
+    """A frontier inherited from a site-local weather index (Brightsky indexes its
+    rows in ``location.timezone``) must be aligned to the UTC tick clock before the
+    window is sliced. Otherwise a chunk pairs a ``+02:00`` start with the ``+00:00``
+    cutoff, and Brightsky's ``source_data.loc[start:end]`` raises "Both dates must
+    have the same UTC offset"."""
+    frontier = pd.Timestamp("2026-07-14 00:00", tz="Europe/Berlin")  # 2026-07-13 22:00 UTC
+    sim = _tick_sim(frontier=frontier)
+    sim._on_tick(pd.Timestamp("2026-07-14 12:00", tz="UTC"))
+
+    assert sim._spans, "expected at least one span read"
+    for start, end in sim._spans:
+        assert start.utcoffset() == end.utcoffset() == pd.Timedelta(0)
+
+
 def test_on_tick_advances_only_to_the_logged_data_frontier():
     """Weather ends before the cutoff: the chain runs on what exists, no filling."""
     sim = _tick_sim(frontier=pd.Timestamp("2026-07-12 10:00", tz="UTC"))

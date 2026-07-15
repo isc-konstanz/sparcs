@@ -428,6 +428,14 @@ class FieldSimulation(Component):
             return
         cutoff = now - self._intake_delay
         frontier = getattr(self.soil_simulation, "_last_simulated_at", None)
+        # The tick clock is UTC (self._now); a frontier inherited from the weather feed
+        # can carry a site-local offset (Brightsky indexes its rows in location.timezone),
+        # which would pair a non-UTC start with the UTC cutoff -- Brightsky's ranged read
+        # slices source_data.loc[start:end] and pandas rejects two bounds at different UTC
+        # offsets. Align the frontier to the cutoff's zone so every read window built from
+        # (start, cutoff] carries a single offset.
+        if frontier is not None:
+            frontier = frontier.tz_convert(cutoff.tz)
         start = frontier if frontier is not None else cutoff - pd.Timedelta(minutes=self._interval_min)
         if start >= cutoff:
             return
