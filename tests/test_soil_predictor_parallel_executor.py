@@ -24,6 +24,7 @@ matching the other predictor test modules.
 
 import datetime
 import logging
+import os
 import pickle
 from concurrent.futures import Future
 
@@ -262,6 +263,45 @@ def test_rollout_parallel_worker_count_capped_to_ladder(monkeypatch, max_workers
 
     assert _FakeExecutor.last.max_workers == expected_workers
     assert len(out) == n_candidates
+
+
+# ---------------------------------------------------------------------------
+# _rollout_parallel: OMP/KMP env scoped to the pool's lifetime (B5)
+# ---------------------------------------------------------------------------
+
+
+def test_rollout_parallel_restores_env_on_success_and_on_raise(monkeypatch):
+    """The OMP/KMP pin set before pool creation must be scoped to this call:
+    the parent's prior env must be back in place once the pool block exits,
+    whether it returns normally or the pool/worker path raises -- a parallel
+    failure degrades to the caterpillar (_rollout_dispatch) and must not hand
+    it a leaked pin."""
+    ladder = [(pd.Timedelta(0),)]
+    p = _parallel_predictor(ladder, max_workers=1)
+
+    monkeypatch.setenv("OMP_NUM_THREADS", "5")
+    monkeypatch.delenv("KMP_DUPLICATE_LIB_OK", raising=False)
+
+    monkeypatch.setattr(soil_predictor, "_worker_init", lambda *initargs: None)
+    monkeypatch.setattr(soil_predictor, "_worker_roll", lambda candidate: (candidate, (["ts"], {"probe": [0.0]})))
+    monkeypatch.setattr(soil_predictor, "ProcessPoolExecutor", _FakeExecutor)
+
+    p._rollout_parallel("ic", pd.DataFrame(), {}, "hs", "he")
+
+    assert os.environ.get("OMP_NUM_THREADS") == "5", "the caller's prior OMP_NUM_THREADS must be restored"
+    assert "KMP_DUPLICATE_LIB_OK" not in os.environ, "KMP_DUPLICATE_LIB_OK must be unset again, not leaked as 'TRUE'"
+
+    class _RaisingExecutor(_FakeExecutor):
+        def __enter__(self):
+            raise RuntimeError("pool failed mid-block")
+
+    monkeypatch.setattr(soil_predictor, "ProcessPoolExecutor", _RaisingExecutor)
+
+    with pytest.raises(RuntimeError):
+        p._rollout_parallel("ic", pd.DataFrame(), {}, "hs", "he")
+
+    assert os.environ.get("OMP_NUM_THREADS") == "5", "env must be restored even when the pool block raises"
+    assert "KMP_DUPLICATE_LIB_OK" not in os.environ, "a raising pool must not leave KMP_DUPLICATE_LIB_OK set"
 
 
 # ---------------------------------------------------------------------------

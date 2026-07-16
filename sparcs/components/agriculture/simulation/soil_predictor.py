@@ -1595,45 +1595,63 @@ class SoilPredictor(SoilBase):
         # time -- which in a spawn child happens before the initializer runs, so
         # setting them only in _worker_init is too late. The parent's own numpy is
         # already initialized, so this does not throttle the live process.
+        # Scope the mutation to this call only: save the prior values here and
+        # restore them in the `finally` below once the pool block exits --
+        # whether it returns or raises -- so a later component/pool in this same
+        # process never silently inherits the pin. NOT safe for concurrent
+        # rollouts (another thread's restore could race this save); fine today,
+        # predict() runs on a single thread.
+        prior_omp_num_threads = os.environ.get("OMP_NUM_THREADS")
+        prior_kmp_duplicate_lib_ok = os.environ.get("KMP_DUPLICATE_LIB_OK")
         os.environ["OMP_NUM_THREADS"] = "1"
         os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-        ctx = multiprocessing.get_context("spawn")
-        # The chain-replay frames carry lories Constant column labels (e.g.
-        # Weather.PRECIPITATION). Constant is a str subclass whose __new__ takes
-        # (type, key, ...), which clashes with how pickle reconstructs a str
-        # subclass: unpickling in a spawned worker calls Constant(<value>) with
-        # key=None and raises "Constant '...' is None", killing the worker. Coerce
-        # every column label to a plain str for transport; a Constant equals its
-        # key str, so the worker's Constant-keyed lookups (_rain_flux etc.) still
-        # match. The caterpillar path keeps the original frames (no pickling).
-        et_data = _stringify_columns(et_data)
-        seg_et = {name: _stringify_columns(frame) for name, frame in seg_et.items()}
-        initargs = (
-            self._mesh_config,
-            self._ode_config,
-            self.REL_SAT_NAME,
-            self.name,
-            self._probes,
-            self._windows,
-            self._flow_m3s,
-            self._grid_mode,
-            ic_rel_sat,
-            et_data,
-            seg_et,
-            horizon_start,
-            horizon_end,
-        )
-        results: dict[tuple[pd.Timedelta, ...], tuple[list[pd.Timestamp], dict[str, list[float]]]] = {}
-        with ProcessPoolExecutor(
-            max_workers=n_workers,
-            mp_context=ctx,
-            initializer=_worker_init,
-            initargs=initargs,
-        ) as pool:
-            futures = [pool.submit(_worker_roll, candidate) for candidate in ladder]
-            for fut in as_completed(futures):
-                candidate, result = fut.result()
-                results[candidate] = result
+        try:
+            ctx = multiprocessing.get_context("spawn")
+            # The chain-replay frames carry lories Constant column labels (e.g.
+            # Weather.PRECIPITATION). Constant is a str subclass whose __new__ takes
+            # (type, key, ...), which clashes with how pickle reconstructs a str
+            # subclass: unpickling in a spawned worker calls Constant(<value>) with
+            # key=None and raises "Constant '...' is None", killing the worker. Coerce
+            # every column label to a plain str for transport; a Constant equals its
+            # key str, so the worker's Constant-keyed lookups (_rain_flux etc.) still
+            # match. The caterpillar path keeps the original frames (no pickling).
+            et_data = _stringify_columns(et_data)
+            seg_et = {name: _stringify_columns(frame) for name, frame in seg_et.items()}
+            initargs = (
+                self._mesh_config,
+                self._ode_config,
+                self.REL_SAT_NAME,
+                self.name,
+                self._probes,
+                self._windows,
+                self._flow_m3s,
+                self._grid_mode,
+                ic_rel_sat,
+                et_data,
+                seg_et,
+                horizon_start,
+                horizon_end,
+            )
+            results: dict[tuple[pd.Timedelta, ...], tuple[list[pd.Timestamp], dict[str, list[float]]]] = {}
+            with ProcessPoolExecutor(
+                max_workers=n_workers,
+                mp_context=ctx,
+                initializer=_worker_init,
+                initargs=initargs,
+            ) as pool:
+                futures = [pool.submit(_worker_roll, candidate) for candidate in ladder]
+                for fut in as_completed(futures):
+                    candidate, result = fut.result()
+                    results[candidate] = result
+        finally:
+            if prior_omp_num_threads is None:
+                os.environ.pop("OMP_NUM_THREADS", None)
+            else:
+                os.environ["OMP_NUM_THREADS"] = prior_omp_num_threads
+            if prior_kmp_duplicate_lib_ok is None:
+                os.environ.pop("KMP_DUPLICATE_LIB_OK", None)
+            else:
+                os.environ["KMP_DUPLICATE_LIB_OK"] = prior_kmp_duplicate_lib_ok
         logger.debug(
             "%s: parallel roll-out complete: %d candidates across %d workers.",
             self.name,
