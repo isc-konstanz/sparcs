@@ -168,6 +168,12 @@ class SoilSimulation(SoilBase):
     # a flux, so it is excluded from the mass-balance residual.
     WATER_ANCHOR = Constant(float, "anchor", "Anchor Assimilation Increment", "kg/m", context="water")
 
+    # Seconds of the advance window where a substep could not converge even at
+    # dt_min and was skipped (state held through the gap; accept+mark per
+    # issue 10/B7 -- no hold, no retry). Set every tick, 0.0 when nothing was
+    # skipped: a column that only appears on failure cannot be dashboarded.
+    WALK_SKIPPED_S = Constant(float, "skipped_s", "Skipped Walk Duration (dt_min Unsolvable)", "s", context="water")
+
     _plot_config: Optional[plot_style.PlotConfig] = None
 
     # Irrigation strip fluxes above this are almost certainly a unit or
@@ -247,6 +253,7 @@ class SoilSimulation(SoilBase):
             SoilSimulation.WATER_DEMAND_UNMET,
             SoilSimulation.WATER_BALANCE_RESIDUAL,
             SoilSimulation.WATER_ANCHOR,
+            SoilSimulation.WALK_SKIPPED_S,
         ):
             self.data.add(c, aggregate="mean", logger={"enabled": True})
 
@@ -324,7 +331,7 @@ class SoilSimulation(SoilBase):
                 storage_before = self._total_water() + self._pde.surface_water()
                 interval = self._plot_config.interval if self._plot_config is not None else None
                 clip_total = ClipDiagnostics()
-                self._walk(
+                skipped_s = self._walk(
                     rates=rates,
                     window_s=elapsed_s,
                     clip_total=clip_total,
@@ -349,6 +356,7 @@ class SoilSimulation(SoilBase):
                     delta_storage,
                     elapsed_s,
                     clip_total,
+                    skipped_s,
                 )
                 self._save_state(now)
                 return diagnostics
@@ -522,10 +530,11 @@ class SoilSimulation(SoilBase):
         clip_total: ClipDiagnostics,
         sim_t0: pd.Timestamp,
         plot_interval: Optional[pd.Timedelta],
-    ) -> None:
+    ) -> float:
         """Adaptive-dt walk over ``window_s``.
 
         Under-converged substeps at ``dt_min`` are accepted; non-finite ones are skipped.
+        Returns the total skipped seconds (``WalkResult.skipped_s``) for this window.
         """
 
         def on_step(t_offset: float) -> None:
@@ -545,7 +554,7 @@ class SoilSimulation(SoilBase):
         clip_total.add(result.clip)
 
         if result.skipped_s > 0:
-            logger.warning(
+            logger.error(
                 "%s: held state through %.1fs of a %.1fs window (substeps "
                 "unsolvable at dt_min); flux diagnostics assume forcing over "
                 "the full window, so drainage is misstated for the skipped slices.",
@@ -560,6 +569,7 @@ class SoilSimulation(SoilBase):
                 window_s,
                 result.retries,
             )
+        return result.skipped_s
 
     def _record_diagnostics(
         self,
@@ -568,9 +578,12 @@ class SoilSimulation(SoilBase):
         delta_storage: float,
         elapsed_s: float,
         clip: ClipDiagnostics,
+        skipped_s: float,
     ) -> dict[str, float]:
-        """Write the seven per-callback flux-density channels [kg/(m²·h)] and sample probes."""
+        """Write the seven per-callback flux-density channels [kg/(m²·h)], the
+        skipped-at-dt_min diagnostics channel, and sample probes."""
         diagnostics = self._compute_diagnostics(rates, delta_storage, elapsed_s, clip)
+        diagnostics[SoilSimulation.WALK_SKIPPED_S.key] = skipped_s
         for key, value in diagnostics.items():
             self.data[key].set(now, value)
         self._sample_probes(now)

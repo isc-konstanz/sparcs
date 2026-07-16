@@ -45,6 +45,9 @@ ClipDiagnostics = _soil_core.ClipDiagnostics
         (SoilSimulation.WATER_DEMAND_UNMET, "demand_unmet", "water_demand_unmet"),
         (SoilSimulation.WATER_BALANCE_RESIDUAL, "balance_residual", "water_balance_residual"),
         (SoilSimulation.WATER_ANCHOR, "anchor", "water_anchor"),
+        # B7: skipped-at-dt_min seconds; bare key is the SQL column, context
+        # namespaces the global Constant registry like every sibling above.
+        (SoilSimulation.WALK_SKIPPED_S, "skipped_s", "water_skipped_s"),
     ],
 )
 def test_diagnostic_constants_use_short_keys_with_water_registry_id(constant, expected_key, expected_id):
