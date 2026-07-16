@@ -23,7 +23,7 @@ from lories.util import floor_date, to_timedelta
 from sparcs.components.agriculture.irrigation import Irrigation
 from sparcs.components.weather import validate_meteo_inputs
 
-from ._soil import MeshConfig, design_flow_lpm, top_segment_names_from_mesh
+from ._soil import _DEFAULT_BAY_WIDTH, MeshConfig, design_flow_lpm, top_segment_names_from_mesh
 from .evapotranspiration import Evapotranspiration, SegmentProperties
 from .ground_shading import GroundShading
 from .soil import SoilSimulation
@@ -119,7 +119,7 @@ class FieldSimulation(Component):
     _OPTIONAL_WEATHER_KEYS: frozenset[str] = frozenset(_WEATHER_DEFAULTS.keys())
 
     # Bay width (m), shared by soil mesh and ground-shading children.
-    _bay_width: float = 3.5
+    _bay_width: float = _DEFAULT_BAY_WIDTH
 
     # Latest per-segment shade factors from GroundShading; {} = no data yet (treated as 1.0).
     _segment_shade: dict[str, float]
@@ -147,7 +147,7 @@ class FieldSimulation(Component):
         self.bare_plant_height = configs.get("bare_plant_height", default=0.1)
         self.bare_ndvi = configs.get("bare_ndvi", default=0.25)
 
-        self._bay_width = float(configs.get("bay_width", default=3.5))
+        self._bay_width = float(configs.get("bay_width", default=_DEFAULT_BAY_WIDTH))
 
         self._intake_delay = self._parse_intake_delay(configs)
         self._interval_min, self._offset_min = self._parse_tick_schedule(configs)

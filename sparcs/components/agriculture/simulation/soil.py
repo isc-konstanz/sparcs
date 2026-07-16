@@ -115,6 +115,27 @@ def _parse_anchor_config(configs: Configurations) -> AnchorConfig:
     )
 
 
+def _resolve_mesh_config(context: Any, configs: Configurations) -> MeshConfig:
+    """Resolve this component's ``MeshConfig``.
+
+    Reuses ``context.mesh_config`` (the parent ``FieldSimulation``'s
+    already-parsed instance) when present -- the parent parses the SAME
+    ``[soil_simulation.mesh]`` block eagerly in its own ``configure()``,
+    strictly before any child (including this one) configures, so reusing it
+    here never reads a different block. Falls back to parsing this
+    component's own ``[mesh]`` block for standalone construction (no
+    ``FieldSimulation`` parent in ``context``), using ``context.bay_width`` --
+    or ``MeshConfig``'s own default when that, too, is absent.
+    """
+    parent_mesh = getattr(context, "mesh_config", None)
+    if parent_mesh is not None:
+        return parent_mesh
+    return MeshConfig(
+        configs.get_member("mesh", defaults={}, ensure_exists=True),
+        bay_width=getattr(context, "bay_width", None),
+    )
+
+
 class SoilSimulation(SoilBase):
     TYPE: str = "soil_simulation"
     INCLUDES = ["mesh", "pde", "plot", "probes", "anchor"]
@@ -171,10 +192,7 @@ class SoilSimulation(SoilBase):
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
 
-        self._mesh_config = MeshConfig(
-            configs.get_member("mesh", defaults={}, ensure_exists=True),
-            bay_width=getattr(self.context, "bay_width", None),
-        )
+        self._mesh_config = _resolve_mesh_config(self.context, configs)
         ensure_mesh(self._mesh_config)
         # The production flow meter measures the whole-field total [l/min], but the
         # 2D mesh is one bay cross-section representing 1 m of a single row, so the
@@ -601,8 +619,7 @@ class SoilSimulation(SoilBase):
                 continue
             if soil_id in seen:
                 raise ConfigurationError(
-                    f"{self.name}: duplicate soil_id {soil_id!r} on probes "
-                    f"'{seen[soil_id]}' and '{probe.channel_id}'"
+                    f"{self.name}: duplicate soil_id {soil_id!r} on probes '{seen[soil_id]}' and '{probe.channel_id}'"
                 )
             seen[soil_id] = probe.channel_id
 

@@ -169,7 +169,10 @@ class FluxRates:
     rain_flux: float
 
 
-_DEFAULT_BAY_WIDTH: float = 10.0
+# Shared with FieldSimulation._bay_width's default (base.py) so the standalone
+# and in-context mesh parses agree on one fallback: 3.5 m is real rig bay
+# geometry, not an invented standalone default (was 10.0; see B6).
+_DEFAULT_BAY_WIDTH: float = 3.5
 
 
 @dataclass
