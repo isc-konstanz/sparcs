@@ -19,10 +19,11 @@ from lories.components.weather import Weather
 from lories.core import ConfigurationUnavailableError
 from lories.data import Channels
 from lories.typing import Configurations, Timestamp
-from lories.util import floor_date, to_timedelta
+from lories.util import to_timedelta
 from sparcs.components.agriculture.irrigation import Irrigation
 from sparcs.components.weather import validate_meteo_inputs
 
+from ._schedule import parse_tick_schedule, slot_ceil
 from ._soil import (
     _DEFAULT_BAY_WIDTH,
     DripConfig,
@@ -472,14 +473,16 @@ class FieldSimulation(Component):
 
         Same vocabulary as ``WeatherForecast``: ticks fire at wall-clock slots
         aligned to ``interval``, shifted by ``offset`` within the interval.
+
+        Thin wrapper over ``_schedule.parse_tick_schedule`` -- see that
+        module's docstring for why the validation has one home.
         """
-        interval = int(configs.get("interval", default=60))
-        offset = int(configs.get("offset", default=0))
-        if interval < 1:
-            raise ValueError(f"[field_simulation] interval must be >= 1 minute, got {interval}")
-        if not 0 <= offset < interval:
-            raise ValueError(f"[field_simulation] offset must be in [0, interval), got {offset}")
-        return interval, offset
+        return parse_tick_schedule(
+            configs,
+            default_interval=60,
+            default_offset=0,
+            section_name="field_simulation",
+        )
 
     # -- wall-clock tick -------------------------------------------------------
 
@@ -488,13 +491,12 @@ class FieldSimulation(Component):
 
         Alignment is absolute (``floor_date`` on the site timezone + offset),
         not relative to activation, so restarts do not shift the schedule.
+
+        Thin wrapper over ``_schedule.slot_ceil`` -- see that module's
+        docstring for why the slot math has one home.
         """
         timezone = getattr(self.location, "timezone", None)
-        slot = floor_date(now, timezone, freq=f"{self._interval_min}min")
-        slot += pd.Timedelta(minutes=self._offset_min)
-        while slot <= now:
-            slot += pd.Timedelta(minutes=self._interval_min)
-        return slot
+        return slot_ceil(now, timezone, self._interval_min, self._offset_min)
 
     def _start_tick_thread(self) -> None:
         self._tick_interrupt = threading.Event()

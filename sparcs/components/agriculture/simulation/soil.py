@@ -49,6 +49,9 @@ from ._soil import (
 
 logger = logging.getLogger(__name__)
 
+# Default cadence for [plot] progress-image snapshots, absent a [plot] interval override.
+_DEFAULT_PLOT_INTERVAL: str = "5min"
+
 
 def _walk_components(root) -> list:
     """Flatten a component subtree into a list (root first)."""
@@ -267,7 +270,7 @@ class SoilSimulation(SoilBase):
             os.makedirs(structure_dir, exist_ok=True)
             self._plot_mesh(os.path.join(structure_dir, "mesh.png"))
 
-        self._plot_config = plot_style.load_plot_config(configs, default_interval="5min")
+        self._plot_config = plot_style.load_plot_config(configs, default_interval=_DEFAULT_PLOT_INTERVAL)
         if self._plot_config is not None:
             self._last_plot_simtime = None
             self._plot_fig = None

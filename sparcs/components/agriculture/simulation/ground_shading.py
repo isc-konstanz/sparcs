@@ -93,6 +93,9 @@ _ZENITH_DAYTIME_LIMIT = 89.0
 # Outer-edge clamp for ground segment x-coordinates [m].
 _GROUND_X_CLAMP = 100.0
 
+# Default cadence for [plot] progress-image snapshots, absent a [plot] interval override.
+_DEFAULT_PLOT_INTERVAL: str = "1h"
+
 # Geometry modes selected via ``mode = ...`` in the [ground_shading] block.
 MODE_AS_IS = "as_is"  # fixed-tilt rows; supports `mirrored`
 MODE_HORIZONTAL = "horizontal"  # row geometry forced flat (surface_tilt = 0)
@@ -417,7 +420,7 @@ class GroundShading(Component):
 
     def _configure_plot(self, configs: Configurations) -> None:
         """Read the ``[plot]`` block and register SHADING_PROGRESS_IMAGE when enabled."""
-        self._plot_config = plot_style.load_plot_config(configs, default_interval="1h")
+        self._plot_config = plot_style.load_plot_config(configs, default_interval=_DEFAULT_PLOT_INTERVAL)
         if self._plot_config is None:
             return
         self.data.add(

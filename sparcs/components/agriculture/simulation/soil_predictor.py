@@ -35,10 +35,11 @@ import numpy as np
 import pandas as pd
 from lories.components.weather import Weather
 from lories.typing import Configurations
-from lories.util import floor_date, to_timedelta
+from lories.util import to_timedelta
 from sparcs.components.agriculture.simulation.soil import SoilSimulation
 
 from . import plot_render, plot_style
+from ._schedule import parse_tick_schedule, slot_floor
 from ._soil import (
     _DEFAULT_NOZZLE_COUNT,
     _DEFAULT_NOZZLE_FLOW_LPH,
@@ -388,8 +389,12 @@ class SoilPredictor(SoilBase):
         self._save_state = state.get_bool("save", default=False)
         self._state_freq = to_timedelta(state.get("interval", default=_DEFAULT_SNAPSHOT_INTERVAL))
 
-        self._interval_min = configs.get_int("interval", default=_DEFAULT_INTERVAL_MIN)
-        self._offset_min = configs.get_int("offset", default=_DEFAULT_OFFSET_MIN)
+        self._interval_min, self._offset_min = parse_tick_schedule(
+            configs,
+            default_interval=_DEFAULT_INTERVAL_MIN,
+            default_offset=_DEFAULT_OFFSET_MIN,
+            section_name="soil_predictor",
+        )
 
         soil_block, model_block = self._resolve_model_block(self.context.configs)
         # ONE canonical resolution site for the [pde]/[model]/forcing cascade:
@@ -942,11 +947,11 @@ class SoilPredictor(SoilBase):
     def _current_boundary(now: pd.Timestamp, tz, interval_min: int, offset_min: int) -> pd.Timestamp:
         """Most-recent run boundary at or before ``now``, site-local. Mirrors the
         interval/offset pattern of lories ``WeatherForecast`` (forecast.py).
+
+        Thin wrapper over ``_schedule.slot_floor`` -- see that module's
+        docstring for why the slot math has one home.
         """
-        boundary = floor_date(now, tz, freq=f"{interval_min}min") + pd.Timedelta(minutes=offset_min)
-        if boundary > now:
-            boundary -= pd.Timedelta(minutes=interval_min)
-        return boundary
+        return slot_floor(now, tz, interval_min, offset_min)
 
     # Public driver
 
