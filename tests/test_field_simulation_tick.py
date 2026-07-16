@@ -419,6 +419,78 @@ def test_stop_tick_thread_joins_promptly():
     assert not thread.is_alive()
 
 
+# --- slot-boundary watchdog + overrun summary --------------------------------
+
+
+def test_tick_fast_run_leaves_no_watchdog_or_summary_log(caplog):
+    """A tick that finishes before the next slot boundary: no watchdog log, no
+    overrun summary, and the armed Timer is cancelled rather than leaked."""
+    sim = _sim(interval_min=60, offset_min=0)
+    sim._tick_lock = threading.Lock()
+    sim._now = lambda: pd.Timestamp("2026-07-12 12:00", tz="UTC")
+    sim._on_tick = lambda now: None
+
+    with caplog.at_level("WARNING"):
+        sim._tick()
+
+    assert sim._watchdog_timer is None  # armed, then cancelled -- not leaked
+    assert not any("still running; slot skipped" in m for m in caplog.messages)
+    assert not any("overran its slot" in m for m in caplog.messages)
+
+
+def test_tick_watchdog_fires_at_boundary_and_logs_overrun_summary(caplog):
+    """A tick that outlasts its own slot: the watchdog logs once the real,
+    ms-scale ``threading.Timer`` fires at the boundary (the fake clock only
+    drives the boundary computation, not the Timer's wait), and the post-tick
+    summary reports the overrun once the stubbed ``_on_tick`` has advanced the
+    fake clock past it."""
+    sim = _sim(interval_min=1, offset_min=0)
+    sim._tick_lock = threading.Lock()
+
+    clock = types.SimpleNamespace(value=pd.Timestamp("2026-07-12 12:00:59.99", tz="UTC"))
+    sim._now = lambda: clock.value
+
+    def _slow_on_tick(now):
+        deadline = time.monotonic() + 2.0
+        while not any("still running; slot skipped" in m for m in caplog.messages):
+            assert time.monotonic() < deadline, "watchdog did not fire before the boundary"
+            time.sleep(0.001)
+        clock.value = pd.Timestamp("2026-07-12 12:02:05", tz="UTC")  # past 1 slot boundary
+
+    sim._on_tick = _slow_on_tick
+
+    with caplog.at_level("WARNING"):
+        sim._tick()
+
+    assert any("still running; slot skipped" in m for m in caplog.messages)
+    assert any("overran its slot" in m and "slots_skipped=1" in m for m in caplog.messages)
+    # Cancelled on completion; the cancel-vs-re-arm TOCTOU window makes this
+    # probabilistic in theory (worst case: an orphaned no-op daemon Timer),
+    # empirically stable in repeated runs.
+    assert sim._watchdog_timer is None
+
+
+def test_tick_runs_even_when_watchdog_arming_fails(caplog):
+    """A watchdog-arming failure is logged and the tick still runs -- the
+    visibility feature must never suppress the simulation itself."""
+    sim = _sim(interval_min=60, offset_min=0)
+    sim._tick_lock = threading.Lock()
+    sim._now = lambda: pd.Timestamp("2026-07-12 12:00", tz="UTC")
+    calls = []
+    sim._on_tick = calls.append
+
+    def _boom_arm(reference, done):
+        raise RuntimeError("no threads left")
+
+    sim._arm_watchdog = _boom_arm
+
+    with caplog.at_level("ERROR"):
+        sim._tick()
+
+    assert len(calls) == 1  # the tick ran despite the arming failure
+    assert any("failed to arm the slot watchdog" in m for m in caplog.messages)
+
+
 # --- run-chain shading freshness ---------------------------------------------
 
 

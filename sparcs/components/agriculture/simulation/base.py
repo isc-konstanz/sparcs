@@ -106,6 +106,7 @@ class FieldSimulation(Component):
     _tick_thread: Optional[threading.Thread] = None
     _tick_interrupt: Optional[threading.Event] = None
     _tick_lock: Optional[threading.Lock] = None
+    _watchdog_timer: Optional[threading.Timer] = None
 
     _weather_channels: Optional[Channels] = None
     _required_weather_keys: tuple[str, ...] = ()
@@ -381,6 +382,7 @@ class FieldSimulation(Component):
     def _start_tick_thread(self) -> None:
         self._tick_interrupt = threading.Event()
         self._tick_lock = threading.Lock()
+        self._watchdog_timer = None
         self._tick_thread = threading.Thread(target=self._tick_loop, name=f"{self.name}-tick", daemon=True)
         self._tick_thread.start()
 
@@ -392,6 +394,7 @@ class FieldSimulation(Component):
             if self._tick_thread.is_alive():
                 logger.warning("%s: tick thread did not stop within 30s.", self.name)
             self._tick_thread = None
+        self._cancel_watchdog()
 
     def _tick_loop(self) -> None:
         slot = self._next_slot(self._now())
@@ -410,12 +413,75 @@ class FieldSimulation(Component):
         if not self._tick_lock.acquire(blocking=False):
             logger.warning("%s: previous tick still running; skipping slot.", self.name)
             return
+        start = self._now()
+        watchdog_done = threading.Event()
         try:
-            self._on_tick(self._now())
+            # Visibility must never suppress the tick itself: an arming failure
+            # (e.g. thread-creation limits) is logged and the tick proceeds.
+            try:
+                self._arm_watchdog(start, watchdog_done)
+            except Exception:
+                logger.exception("%s: failed to arm the slot watchdog; tick continues.", self.name)
+            self._on_tick(start)
         except Exception:
             logger.exception("%s: tick failed.", self.name)
         finally:
+            watchdog_done.set()
+            self._cancel_watchdog()
             self._tick_lock.release()
+        self._log_tick_overrun(start)
+
+    # -- slot-boundary watchdog (log-only, lock-free) --------------------------
+    #
+    # NO deadline, NO cancel: an unbounded tick (e.g. a non-converged dt_min
+    # grind) stays unbounded by design (Q3) -- this unit only makes an overrun
+    # visible. The Timer callback reads nothing but the immutable ``boundary``
+    # snapshot captured at arm time and a completion ``Event``; it never takes
+    # the tick lock and never touches PDE/tick state, so it is safe to run from
+    # a second thread while a tick is in flight.
+
+    def _arm_watchdog(self, reference: pd.Timestamp, done: threading.Event) -> None:
+        """Arm a Timer for the slot boundary following ``reference``. While
+        ``done`` is unset, the callback logs and re-arms for the following
+        boundary in turn, so a multi-slot overrun is reported once per slot
+        crossed, not just once."""
+        boundary = self._next_slot(reference)
+        delay_s = max((boundary - reference).total_seconds(), 0.0)
+        timer = threading.Timer(delay_s, self._on_watchdog_boundary, args=(boundary, done))
+        timer.daemon = True
+        self._watchdog_timer = timer
+        timer.start()
+
+    def _on_watchdog_boundary(self, boundary: pd.Timestamp, done: threading.Event) -> None:
+        if done.is_set():
+            return
+        logger.warning("%s: tick still running; slot skipped (boundary %s).", self.name, boundary)
+        if not done.is_set():
+            self._arm_watchdog(boundary, done)
+
+    def _cancel_watchdog(self) -> None:
+        timer = self._watchdog_timer
+        if timer is not None:
+            timer.cancel()
+        self._watchdog_timer = None
+
+    def _log_tick_overrun(self, start: pd.Timestamp) -> None:
+        """Log-only summary when the tick's wall-clock duration crossed one or
+        more slot boundaries; no-op for a tick that finished within its slot.
+        ``slots_skipped`` is duration // interval -- an approximation that can
+        undercount by one when the tick started off-boundary; fine for a
+        log-only signal (the per-boundary watchdog lines are the exact record)."""
+        duration = self._now() - start
+        interval = pd.Timedelta(minutes=self._interval_min)
+        skipped = int(duration // interval)
+        if skipped < 1:
+            return
+        logger.warning(
+            "%s: tick overran its slot (duration=%s, slots_skipped=%d).",
+            self.name,
+            duration,
+            skipped,
+        )
 
     def _on_tick(self, now: pd.Timestamp) -> None:
         """Advance the chain over ``(frontier, now - intake_delay]`` from connector reads.
