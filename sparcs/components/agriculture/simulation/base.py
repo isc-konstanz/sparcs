@@ -23,7 +23,14 @@ from lories.util import floor_date, to_timedelta
 from sparcs.components.agriculture.irrigation import Irrigation
 from sparcs.components.weather import validate_meteo_inputs
 
-from ._soil import _DEFAULT_BAY_WIDTH, MeshConfig, design_flow_lpm, top_segment_names_from_mesh
+from ._soil import (
+    _DEFAULT_BAY_WIDTH,
+    MeshConfig,
+    PDEConfig,
+    apply_surface_forcing,
+    design_flow_lpm,
+    top_segment_names_from_mesh,
+)
 from .evapotranspiration import Evapotranspiration, SegmentProperties
 from .ground_shading import GroundShading
 from .soil import SoilSimulation
@@ -157,10 +164,28 @@ class FieldSimulation(Component):
             self.data.add(c, aggregate="mean", logger={"enabled": False})
 
         self._mesh_config: Optional[MeshConfig] = None
+        self._soil_pde_config: Optional[PDEConfig] = None
         if configs.has_member(SoilSimulation.TYPE, includes=True):
             soil_block = configs.get_member(SoilSimulation.TYPE, defaults=defaults)
             mesh_block = soil_block.get_member("mesh", defaults={}, ensure_exists=True)
             self._mesh_config = MeshConfig(mesh_block, bay_width=self._bay_width)
+
+            # Eager PDEConfig parse (mirrors the mesh seam above): ONE canonical
+            # resolution site for the [pde]/[model]/forcing cascade, so the
+            # predictor and the sim can never resolve it differently. Children
+            # configure in alphanumeric id order (soil_predictor BEFORE
+            # soil_simulation), so this eager copy -- not a live _ode_config --
+            # is what soil_pde_config serves at predictor-configure time (see
+            # that property's docstring). Reusing SoilPredictor's pinned
+            # _resolve_model_block makes the [soil_simulation.model]-over-[model]
+            # merge equivalent by construction; it returns the SAME stored member
+            # object as the soil_block fetch above (get_member mutates in place).
+            soil_block, model_block = SoilPredictor._resolve_model_block(configs)
+            self._soil_pde_config = PDEConfig(
+                soil_block.get_member("pde", defaults={}, ensure_exists=True),
+                model_configs=model_block,
+            )
+            apply_surface_forcing(self._soil_pde_config, soil_block)
 
             # Drip design flow [l/min] for the state-driven feed (broken meter).
             # has_member() is checked BEFORE ensure_exists=True materializes the block.
@@ -218,6 +243,32 @@ class FieldSimulation(Component):
             if soil_mesh is not None:
                 return soil_mesh
         return self._mesh_config
+
+    @property
+    def soil_pde_config(self) -> Optional[PDEConfig]:
+        """The resolved PDEConfig -- ONE canonical resolution site for the
+        [pde]/[model]/forcing cascade, so the predictor and SoilSimulation can
+        never resolve it differently.
+
+        Same guard shape as ``mesh_config``: prefers SoilSimulation's live
+        ``_ode_config`` once configured, falling back to the eagerly-parsed copy
+        built in ``configure()``. Children configure in alphanumeric id order, so
+        ``soil_predictor`` configures BEFORE ``soil_simulation`` -- at
+        predictor-configure time this ALWAYS serves the eager fallback, never the
+        live object (the live ``_ode_config`` is only ever seen by a caller that
+        reads this property AFTER SoilSimulation.configure() has run).
+
+        Handing either object across this seam is safe only because ``PDEConfig``
+        carries no numpy arrays: every field is a plain str/float/Optional[float]/
+        pd.Timedelta scalar, and its ``.ponding``/``.feddes`` are config objects
+        built from plain scalars too (_soil.py) -- so no shared mutable array
+        state leaks between predictor and sim through this property.
+        """
+        if self.soil_simulation is not None:
+            soil_pde = getattr(self.soil_simulation, "_ode_config", None)
+            if soil_pde is not None:
+                return soil_pde
+        return self._soil_pde_config
 
     @property
     def top_segment_names(self) -> list[str]:

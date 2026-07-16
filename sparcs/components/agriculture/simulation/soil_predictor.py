@@ -21,6 +21,7 @@ Dash/debugging but are no longer logged.
 
 from __future__ import annotations
 
+import copy
 import datetime
 import itertools
 import logging
@@ -288,19 +289,33 @@ class SoilPredictor(SoilBase):
         ``watering_h_max_mm`` default while the sim ponds to 50 mm overflows its
         watering rolls ~10x sooner, reading too dry and biasing the recommendation.
 
-        Contract: with no ``[pde]`` block the predictor inherits ``soil_pde``
-        wholesale (forcing included); with its own ``[pde]`` it overrides the
-        solver keys but still inherits the sim's ponding + feddes, unless it
-        supplies its own ``[soil_predictor.ponding]`` / ``[soil_predictor.feddes]``
-        (which then win via apply_surface_forcing).
+        Contract: with no ``[pde]`` block and no forcing override the predictor
+        inherits ``soil_pde`` wholesale, same object (``ode is soil_pde``). With
+        no ``[pde]`` but its OWN ``[ponding]``/``[feddes]``, a shallow copy of
+        ``soil_pde`` is built first -- ``apply_surface_forcing`` replaces
+        ``.ponding``/``.feddes`` wholesale, and without the copy ``ode_config``
+        would BE ``soil_pde``, silently rewriting the sim's own resolved forcing
+        (HAZARD, B4 review). With its own ``[pde]`` it always gets a fresh
+        ``PDEConfig``, overriding the solver keys but still inheriting the sim's
+        ponding + feddes unless it supplies its own ``[soil_predictor.ponding]`` /
+        ``[soil_predictor.feddes]`` (which then win via ``apply_surface_forcing``).
         """
         if configs.has_member("pde"):
             ode_config = PDEConfig(configs.get_member("pde"), model_configs=model_configs)
+        elif configs.has_member("ponding") or configs.has_member("feddes"):
+            # Shallow copy is sufficient: apply_surface_forcing only ever REPLACES
+            # .ponding/.feddes wholesale (never mutates them in place), so a copy
+            # keeps ode_config distinct from soil_pde while still sharing every
+            # other scalar field.
+            ode_config = copy.copy(soil_pde)
         else:
-            ode_config = soil_pde
-        # Seed the sim's surface forcing, then let the predictor's own sibling
-        # blocks override it. (In the no-[pde] branch ode_config IS soil_pde, so the
-        # seed is a no-op and only an explicit predictor override changes anything.)
+            # No [pde] and no forcing override: return the sim's object unchanged
+            # so `ode is soil_pde` holds for callers that never touch forcing.
+            return soil_pde
+        # Seed the sim's surface forcing onto ode_config, then let the predictor's
+        # own sibling blocks override it. ode_config is never soil_pde itself here
+        # (own-[pde]: a fresh PDEConfig; no-[pde]-with-override: the shallow copy),
+        # so the reassignment below can never touch the sim's object.
         ode_config.ponding = soil_pde.ponding
         ode_config.feddes = soil_pde.feddes
         apply_surface_forcing(ode_config, configs, ponding_base=soil_pde.ponding, feddes_base=soil_pde.feddes)
@@ -309,6 +324,10 @@ class SoilPredictor(SoilBase):
     @staticmethod
     def _resolve_model_block(context_configs: Configurations) -> tuple[Configurations, Configurations]:
         """Resolve the live sim's ``[soil_simulation]`` block and its effective ``[model]``.
+
+        Also called by ``FieldSimulation.configure`` (base.py) for the eager
+        ``soil_pde_config`` parse, so the two resolutions are equivalent by
+        construction -- renames or semantic changes here affect base.py too.
 
         The sim reads ``[model]`` through the ``[soil_simulation]`` cascade
         (``Component._build_defaults(includes=["model", "plot"])``, base.py), so a
@@ -353,13 +372,21 @@ class SoilPredictor(SoilBase):
         self._offset_min = configs.get_int("offset", default=_DEFAULT_OFFSET_MIN)
 
         soil_block, model_block = self._resolve_model_block(self.context.configs)
-        soil_pde = PDEConfig(
-            soil_block.get_member("pde", defaults={}, ensure_exists=True),
-            model_configs=model_block,
-        )
-        # Attach the live sim's ponding + feddes (sibling blocks of its [pde]) so
-        # soil_pde carries the sim's surface forcing for the predictor to inherit.
-        apply_surface_forcing(soil_pde, soil_block)
+        # ONE canonical resolution site for the [pde]/[model]/forcing cascade:
+        # FieldSimulation eagerly parses this at its own configure time (before
+        # any child configures) and exposes it via soil_pde_config -- consume
+        # that instead of re-deriving PDEConfig here, so predictor and sim can
+        # never diverge on ponding/feddes (see base.py's soil_pde_config
+        # docstring). No new failure mode: a predictor without a
+        # [soil_simulation] context already hard-fails on the mesh_config check
+        # above.
+        soil_pde = getattr(self.context, "soil_pde_config", None)
+        if soil_pde is None:
+            raise ValueError(
+                f"{self.id}: parent FieldSimulation has no soil_pde_config; "
+                "predictor needs a [soil_simulation] block to resolve "
+                "the sim's PDE config."
+            )
 
         drip_block = configs.get_member("drip", defaults={}, ensure_exists=True)
         nozzle_flow_lph = drip_block.get_float("nozzle_flow_lph", default=_DEFAULT_NOZZLE_FLOW_LPH)

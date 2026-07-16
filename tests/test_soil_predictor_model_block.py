@@ -74,3 +74,27 @@ def test_no_model_blocks_falls_back_to_pde_config_defaults(tmp_path):
     pde_config = PDEConfig(_configs(tmp_path, name="pde.conf"), model_configs=model_block)
 
     assert pde_config.k_s == 1.0e-4  # PDEConfig's built-in default
+
+
+def test_resolve_model_block_returns_the_stored_member_object(tmp_path):
+    """FieldSimulation's eager soil_pde_config parse (base.py) reuses
+    ``_resolve_model_block`` so its merge is equivalent by construction -- but
+    that equivalence rests on a lories guarantee: ``get_member(defaults=)``
+    mutates the stored member in place and returns the SAME object, so base.py's
+    earlier defaults-cascade fetch and this staticmethod's ``defaults={}``
+    re-fetch see one object. Pin that guarantee so a lories-side change fails
+    loudly here instead of silently splitting the sim's and predictor's view."""
+    context_configs = _configs(
+        tmp_path,
+        model={"k_s": 1.0e-4, "alpha": 0.08},
+        soil_simulation={"model": {"k_s": 5.0e-5}},
+    )
+    # Any earlier defaults-merging fetch (base.py:161's cascade stands in here).
+    stored = context_configs.get_member("soil_simulation", defaults={"cascade_marker": 1})
+
+    soil_block, model_block = SoilPredictor._resolve_model_block(context_configs)
+
+    assert soil_block is stored  # same stored member object, not a copy
+    assert "cascade_marker" in soil_block  # the earlier merge is visible through the re-fetch
+    assert model_block.get("k_s") == 5.0e-5
+    assert model_block.get("alpha") == 0.08

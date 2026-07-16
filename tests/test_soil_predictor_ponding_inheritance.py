@@ -136,3 +136,45 @@ def test_predictor_partial_ponding_override_merges_with_sim(tmp_path):
     assert ode.ponding.enabled is True
     assert ode.ponding.h_max_mm == 8.0
     assert ode.ponding.watering_h_max_mm == 50.0
+
+
+def test_no_pde_ponding_override_does_not_rewrite_sim_forcing(tmp_path):
+    """HAZARD (B4 review): no [pde] but WITH a [ponding] override -- before the
+    fix, ode_config WAS soil_pde in the no-[pde] branch, so apply_surface_forcing's
+    wholesale .ponding replacement silently rewrote the SIM's own resolved
+    forcing. The returned ode must now be a distinct object, and soil_pde's
+    ponding/feddes must stay untouched -- same identity AND same values."""
+    soil_pde = _live_soil_pde(tmp_path)
+    orig_ponding = soil_pde.ponding
+    orig_feddes = soil_pde.feddes
+    predictor_cfg = _configs(tmp_path, ponding={"watering_h_max_mm": 17.0})
+    model_block = _configs(tmp_path, name="model.conf")
+
+    ode = SoilPredictor._resolve_ode_config(predictor_cfg, soil_pde, model_block)
+
+    assert ode is not soil_pde
+    assert ode.ponding.watering_h_max_mm == 17.0
+    assert soil_pde.ponding is orig_ponding
+    assert soil_pde.ponding.watering_h_max_mm == 50.0
+    assert soil_pde.feddes is orig_feddes
+    assert soil_pde.feddes.enabled is True
+
+
+def test_no_pde_feddes_override_does_not_rewrite_sim_forcing(tmp_path):
+    """Mirror of the ponding HAZARD test: a [feddes]-only override (still no
+    [pde]) must also isolate via copy -- soil_pde.feddes AND soil_pde.ponding
+    stay untouched."""
+    soil_pde = _live_soil_pde(tmp_path)
+    orig_ponding = soil_pde.ponding
+    orig_feddes = soil_pde.feddes
+    predictor_cfg = _configs(tmp_path, feddes={"enabled": False})
+    model_block = _configs(tmp_path, name="model.conf")
+
+    ode = SoilPredictor._resolve_ode_config(predictor_cfg, soil_pde, model_block)
+
+    assert ode is not soil_pde
+    assert ode.feddes.enabled is False
+    assert soil_pde.feddes is orig_feddes
+    assert soil_pde.feddes.enabled is True
+    assert soil_pde.ponding is orig_ponding
+    assert soil_pde.ponding.watering_h_max_mm == 50.0
