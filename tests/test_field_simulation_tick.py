@@ -417,3 +417,89 @@ def test_stop_tick_thread_joins_promptly():
     sim._stop_tick_thread()
     assert time.monotonic() - started < 5.0
     assert not thread.is_alive()
+
+
+# --- run-chain shading freshness ---------------------------------------------
+
+
+def _shading_sim(stale: dict[str, float], fresh: dict[str, float]) -> tuple[FieldSimulation, dict]:
+    """A minimal ``_run_chain`` harness: stubbed weather/vegetation passthrough,
+    a GroundShading stub returning ``fresh``, and an ET stub capturing the
+    segments it was handed. ``stale`` seeds the stored live-tick factors."""
+    sim = object.__new__(FieldSimulation)
+    sim._name = "test_field_simulation"
+    sim._segment_shade = dict(stale)
+    sim.bare_lai = 1.0
+    sim.bare_roughness = 0.002
+    sim.bare_plant_height = 0.1
+    sim.bare_ndvi = 0.25
+    sim._prepare_weather = lambda weather: weather
+    sim._populate_vegetation = lambda df, publish: df
+
+    sim.ground_shading = types.SimpleNamespace(evaluate=lambda df, publish: dict(fresh))
+    sim.soil_simulation = types.SimpleNamespace(
+        top_segment_names=lambda: ["PlantTopLeftSegment"],
+        segment_face_length=lambda name: 1.0,
+    )
+
+    captured: dict = {}
+
+    def _et_evaluate(df, segments, publish):
+        captured["segments"] = segments
+        return df, {}
+
+    sim.evapotranspiration = types.SimpleNamespace(evaluate=_et_evaluate)
+    return sim, captured
+
+
+def _veg_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            FieldSimulation.LAI: [1.0],
+            FieldSimulation.PLANT_HEIGHT: [0.5],
+            FieldSimulation.NDVI: [0.3],
+            FieldSimulation.ROUGHNESS: [0.01],
+        },
+        index=[pd.Timestamp("2026-07-12 12:00", tz="UTC")],
+    )
+
+
+def test_run_chain_replay_uses_fresh_shading_and_keeps_stored_state():
+    sim, captured = _shading_sim(stale={"PlantTopLeftSegment": 0.2}, fresh={"PlantTopLeftSegment": 0.9})
+
+    sim._run_chain(_veg_frame(), publish=False)
+
+    (segment,) = captured["segments"]
+    assert segment.shade_factor == pytest.approx(0.9)
+    assert sim._segment_shade == {"PlantTopLeftSegment": 0.2}
+
+
+def test_run_chain_publish_uses_and_stores_fresh_shading():
+    sim, captured = _shading_sim(stale={"PlantTopLeftSegment": 0.2}, fresh={"PlantTopLeftSegment": 0.9})
+
+    sim._run_chain(_veg_frame(), publish=True)
+
+    (segment,) = captured["segments"]
+    assert segment.shade_factor == pytest.approx(0.9)
+    assert sim._segment_shade == {"PlantTopLeftSegment": 0.9}
+
+
+def test_run_chain_empty_factors_fall_back_to_stored_shading():
+    sim, captured = _shading_sim(stale={"PlantTopLeftSegment": 0.2}, fresh={})
+
+    sim._run_chain(_veg_frame(), publish=False)
+
+    (segment,) = captured["segments"]
+    assert segment.shade_factor == pytest.approx(0.2)
+    assert sim._segment_shade == {"PlantTopLeftSegment": 0.2}
+
+
+def test_run_chain_without_ground_shading_uses_stored_shading():
+    sim, captured = _shading_sim(stale={"PlantTopLeftSegment": 0.2}, fresh={})
+    sim.ground_shading = None
+
+    sim._run_chain(_veg_frame(), publish=False)
+
+    (segment,) = captured["segments"]
+    assert segment.shade_factor == pytest.approx(0.2)
+    assert sim._segment_shade == {"PlantTopLeftSegment": 0.2}

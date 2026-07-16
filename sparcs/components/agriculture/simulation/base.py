@@ -610,19 +610,27 @@ class FieldSimulation(Component):
         """
         df = self._prepare_weather(weather)
         df = self._populate_vegetation(df, publish=publish)
+        # Fresh factors feed this run either way; only published runs may update
+        # the stored field state (a publish=False forecast replay must not leak
+        # its shading into the live tick, nor run on the live tick's factors).
+        segment_shade = self._segment_shade
         if self.ground_shading is not None:
             seg_factors = self.ground_shading.evaluate(df, publish=publish)
-            if publish and seg_factors:
-                self._segment_shade = dict(seg_factors)
-        segments = self._build_segments(df)
+            if seg_factors:
+                segment_shade = dict(seg_factors)
+                if publish:
+                    self._segment_shade = segment_shade
+        segments = self._build_segments(df, segment_shade)
         return self.evapotranspiration.evaluate(df, segments, publish=publish)
 
-    def _build_segments(self, df: pd.DataFrame) -> list[SegmentProperties]:
+    def _build_segments(self, df: pd.DataFrame, segment_shade: dict[str, float]) -> list[SegmentProperties]:
         """Build the per-segment property list for ET evaluation.
 
         Canopy segments use bulk vegetation state; bare-soil segments use the
         ``bare_*`` config values. Returns a single ``_bulk`` segment when no
-        soil mesh is attached.
+        soil mesh is attached. ``segment_shade`` carries the shade factors for
+        the run being evaluated (a forecast replay passes its own, not the
+        stored live-tick state).
         """
         canopy_lai = float(df[self.LAI].iloc[-1])
         canopy_plant_height = float(df[self.PLANT_HEIGHT].iloc[-1])
@@ -654,7 +662,7 @@ class FieldSimulation(Component):
                     plant_height=canopy_plant_height if is_canopy else self.bare_plant_height,
                     ndvi=canopy_ndvi if is_canopy else self.bare_ndvi,
                     roughness=canopy_roughness if is_canopy else self.bare_roughness,
-                    shade_factor=float(self._segment_shade.get(name, 1.0)),
+                    shade_factor=float(segment_shade.get(name, 1.0)),
                     face_length=float(soil.segment_face_length(name)),
                     is_canopy=is_canopy,
                 )
