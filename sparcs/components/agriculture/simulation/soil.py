@@ -180,6 +180,12 @@ class SoilSimulation(SoilBase):
     # skipped: a column that only appears on failure cannot be dashboarded.
     WALK_SKIPPED_S = Constant(float, "skipped_s", "Skipped Walk Duration (dt_min Unsolvable)", "s", context="water")
 
+    # Count of consecutive fully-stalled ticks (every weather chunk in the
+    # window empty/invalid) that PRECEDED the tick committing this row; 0.0 in
+    # steady state, mirrored down from FieldSimulation._on_tick because
+    # _record_diagnostics never runs during a stall itself (issue 19/W2.1).
+    WEATHER_STALL = Constant(float, "weather_stall", "Consecutive Weather-Stall Ticks", "-", context="water")
+
     _plot_config: Optional[plot_style.PlotConfig] = None
 
     # Irrigation strip fluxes above this are almost certainly a unit or
@@ -194,6 +200,9 @@ class SoilSimulation(SoilBase):
     _last_simulated_at: Optional[pd.Timestamp] = None
     _simulating: bool = False
     _strip_flux_warned: bool = False
+    # Mirrored down from FieldSimulation._on_tick before any chunk in a tick can
+    # commit a row (object.__new__ safety: never set -> 0.0, steady state).
+    _weather_stall_ticks: float = 0.0
 
     # Q11: dedicated PDE-state lock serializing advance()'s PDE-mutating span
     # against apply_state_blob (NOT FieldSimulation._tick_lock -- that guards
@@ -260,6 +269,7 @@ class SoilSimulation(SoilBase):
             SoilSimulation.WATER_BALANCE_RESIDUAL,
             SoilSimulation.WATER_ANCHOR,
             SoilSimulation.WALK_SKIPPED_S,
+            SoilSimulation.WEATHER_STALL,
         ):
             self.data.add(c, aggregate="mean", logger={"enabled": True})
 
@@ -609,9 +619,10 @@ class SoilSimulation(SoilBase):
         skipped_s: float,
     ) -> dict[str, float]:
         """Write the seven per-callback flux-density channels [kg/(m²·h)], the
-        skipped-at-dt_min diagnostics channel, and sample probes."""
+        skipped-at-dt_min and weather-stall diagnostics channels, and sample probes."""
         diagnostics = self._compute_diagnostics(rates, delta_storage, elapsed_s, clip)
         diagnostics[SoilSimulation.WALK_SKIPPED_S.key] = skipped_s
+        diagnostics[SoilSimulation.WEATHER_STALL.key] = float(getattr(self, "_weather_stall_ticks", 0.0))
         for key, value in diagnostics.items():
             self.data[key].set(now, value)
         self._sample_probes(now)

@@ -52,6 +52,11 @@ _LAI_BY_TYPE: dict[str, list[float]] = {
     "apple": [0.2, 0.4, 1.2, 2.5, 3.0, 3.2, 3.0, 2.8, 2.0, 1.0, 0.5, 0.2],
 }
 
+# Consecutive fully-stalled ticks (see FieldSimulation._on_tick) that escalate
+# the per-tick WARNING to a single ERROR -- logged once at the crossing
+# (count == N), not on every tick after.
+_WEATHER_STALL_ERROR_TICKS: int = 3
+
 
 class FieldSimulation(Component):
     TYPE: str = "field_simulation"
@@ -117,9 +122,17 @@ class FieldSimulation(Component):
     _tick_lock: Optional[threading.Lock] = None
     _watchdog_timer: Optional[threading.Timer] = None
 
+    # Consecutive ticks (ending with this one) where every chunk in the window
+    # was empty/invalid; reset to 0 by any tick that processes >=1 chunk. Class
+    # default covers object.__new__ fixtures that never assign it.
+    _weather_stall_ticks: int = 0
+
     _weather_channels: Optional[Channels] = None
     _required_weather_keys: tuple[str, ...] = ()
     _weather_default_warned: set[str]
+    # Missing/all-NaN required columns from the most recent invalid chunk (set
+    # by _weather_frame_valid); surfaced in the stall WARNING.
+    _last_invalid_weather_columns: Optional[list[str]] = None
 
     # Weather keys filled with a default when the feed doesn't supply them (one-shot warning per key).
     _WEATHER_DEFAULTS: dict[str, float] = {
@@ -610,7 +623,10 @@ class FieldSimulation(Component):
 
         Reads in daily chunks so ``simulation_state`` persists as the frontier
         ratchets and a crash redoes at most one chunk. Advances only as far as
-        the weather feed reaches; gaps self-heal on later ticks.
+        the weather feed reaches; gaps self-heal on later ticks. A tick where
+        every chunk in the window is empty/invalid is a stall: WARNING per
+        stalled tick, ERROR at the Nth (``_WEATHER_STALL_ERROR_TICKS``)
+        consecutive stall -- self-heal semantics are unchanged.
         """
         if self.soil_simulation is None or self.evapotranspiration is None or self._weather_channels is None:
             return
@@ -626,16 +642,29 @@ class FieldSimulation(Component):
             frontier = frontier.tz_convert(cutoff.tz)
         start = frontier if frontier is not None else cutoff - pd.Timedelta(minutes=self._interval_min)
         if start >= cutoff:
+            # No chunk is read on a pre-chunk no-op tick: not a stall, counter untouched.
             return
+        # Mirror the tally of consecutive stalls that PRECEDED this tick onto the
+        # soil child before any chunk below can commit a row: SoilSimulation
+        # ._record_diagnostics never runs during a stall (advance()/simulate_loop()
+        # are the only commit path), so a row this tick commits must carry the
+        # count as of before this tick's own outcome is known. Plain setattr --
+        # works on the _tick_sim SimpleNamespace stub too (no self.data there).
+        self.soil_simulation._weather_stall_ticks = float(self._weather_stall_ticks)
         # Shutdown-only cancel (B8): threaded into walk_window's existing cancel
         # param so a grinding walk exits promptly instead of blocking
         # _stop_tick_thread's 30s join. None outside a running tick thread (e.g.
         # object.__new__ test fixtures that never start it), so those are unaffected.
         cancel = self._tick_interrupt.is_set if self._tick_interrupt is not None else None
+        processed = False
+        invalid_detail = None
         for chunk_start, chunk_end in self._iter_day_chunks(start, cutoff):
             weather = self._read_weather_span(chunk_start, chunk_end)
             if weather.empty or not self._weather_frame_valid(weather):
+                if not weather.empty:
+                    invalid_detail = self._last_invalid_weather_columns
                 continue
+            processed = True
             et_data, seg_et = self._run_chain(weather)
             et_data[SoilSimulation.IRRIGATION_FLOW_LPM] = self._irrigation_flow_lpm(
                 chunk_start, chunk_end, et_data.index
@@ -648,6 +677,35 @@ class FieldSimulation(Component):
                 self.soil_simulation.advance(et_data, et_data.index[-1], seg_et, cancel=cancel)
             else:
                 self.soil_simulation.simulate_loop(et_data, seg_et, cancel=cancel)
+
+        if processed:
+            self._weather_stall_ticks = 0
+        else:
+            # Fully-stalled tick: every chunk was empty/invalid, the frontier did
+            # not move. Visibility only -- gaps still self-heal on later ticks.
+            self._weather_stall_ticks += 1
+            invalid_note = ""
+            if invalid_detail:
+                invalid_note = f" Last invalid-frame cause: columns missing/all-NaN: {invalid_detail}."
+            logger.warning(
+                "%s: weather stall (window=%s..%s, frontier=%s): every chunk was empty or "
+                "invalid; the frontier has not advanced (consecutive stalled ticks=%d).%s",
+                self.name,
+                start,
+                cutoff,
+                frontier if frontier is not None else "none (no prior advance)",
+                self._weather_stall_ticks,
+                invalid_note,
+            )
+            if self._weather_stall_ticks == _WEATHER_STALL_ERROR_TICKS:
+                logger.error(
+                    "%s: weather feed has stalled for %d consecutive ticks (window=%s..%s); "
+                    "soil simulation has not advanced.",
+                    self.name,
+                    self._weather_stall_ticks,
+                    start,
+                    cutoff,
+                )
 
         # The predictor's own interval/offset gate decides whether a roll-out runs.
         new_frontier = self.soil_simulation._last_simulated_at
@@ -761,6 +819,8 @@ class FieldSimulation(Component):
             if k not in self._OPTIONAL_WEATHER_KEYS and (k not in frame.columns or frame[k].isna().all())
         ]
         if missing:
+            # Stashed for _on_tick's stall WARNING (missing-column detail).
+            self._last_invalid_weather_columns = missing
             logger.debug(
                 "%s: skipping chunk; weather columns missing or all-NaN: %s",
                 self.name,

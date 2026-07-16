@@ -48,6 +48,8 @@ ClipDiagnostics = _soil_core.ClipDiagnostics
         # B7: skipped-at-dt_min seconds; bare key is the SQL column, context
         # namespaces the global Constant registry like every sibling above.
         (SoilSimulation.WALK_SKIPPED_S, "skipped_s", "water_skipped_s"),
+        # W2.1: consecutive weather-stall ticks preceding the committing tick.
+        (SoilSimulation.WEATHER_STALL, "weather_stall", "water_weather_stall"),
     ],
 )
 def test_diagnostic_constants_use_short_keys_with_water_registry_id(constant, expected_key, expected_id):
