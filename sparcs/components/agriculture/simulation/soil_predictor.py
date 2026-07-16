@@ -22,7 +22,6 @@ Dash/debugging but are no longer logged.
 from __future__ import annotations
 
 import datetime
-import io
 import itertools
 import logging
 import multiprocessing
@@ -1119,7 +1118,7 @@ class SoilPredictor(SoilBase):
     ) -> tuple[
         list[pd.Timestamp],
         dict[str, list[float]],
-        dict[pd.Timestamp, np.ndarray],
+        dict[pd.Timestamp, tuple[Optional[np.ndarray], Optional[bytes]]],
         dict[str, list[float]],
     ]:
         """Load IC into the predictor PDE and integrate over the forecast horizon.
@@ -1141,7 +1140,7 @@ class SoilPredictor(SoilBase):
     ) -> tuple[
         list[pd.Timestamp],
         dict[str, list[float]],
-        dict[pd.Timestamp, np.ndarray],
+        dict[pd.Timestamp, tuple[Optional[np.ndarray], Optional[bytes]]],
         dict[str, list[float]],
     ]:
         """Full-capture solve of ONE watering candidate: load the IC and integrate
@@ -1796,7 +1795,7 @@ class SoilPredictor(SoilBase):
     ) -> tuple[
         list[pd.Timestamp],
         dict[str, list[float]],
-        dict[pd.Timestamp, np.ndarray],
+        dict[pd.Timestamp, tuple[Optional[np.ndarray], Optional[bytes]]],
         dict[str, list[float]],
     ]:
         """Step the predictor PDE through every (t, t+Δt) forecast interval.
@@ -1812,17 +1811,26 @@ class SoilPredictor(SoilBase):
 
         Returns ``(timestamps, trajectories, snapshots, diagnostics)``.
         ``diagnostics`` values are kg/(m²·h) flux densities; NaN at the IC row (no interval yet).
+        ``snapshots`` values are ``(plot_array, state_blob)`` pairs -- see the
+        ``snapshots`` capture rationale below.
         """
         on_intervals = flow_schedule or []
         idx = et_data.index
         timestamps: list[pd.Timestamp] = []
         trajectories: dict[str, list[float]] = {p.channel_id: [] for p in self._probes}
-        snapshots: dict[pd.Timestamp, np.ndarray] = {}
+        snapshots: dict[pd.Timestamp, tuple[Optional[np.ndarray], Optional[bytes]]] = {}
         diagnostics: dict[str, list[float]] = {c.key: [] for c in _DIAGNOSTIC_CONSTANTS}
         # One snapshot dict captured at the UNION of the plot and state cadences; the
         # per-sink subsets are re-derived in _publish_results (_cadence_subset). Plot
         # and state have independent intervals, so a snapshot is taken whenever either
-        # is due, and each sink writes only its own due timestamps.
+        # is due, and each sink writes only its own due timestamps. Each entry is a
+        # ``(plot_array, state_blob)`` pair: the plot sink keeps the cheap
+        # ``snapshot()`` array (fine for rendering -- it already excludes the
+        # surface_h ponds); the state sink now captures ``save_state_blob()`` bytes
+        # so the FULL solver state -- including the surface_h ponds that
+        # ``snapshot()``/``set_state`` drop -- round-trips through
+        # ``load_state_blob``/``apply_state_blob``. A timestamp due for only
+        # one sink leaves the other half of the pair ``None``.
         plot_interval = self._plot_config.interval if self._plot_config is not None else None
         last_plot_ts: Optional[pd.Timestamp] = None
         last_state_ts: Optional[pd.Timestamp] = None
@@ -1836,7 +1844,10 @@ class SoilPredictor(SoilBase):
             state_due = self._save_state and plot_style.render_due(last_state_ts, ts, self._state_freq)
             if not (plot_due or state_due):
                 return
-            snapshots[ts] = self._pde.snapshot()
+            snapshots[ts] = (
+                self._pde.snapshot() if plot_due else None,
+                self._pde.save_state_blob() if state_due else None,
+            )
             if plot_due:
                 last_plot_ts = ts
             if state_due:
@@ -1906,8 +1917,16 @@ class SoilPredictor(SoilBase):
 
         if capture_snapshots and timestamps:
             final_ts = timestamps[-1]
-            if final_ts not in snapshots:
-                snapshots[final_ts] = self._pde.snapshot()
+            # _cadence_subset force-keeps the last index entry for BOTH sinks (the
+            # forecast's final frame is always persisted), regardless of whether
+            # that tick was naturally plot_due/state_due above -- so make sure
+            # whichever half(s) a due-enabled sink still needs are filled in here.
+            final_array, final_blob = snapshots.get(final_ts, (None, None))
+            if plot_interval is not None and final_array is None:
+                final_array = self._pde.snapshot()
+            if self._save_state and final_blob is None:
+                final_blob = self._pde.save_state_blob()
+            snapshots[final_ts] = (final_array, final_blob)
 
         return timestamps, trajectories, snapshots, diagnostics
 
@@ -1946,7 +1965,7 @@ class SoilPredictor(SoilBase):
         trajectories: dict[str, list[float]],
         probes: list[ProbeSpec],
         timestamps: list[pd.Timestamp],
-        snapshots: dict[pd.Timestamp, np.ndarray],
+        snapshots: dict[pd.Timestamp, tuple[Optional[np.ndarray], Optional[bytes]]],
         diagnostics: dict[str, list[float]],
         forecast_creation: pd.Timestamp,
     ) -> Optional[tuple[pd.DatetimeIndex, list[bytes]]]:
@@ -1958,7 +1977,9 @@ class SoilPredictor(SoilBase):
 
         ``snapshots`` is captured at the union of the plot and state cadences;
         ``_cadence_subset`` re-derives each sink's own timestamps so the
-        ``[plot] interval`` and ``[state] interval`` stay independent."""
+        ``[plot] interval`` and ``[state] interval`` stay independent. Each value
+        is a ``(plot_array, state_blob)`` pair (see ``_integrate_horizon``); this
+        method reads only the half its own sink needs."""
         if not timestamps:
             return None
 
@@ -1992,7 +2013,7 @@ class SoilPredictor(SoilBase):
 
         if self._save_state:
             state_index = self._cadence_subset(full_index, self._state_freq)
-            state_values = [self._encode_state(snapshots[t]) for t in state_index]
+            state_values = [self._encode_state(snapshots[t][1]) for t in state_index]
             self.data[self._STATE_CHANNEL_KEY].set(
                 state_index[0],
                 pd.Series(state_values, index=state_index, dtype=object),
@@ -2003,7 +2024,7 @@ class SoilPredictor(SoilBase):
             plot_values: list[bytes] = []
             for t in plot_index:
                 try:
-                    plot_values.append(self._render_snapshot_png(snapshots[t], t))
+                    plot_values.append(self._render_snapshot_png(snapshots[t][0], t))
                 except Exception:  # noqa: BLE001
                     logger.exception(
                         "%s: predict_plot render failed at %s; skipping remaining plot snapshots this tick.",
@@ -2439,10 +2460,21 @@ class SoilPredictor(SoilBase):
             return None
 
     @staticmethod
-    def _encode_state(rel_sat: np.ndarray) -> bytes:
-        buf = io.BytesIO()
-        np.savez(buf, rel_sat=rel_sat)
-        return buf.getvalue()
+    def _encode_state(state_blob: bytes) -> bytes:
+        """Pass through the ``save_state_blob`` bytes captured for the state sink.
+
+        ``_maybe_snapshot`` (see ``_integrate_horizon``) captures
+        ``self._pde.save_state_blob()`` directly for the state-due half of each
+        snapshot pair, so the value reaching this method is already the fully-
+        encoded npz blob ``load_state_blob``/``apply_state_blob`` expect (rel_sat +
+        rel_sat_old + the surface pond state) -- there is nothing left to encode.
+        Kept as a trivially-wrapping staticmethod (rather than inlined at the
+        ``_publish_results`` call site) purely so tests can still intercept the
+        state sink's published value by monkeypatching this name (see
+        test_soil_predictor_image_table.py's
+        test_publish_results_plot_and_state_use_independent_cadences).
+        """
+        return state_blob
 
     def _render_snapshot_png(
         self, rel_sat: np.ndarray, sim_t: pd.Timestamp, *, title: str = "Predicted relative saturation"

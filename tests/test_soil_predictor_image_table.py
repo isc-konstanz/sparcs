@@ -210,7 +210,7 @@ def test_publish_results_returns_rendered_plot_for_reuse(monkeypatch):
     )
 
     index = pd.date_range("2026-07-03 02:00", periods=2, freq="6h", tz=_TZ)
-    snapshots = {index[0]: np.zeros(3), index[1]: np.zeros(3)}
+    snapshots = {index[0]: (np.zeros(3), None), index[1]: (np.zeros(3), None)}
     diagnostics = {c.key: [float("nan"), float("nan")] for c in soil_predictor._DIAGNOSTIC_CONSTANTS}
 
     result = predictor._publish_results([], [], list(index), snapshots, diagnostics, index[0])
@@ -236,7 +236,7 @@ def test_publish_results_returns_none_when_plotting_off(monkeypatch):
     monkeypatch.setattr(SoilPredictor, "data", property(lambda self: fake_data))
 
     index = pd.date_range("2026-07-03 02:00", periods=2, freq="6h", tz=_TZ)
-    snapshots = {index[0]: np.zeros(3)}
+    snapshots = {index[0]: (np.zeros(3), None)}
     diagnostics = {c.key: [float("nan"), float("nan")] for c in soil_predictor._DIAGNOSTIC_CONSTANTS}
 
     assert predictor._publish_results([], [], list(index), snapshots, diagnostics, index[0]) is None
@@ -263,7 +263,7 @@ def test_publish_results_returns_none_when_render_fails(monkeypatch):
     monkeypatch.setattr(SoilPredictor, "_render_snapshot_png", _boom)
 
     index = pd.date_range("2026-07-03 02:00", periods=2, freq="6h", tz=_TZ)
-    snapshots = {index[0]: np.zeros(3), index[1]: np.zeros(3)}
+    snapshots = {index[0]: (np.zeros(3), None), index[1]: (np.zeros(3), None)}
     diagnostics = {c.key: [float("nan"), float("nan")] for c in soil_predictor._DIAGNOSTIC_CONSTANTS}
 
     assert predictor._publish_results([], [], list(index), snapshots, diagnostics, index[0]) is None
@@ -317,7 +317,10 @@ def test_publish_results_plot_and_state_use_independent_cadences(monkeypatch):
     monkeypatch.setattr(SoilPredictor, "_encode_state", staticmethod(lambda arr: b"state"))
 
     index = pd.date_range("2026-07-03 00:00", periods=5, freq="1h", tz=_TZ)  # hourly union
-    snapshots = {t: np.zeros(3) for t in index}
+    # New (plot_array, state_blob) tuple shape (see _integrate_horizon/_maybe_snapshot);
+    # both halves populated here since this test drives _publish_results directly
+    # (bypassing the real capture) and asserts BOTH sinks' independent cadences.
+    snapshots = {t: (np.zeros(3), b"blob") for t in index}
     diagnostics = {c.key: [float("nan")] * len(index) for c in soil_predictor._DIAGNOSTIC_CONSTANTS}
 
     predictor._publish_results([], [], list(index), snapshots, diagnostics, index[0])

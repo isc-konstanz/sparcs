@@ -1238,7 +1238,11 @@ class SoilPDECore:
                 "stale blob from a different mesh configuration"
             )
         self.rel_sat.setValue(rel_sat)
-        self.rel_sat._old.setValue(arrays["rel_sat_old"])
+        # Legacy blobs (pre soil-refactor B3) wrote ONLY `rel_sat` via
+        # `np.savez(buf, rel_sat=rel_sat)` -- no `rel_sat_old`, no surface fields.
+        # Fall back to `rel_sat` itself so those pre-fix debug blobs stay loadable.
+        rel_sat_old = arrays["rel_sat_old"] if "rel_sat_old" in arrays.files else rel_sat
+        self.rel_sat._old.setValue(rel_sat_old)
         if "surface_names" in arrays.files and "surface_h" in arrays.files:
             names = arrays["surface_names"]
             values = arrays["surface_h"]
