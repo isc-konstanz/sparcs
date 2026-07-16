@@ -70,6 +70,61 @@ def design_flow_lpm(nozzle_count: int, nozzle_flow_lph: float) -> float:
     return nozzle_count * nozzle_flow_lph / 60.0
 
 
+def flow_m3s_per_m(flow_lpm: float, total_drip_line_length_m: float) -> float:
+    """Whole-field flow [l/min] normalized to m³/s per out-of-plane metre of row.
+
+    The single source for the 60_000.0 l/min -> m³/s conversion combined with
+    the total-drip-line-length spread (see ``SoilSimulation.configure``'s
+    ``total_drip_line_length_m`` docstring): ``SoilSimulation._compute_flux_rates``
+    feeds the metered flow through this, and ``SoilPredictor._derive_flow_m3s``
+    feeds the layout-derived ``design_flow_lpm`` through the SAME expression, so
+    the two normalization sites can never diverge.
+    """
+    return flow_lpm / (60_000.0 * total_drip_line_length_m)
+
+
+# Shared drip-layout defaults; a [soil_simulation.drip] block that's present but
+# omits a key falls back to these, and so does an absent [soil_predictor.drip]
+# key with no sim DripConfig to inherit from (see DripConfig, SoilPredictor's
+# per-key override). A meaningful state-driven feed needs the sim's block set
+# explicitly (see DripConfig.explicit) -- these keep the arithmetic
+# well-defined, not correct for any real field.
+_DEFAULT_NOZZLE_COUNT: int = 1
+_DEFAULT_NOZZLE_FLOW_LPH: float = 1.0
+
+
+@dataclass
+class DripConfig:
+    """Whole-field drip layout parsed ONCE from ``[soil_simulation.drip]``:
+    ``nozzle_count`` x ``nozzle_flow_lph``, and whether the block was
+    configured explicitly (not defaulted).
+
+    ``design_flow_lpm`` is derived at construction via the shared
+    :func:`design_flow_lpm` helper. ``explicit`` gates the live sim's
+    state-driven fallback feed (``FieldSimulation._validate_irrigation_input``
+    requires it before trusting the on/off state channel) -- a bare state
+    channel with no explicit block would otherwise silently roll at the
+    1-nozzle x 1-l/h placeholder.
+
+    ``SoilPredictor``'s own ``[soil_predictor.drip]`` is a PER-KEY override
+    against an already-resolved ``DripConfig``'s fields (same key-level-merge
+    idiom as ``PondingConfig``/``FeddesConfig``'s ``base`` parameter), rather
+    than a ``base`` parameter on this constructor: the sim's own
+    ``[soil_simulation.drip]`` is always a fresh whole-block parse against the
+    hardcoded nozzle defaults above, never inherited from anything.
+    """
+
+    def __init__(self, soil_block: Configurations):
+        # has_member() BEFORE get_member(..., ensure_exists=True) materializes
+        # the block -- checking after would always read True here (the same
+        # gotcha the pre-refactor base.py call site carried).
+        self.explicit: bool = soil_block.has_member("drip")
+        drip_block = soil_block.get_member("drip", defaults={}, ensure_exists=True)
+        self.nozzle_count: int = drip_block.get_int("nozzle_count", default=_DEFAULT_NOZZLE_COUNT)
+        self.nozzle_flow_lph: float = drip_block.get_float("nozzle_flow_lph", default=_DEFAULT_NOZZLE_FLOW_LPH)
+        self.design_flow_lpm: float = design_flow_lpm(self.nozzle_count, self.nozzle_flow_lph)
+
+
 @dataclass
 class SolveResult:
     """One Picard sweep loop's outcome.

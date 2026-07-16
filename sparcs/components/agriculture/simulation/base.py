@@ -25,9 +25,9 @@ from sparcs.components.weather import validate_meteo_inputs
 
 from ._soil import (
     _DEFAULT_BAY_WIDTH,
+    DripConfig,
     MeshConfig,
     PDEConfig,
-    design_flow_lpm,
     resolve_pde_config,
     top_segment_names_from_mesh,
 )
@@ -39,12 +39,6 @@ from .soil_predictor import SoilPredictor
 logger = logging.getLogger(__name__)
 
 _C = TypeVar("_C", bound=Component)
-
-# Drip design-flow defaults (mirror SoilPredictor's) used when a [soil_simulation.drip]
-# block is present but omits a key. A meaningful state-driven feed needs the block set
-# explicitly -- these keep the arithmetic well-defined, not correct for any real field.
-_DEFAULT_NOZZLE_COUNT: int = 1
-_DEFAULT_NOZZLE_FLOW_LPH: float = 1.0
 
 
 # Monthly LAI lookup tables keyed by `lai_type` config option.
@@ -94,6 +88,10 @@ class FieldSimulation(Component):
     _design_flow_lpm: float = 0.0
     # True only when [soil_simulation.drip] was declared explicitly (not defaulted).
     _drip_explicit: bool = False
+    # Metres of total drip-line the flow meter feeds (n_rows * row_length); see
+    # SoilSimulation.configure's total_drip_line_length_m docstring. 1.0 = no
+    # [soil_simulation] block (reads the metered value as already per-metre).
+    _total_drip_line_length_m: float = 1.0
     # Read-back so watering that started before a chunk still forces its first timesteps.
     _FLOW_LOOKBACK: pd.Timedelta = pd.Timedelta(days=1)
 
@@ -165,6 +163,7 @@ class FieldSimulation(Component):
 
         self._mesh_config: Optional[MeshConfig] = None
         self._soil_pde_config: Optional[PDEConfig] = None
+        self._drip_config: Optional[DripConfig] = None
         if configs.has_member(SoilSimulation.TYPE, includes=True):
             soil_block = configs.get_member(SoilSimulation.TYPE, defaults=defaults)
             mesh_block = soil_block.get_member("mesh", defaults={}, ensure_exists=True)
@@ -183,14 +182,19 @@ class FieldSimulation(Component):
             soil_block, model_block = SoilPredictor._resolve_model_block(configs)
             self._soil_pde_config = resolve_pde_config(soil_block, model_block)
 
-            # Drip design flow [l/min] for the state-driven feed (broken meter).
-            # has_member() is checked BEFORE ensure_exists=True materializes the block.
-            self._drip_explicit = soil_block.has_member("drip")
-            drip_block = soil_block.get_member("drip", defaults={}, ensure_exists=True)
-            self._design_flow_lpm = design_flow_lpm(
-                drip_block.get_int("nozzle_count", default=_DEFAULT_NOZZLE_COUNT),
-                drip_block.get_float("nozzle_flow_lph", default=_DEFAULT_NOZZLE_FLOW_LPH),
-            )
+            # Drip design flow -- ONE canonical parse of [soil_simulation.drip],
+            # so the predictor's own [soil_predictor.drip] override and the
+            # sim's state-driven fallback feed can never disagree on defaults.
+            self._drip_config = DripConfig(soil_block)
+            self._drip_explicit = self._drip_config.explicit
+            self._design_flow_lpm = self._drip_config.design_flow_lpm
+
+            # total_drip_line_length_m: eager fallback parse (mirrors the mesh
+            # seam above) from the SAME soil_block, same default as
+            # SoilSimulation.configure's own parse -- no duplicate positivity
+            # check here; the sim itself raises moments later, at
+            # SoilSimulation.configure() time (soil.py).
+            self._total_drip_line_length_m = float(soil_block.get("total_drip_line_length_m", default=1.0))
 
         self._register_segment_channels()
 
@@ -265,6 +269,38 @@ class FieldSimulation(Component):
             if soil_pde is not None:
                 return soil_pde
         return self._soil_pde_config
+
+    @property
+    def drip_config(self) -> Optional[DripConfig]:
+        """The parsed [soil_simulation.drip] layout -- ONE canonical resolution,
+        so the predictor's own [soil_predictor.drip] per-key override
+        (SoilPredictor.configure) and the sim's state-driven fallback feed can
+        never disagree on defaults.
+
+        No sim-side preference needed (unlike mesh_config/soil_pde_config): the
+        PARENT parses [soil_simulation.drip] itself in configure(), so this
+        always serves self._drip_config directly. getattr guards object.__new__
+        test instances that bypass configure() entirely.
+        """
+        return getattr(self, "_drip_config", None)
+
+    @property
+    def total_drip_line_length_m(self) -> float:
+        """Metres of total drip-line the flow meter feeds (n_rows * row_length);
+        see SoilSimulation.configure's total_drip_line_length_m docstring.
+
+        Same guard shape as mesh_config/soil_pde_config: prefers
+        SoilSimulation's live _total_drip_line_length_m once configured,
+        falling back to the eagerly-parsed copy built in configure(). Never
+        raises -- the sim's own positivity ValueError (soil.py) fires moments
+        later at SoilSimulation.configure() time; this fallback needs no
+        duplicate check.
+        """
+        if self.soil_simulation is not None:
+            length = getattr(self.soil_simulation, "_total_drip_line_length_m", None)
+            if length is not None:
+                return length
+        return self._total_drip_line_length_m
 
     @property
     def top_segment_names(self) -> list[str]:

@@ -708,9 +708,11 @@ watering_h_max_mm = 5.0    # emitter-pond cap on the watering strip; defaults to
                            # Irrigation ALWAYS ponds on the strip, even with enabled=false.
 ```
 
-The `SoilPredictor` grid roll-out (§11.1) adds its own block. It reuses
-`total_drip_line_length_m` from `[soil_simulation]` and the `[model]`
-block the PDE core uses; only the keys below are predictor-specific.
+The `SoilPredictor` grid roll-out (§11.1) adds its own block. `total_drip_line_length_m`
+and the `[model]` block are read from `[soil_simulation]` unchanged; `[drip]` is a
+PER-KEY override of the sim's resolved `[soil_simulation.drip]` (an unset key
+inherits the sim's value, same key-level-merge idiom as `[ponding]`/`[feddes]`).
+Only the keys below are predictor-specific.
 
 ```toml
 [soil_predictor]
@@ -726,7 +728,8 @@ max_windows     = 4              # fixed PK arity for the agri_field_forecast he
 logger          = "db"           # id of the SQL logger connector for the grid write
 decision_probes = ["root_20", "root_40"]  # subset of [soil_simulation.probes] keys
 
-  [soil_predictor.drip]          # derives the fixed on-flow
+  [soil_predictor.drip]          # per-key override of [soil_simulation.drip];
+                                 # an unset key inherits the sim's resolved value
     nozzle_flow_lph = 1.0        # per-nozzle output, L/h
     nozzle_count    = 31         # nozzles fed by the meter
 

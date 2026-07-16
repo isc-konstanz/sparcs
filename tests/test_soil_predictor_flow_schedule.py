@@ -13,10 +13,12 @@ directly off the class with no ``Component``/PDE instantiation needed.
 """
 
 import datetime
+from types import SimpleNamespace
 
 import pytest
 
 import pandas as pd
+from lories import Configurations
 
 soil_predictor = pytest.importorskip("sparcs.components.agriculture.simulation.soil_predictor")
 SoilPredictor = soil_predictor.SoilPredictor
@@ -51,6 +53,46 @@ def test_drip_flow_derivation_no_live_sim_dependency():
     )
     flow_lpm = 10 * 2.0 / 60.0
     assert flow_m3s == pytest.approx(flow_lpm / (60_000.0 * 5.0))
+
+
+# --- Predictor per-key drip override precedence (issue 14 Obligations) -------
+
+
+def _drip_block(tmp_dir: str, **values) -> Configurations:
+    """An already-materialized [soil_predictor.drip] member, as returned by
+    configs.get_member('drip', defaults={}, ensure_exists=True)."""
+    return Configurations.load("test.conf", conf_dir=tmp_dir, require=False, **values)
+
+
+def test_predictor_drip_key_wins_over_sim(tmp_path):
+    """(1) An explicit [soil_predictor.drip] key wins over the sim's DripConfig."""
+    sim_drip = SimpleNamespace(nozzle_count=31, nozzle_flow_lph=1.0)
+    drip_block = _drip_block(str(tmp_path), nozzle_count=10, nozzle_flow_lph=2.0)
+    assert SoilPredictor._resolve_drip_layout(drip_block, sim_drip) == (10, 2.0)
+
+
+def test_predictor_drip_unset_key_follows_sim(tmp_path):
+    """(2) A key the predictor does not restate inherits the sim's value."""
+    sim_drip = SimpleNamespace(nozzle_count=31, nozzle_flow_lph=1.0)
+    drip_block = _drip_block(str(tmp_path), nozzle_count=10)  # nozzle_flow_lph unset
+    assert SoilPredictor._resolve_drip_layout(drip_block, sim_drip) == (10, 1.0)
+
+
+def test_predictor_drip_no_block_inherits_sim_wholesale(tmp_path):
+    """(3) No [soil_predictor.drip] at all: both keys inherit the sim's DripConfig."""
+    sim_drip = SimpleNamespace(nozzle_count=31, nozzle_flow_lph=1.0)
+    drip_block = _drip_block(str(tmp_path))
+    assert SoilPredictor._resolve_drip_layout(drip_block, sim_drip) == (31, 1.0)
+
+
+def test_predictor_drip_no_sim_drip_falls_back_to_shared_defaults(tmp_path):
+    """sim_drip=None (no [soil_simulation] block to inherit from): falls back
+    to the shared _soil.py nozzle defaults, not a predictor-local placeholder."""
+    drip_block = _drip_block(str(tmp_path))
+    assert SoilPredictor._resolve_drip_layout(drip_block, None) == (
+        soil_predictor._DEFAULT_NOZZLE_COUNT,
+        soil_predictor._DEFAULT_NOZZLE_FLOW_LPH,
+    )
 
 
 # --- Window schedule builder -------------------------------------------------

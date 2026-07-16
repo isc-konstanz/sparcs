@@ -40,7 +40,10 @@ from sparcs.components.agriculture.simulation.soil import SoilSimulation
 
 from . import plot_render, plot_style
 from ._soil import (
+    _DEFAULT_NOZZLE_COUNT,
+    _DEFAULT_NOZZLE_FLOW_LPH,
     ClipDiagnostics,
+    DripConfig,
     FluxRates,
     MeshConfig,
     PDEConfig,
@@ -50,6 +53,7 @@ from ._soil import (
     apply_surface_forcing,
     design_flow_lpm,
     ensure_mesh,
+    flow_m3s_per_m,
     resolve_pde_config,
     resolve_probes,
 )
@@ -68,13 +72,6 @@ _DEFAULT_SNAPSHOT_INTERVAL: str = "1h"
 # a roll-out actually runs.
 _DEFAULT_INTERVAL_MIN: int = 1440
 _DEFAULT_OFFSET_MIN: int = 60
-
-# Drip-flow derivation defaults; mirrors the [soil_simulation] default of a
-# single already-per-metre line (SoilSimulation.configure's
-# total_drip_line_length_m) when a field has no [soil_predictor.drip] block.
-_DEFAULT_NOZZLE_FLOW_LPH: float = 1.0
-_DEFAULT_NOZZLE_COUNT: int = 1
-_DEFAULT_DRIP_LINE_LENGTH_M: float = 1.0
 
 # Candidate-set (ladder) defaults.
 _DEFAULT_COMBO_CAP: int = 16
@@ -389,10 +386,21 @@ class SoilPredictor(SoilBase):
                 "the sim's PDE config."
             )
 
+        # [soil_predictor.drip] is a PER-KEY override against the sim's
+        # resolved DripConfig: an unset key inherits the sim's value (key-level
+        # merge, same idiom as PondingConfig/FeddesConfig's `base` parameter)
+        # instead of a hardcoded placeholder. sim_drip is None only when the
+        # context has no [soil_simulation] block at all -- the mesh_config
+        # check above already raises before this line is reached in that case;
+        # _resolve_drip_layout falls back to the shared _soil.py defaults
+        # regardless, so this stays correct if that ever changes.
+        sim_drip = getattr(self.context, "drip_config", None)
         drip_block = configs.get_member("drip", defaults={}, ensure_exists=True)
-        nozzle_flow_lph = drip_block.get_float("nozzle_flow_lph", default=_DEFAULT_NOZZLE_FLOW_LPH)
-        nozzle_count = drip_block.get_int("nozzle_count", default=_DEFAULT_NOZZLE_COUNT)
-        total_drip_line_length_m = soil_block.get_float("total_drip_line_length_m", default=_DEFAULT_DRIP_LINE_LENGTH_M)
+        nozzle_count, nozzle_flow_lph = self._resolve_drip_layout(drip_block, sim_drip)
+        # total_drip_line_length_m: single parse lives on the sim (soil.py);
+        # consume it via the context property instead of re-parsing
+        # [soil_simulation] ourselves (mirrors mesh_config/soil_pde_config).
+        total_drip_line_length_m = self.context.total_drip_line_length_m
         self._flow_m3s = self._derive_flow_m3s(nozzle_count, nozzle_flow_lph, total_drip_line_length_m)
 
         self._windows = []
@@ -1188,6 +1196,24 @@ class SoilPredictor(SoilBase):
     # Watering schedule (pure)
 
     @staticmethod
+    def _resolve_drip_layout(
+        drip_block: Configurations,
+        sim_drip: Optional[DripConfig],
+    ) -> tuple[int, float]:
+        """Per-key override of ``[soil_predictor.drip]`` against the sim's
+        resolved ``DripConfig``: an unset key inherits the sim's value (same
+        key-level-merge idiom as ``PondingConfig``/``FeddesConfig``'s ``base``
+        parameter), rather than a hardcoded placeholder. ``sim_drip=None`` (no
+        ``[soil_simulation]`` block to inherit from) falls back to the shared
+        ``_soil.py`` nozzle defaults instead.
+        """
+        default_nozzle_count = sim_drip.nozzle_count if sim_drip is not None else _DEFAULT_NOZZLE_COUNT
+        default_nozzle_flow_lph = sim_drip.nozzle_flow_lph if sim_drip is not None else _DEFAULT_NOZZLE_FLOW_LPH
+        nozzle_count = drip_block.get_int("nozzle_count", default=default_nozzle_count)
+        nozzle_flow_lph = drip_block.get_float("nozzle_flow_lph", default=default_nozzle_flow_lph)
+        return nozzle_count, nozzle_flow_lph
+
+    @staticmethod
     def _derive_flow_m3s(
         nozzle_count: int,
         nozzle_flow_lph: float,
@@ -1198,9 +1224,10 @@ class SoilPredictor(SoilBase):
 
         The l/min core is the shared ``design_flow_lpm`` (also fed to the live sim
         when its physical meter is unavailable); here it is DERIVED from the layout
-        instead of read from the meter and normalized to m³/s per metre of row.
+        instead of read from the meter, then normalized to m³/s per metre of row via
+        the shared ``flow_m3s_per_m`` (also fed by ``SoilSimulation._compute_flux_rates``).
         """
-        return design_flow_lpm(nozzle_count, nozzle_flow_lph) / (60_000.0 * total_drip_line_length_m)
+        return flow_m3s_per_m(design_flow_lpm(nozzle_count, nozzle_flow_lph), total_drip_line_length_m)
 
     @staticmethod
     def _build_flow_schedule(

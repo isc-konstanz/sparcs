@@ -41,6 +41,7 @@ from ._soil import (
     SoilBase,
     WalkResult,
     ensure_mesh,
+    flow_m3s_per_m,
     resolve_pde_config,
     resolve_probe_from_sensor,
     resolve_probes,
@@ -503,7 +504,7 @@ class SoilSimulation(SoilBase):
             value = et_data[SoilSimulation.IRRIGATION_FLOW_LPM].iloc[-1]
             if pd.notna(value):
                 flow_lpm = float(value)
-        flow_m3s = flow_lpm / (60_000.0 * self._total_drip_line_length_m)
+        flow_m3s = flow_m3s_per_m(flow_lpm, self._total_drip_line_length_m)
         self._warn_absurd_strip_flux(flow_m3s)
 
         rain_flux = 0.0
