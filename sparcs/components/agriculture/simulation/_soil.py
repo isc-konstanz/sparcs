@@ -17,7 +17,7 @@ import io
 import logging
 import os
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Callable, Optional
 
 import gmsh
@@ -380,36 +380,44 @@ class FeddesConfig:
     # below ω_c total uptake = T_pot · ω / ω_c.
     omega_c: float = 1.0
 
+    @classmethod
+    def from_configs(cls, configs: Configurations, base: Optional[FeddesConfig] = None) -> FeddesConfig:
+        """Single parse site for every field: read ``configs`` against the
+        dataclass field default, or against ``base.<field>`` when ``base`` is
+        given — a key-level merge for a predictor overriding only some of the
+        sim's fields (see ``apply_surface_forcing``); an explicit key in
+        ``configs`` always wins over ``base``. ``root_distribution`` keeps its
+        ``.strip().lower()`` normalization on both the default and base paths.
+        """
+        self = cls()
+        for f in fields(cls):
+            default = f.default if base is None else getattr(base, f.name)
+            if f.type == "bool":
+                value = configs.get_bool(f.name, default=default)
+            elif f.type == "float":
+                value = float(configs.get(f.name, default=default))
+            elif f.type == "str":
+                value = str(configs.get(f.name, default=default))
+            else:
+                raise TypeError(f"FeddesConfig.from_configs: unmapped field type {f.type!r} for {f.name!r}")
+            if f.name == "root_distribution":
+                value = value.strip().lower()
+            setattr(self, f.name, value)
+        return self
+
     def __init__(self, configs: Optional[Configurations] = None, base: Optional[FeddesConfig] = None):
+        # Shim only -- no parse logic of its own. configs=None ignores base and
+        # returns the plain field defaults (does NOT go through from_configs);
+        # otherwise delegate to the single parse site and copy its resolved
+        # fields onto self (the shim takes no field kwargs, so it cannot just
+        # return from_configs' result).
         if configs is None:
-            self.enabled = False
-            self.anaerobic = False
-            self.p0_pf = 0.0
-            self.p1_pf = 1.0
-            self.p2_pf = 3.0
-            self.p3_pf = 4.2
-            self.root_distribution = "uniform"
-            self.root_decay_length = 0.3
-            self.omega_c = 1.0
+            for f in fields(self):
+                setattr(self, f.name, f.default)
             return
-        # base, when given, supplies the per-key parse default instead of the
-        # hardcoded defaults above -- a key-level merge for a predictor overriding
-        # only some of the sim's fields (see apply_surface_forcing).
-        self.enabled = configs.get_bool("enabled", default=False if base is None else base.enabled)
-        self.anaerobic = configs.get_bool("anaerobic", default=False if base is None else base.anaerobic)
-        self.p0_pf = float(configs.get("p0_pf", default=0.0 if base is None else base.p0_pf))
-        self.p1_pf = float(configs.get("p1_pf", default=1.0 if base is None else base.p1_pf))
-        self.p2_pf = float(configs.get("p2_pf", default=3.0 if base is None else base.p2_pf))
-        self.p3_pf = float(configs.get("p3_pf", default=4.2 if base is None else base.p3_pf))
-        self.root_distribution = (
-            str(configs.get("root_distribution", default="uniform" if base is None else base.root_distribution))
-            .strip()
-            .lower()
-        )
-        self.root_decay_length = float(
-            configs.get("root_decay_length", default=0.3 if base is None else base.root_decay_length)
-        )
-        self.omega_c = float(configs.get("omega_c", default=1.0 if base is None else base.omega_c))
+        resolved = FeddesConfig.from_configs(configs, base=base)
+        for f in fields(self):
+            setattr(self, f.name, getattr(resolved, f.name))
 
 
 def _alpha_feddes_per_cell(
@@ -472,22 +480,45 @@ class PondingConfig:
     h_max_mm: float = 5.0  # max rain-ponding depth before overflow [mm]
     watering_h_max_mm: float = 5.0  # max emitter-pond depth on the watering strip [mm]
 
+    @classmethod
+    def from_configs(cls, configs: Configurations, base: Optional[PondingConfig] = None) -> PondingConfig:
+        """Single parse site for every field: read ``configs`` against the
+        dataclass field default, or against ``base.<field>`` when ``base`` is
+        given. ``watering_h_max_mm`` keeps its dynamic base=None default: it
+        follows the just-resolved ``h_max_mm`` rather than its own field
+        default, so field declaration order (``enabled``, ``h_max_mm``,
+        ``watering_h_max_mm``) matters — ``h_max_mm`` resolves first. With
+        ``base`` given, that coupling does not apply — the default is
+        ``base``'s own resolved ``watering_h_max_mm``.
+        """
+        self = cls()
+        for f in fields(cls):
+            if base is not None:
+                default = getattr(base, f.name)
+            elif f.name == "watering_h_max_mm":
+                default = self.h_max_mm
+            else:
+                default = f.default
+            if f.type == "bool":
+                value = configs.get_bool(f.name, default=default)
+            elif f.type == "float":
+                value = float(configs.get(f.name, default=default))
+            elif f.type == "str":
+                value = str(configs.get(f.name, default=default))
+            else:
+                raise TypeError(f"PondingConfig.from_configs: unmapped field type {f.type!r} for {f.name!r}")
+            setattr(self, f.name, value)
+        return self
+
     def __init__(self, configs: Optional[Configurations] = None, base: Optional[PondingConfig] = None):
+        # Shim only -- no parse logic of its own; see FeddesConfig.__init__.
         if configs is None:
-            self.enabled = False
-            self.h_max_mm = 5.0
-            self.watering_h_max_mm = 5.0
+            for f in fields(self):
+                setattr(self, f.name, f.default)
             return
-        self.enabled = configs.get_bool("enabled", default=False if base is None else base.enabled)
-        self.h_max_mm = float(configs.get("h_max_mm", default=5.0 if base is None else base.h_max_mm))
-        if base is None:
-            # Dynamic default: an unset watering_h_max_mm follows the just-parsed
-            # h_max_mm (pinned by tests/test_soil_strip_ponding.py).
-            self.watering_h_max_mm = float(configs.get("watering_h_max_mm", default=self.h_max_mm))
-        else:
-            # base is fully resolved; the follow-h_max coupling above does not
-            # apply -- an unset key falls back to base's OWN resolved value.
-            self.watering_h_max_mm = float(configs.get("watering_h_max_mm", default=base.watering_h_max_mm))
+        resolved = PondingConfig.from_configs(configs, base=base)
+        for f in fields(self):
+            setattr(self, f.name, getattr(resolved, f.name))
 
 
 @dataclass
