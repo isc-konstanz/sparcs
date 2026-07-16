@@ -505,6 +505,11 @@ class FieldSimulation(Component):
         start = frontier if frontier is not None else cutoff - pd.Timedelta(minutes=self._interval_min)
         if start >= cutoff:
             return
+        # Shutdown-only cancel (B8): threaded into walk_window's existing cancel
+        # param so a grinding walk exits promptly instead of blocking
+        # _stop_tick_thread's 30s join. None outside a running tick thread (e.g.
+        # object.__new__ test fixtures that never start it), so those are unaffected.
+        cancel = self._tick_interrupt.is_set if self._tick_interrupt is not None else None
         for chunk_start, chunk_end in self._iter_day_chunks(start, cutoff):
             weather = self._read_weather_span(chunk_start, chunk_end)
             if weather.empty or not self._weather_frame_valid(weather):
@@ -518,9 +523,9 @@ class FieldSimulation(Component):
             self.soil_simulation.load_anchor_history(chunk_start, chunk_end)
             if self.soil_simulation._last_simulated_at is None:
                 # Cold start: one advance spins the PDE up at the newest row.
-                self.soil_simulation.advance(et_data, et_data.index[-1], seg_et)
+                self.soil_simulation.advance(et_data, et_data.index[-1], seg_et, cancel=cancel)
             else:
-                self.soil_simulation.simulate_loop(et_data, seg_et)
+                self.soil_simulation.simulate_loop(et_data, seg_et, cancel=cancel)
 
         # The predictor's own interval/offset gate decides whether a roll-out runs.
         new_frontier = self.soil_simulation._last_simulated_at

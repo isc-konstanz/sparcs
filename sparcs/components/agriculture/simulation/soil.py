@@ -13,7 +13,7 @@ import logging
 import os
 import threading
 from contextlib import nullcontext
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -40,6 +40,7 @@ from ._soil import (
     PDEConfig,
     ProbeSpec,
     SoilBase,
+    WalkResult,
     apply_surface_forcing,
     ensure_mesh,
     resolve_probe_from_sensor,
@@ -291,6 +292,7 @@ class SoilSimulation(SoilBase):
         et_data: pd.DataFrame,
         now: pd.Timestamp,
         seg_et: dict[str, pd.DataFrame],
+        cancel: Optional[Callable[[], bool]] = None,
     ) -> dict[str, float]:
         if self._simulating:
             logger.warning("%s: solve still running, skipping interval at %s", self.name, now)
@@ -331,13 +333,29 @@ class SoilSimulation(SoilBase):
                 storage_before = self._total_water() + self._pde.surface_water()
                 interval = self._plot_config.interval if self._plot_config is not None else None
                 clip_total = ClipDiagnostics()
-                skipped_s = self._walk(
+                walk_result = self._walk(
                     rates=rates,
                     window_s=elapsed_s,
                     clip_total=clip_total,
                     sim_t0=sim_t0,
                     plot_interval=interval,
+                    cancel=cancel,
                 )
+                if walk_result.cancelled:
+                    # Shutdown-only escape hatch (see walk_window): the walk exited
+                    # mid-window, so nothing about this tick is committed -- no
+                    # diagnostics, no state save, no anchor, no frontier ratchet.
+                    # The in-memory PDE field may already hold partial substep
+                    # progress through the window; that's fine, the process is
+                    # about to exit and a restart warm-starts from the last
+                    # persisted simulation_state, not this abandoned field.
+                    logger.info(
+                        "%s: walk cancelled at %s (shutdown in progress); discarding the "
+                        "partial window, frontier holds.",
+                        self.name,
+                        now,
+                    )
+                    return {}
 
                 # End-of-window render, interval-gated: simulate_loop calls advance
                 # once per (minute-resolution) weather row, so an unconditional render
@@ -356,7 +374,7 @@ class SoilSimulation(SoilBase):
                     delta_storage,
                     elapsed_s,
                     clip_total,
-                    skipped_s,
+                    walk_result.skipped_s,
                 )
                 self._save_state(now)
                 return diagnostics
@@ -367,6 +385,7 @@ class SoilSimulation(SoilBase):
         self,
         et_data: pd.DataFrame,
         seg_et: dict[str, pd.DataFrame],
+        cancel: Optional[Callable[[], bool]] = None,
     ) -> pd.DataFrame:
         """Step the soil PDE through ``et_data`` deterministically (offline mode).
 
@@ -383,7 +402,7 @@ class SoilSimulation(SoilBase):
             if ts <= self._last_simulated_at:
                 continue
             seg_et_step = {name: frame.loc[[ts]] for name, frame in seg_et.items()}
-            diagnostics = self.advance(et_data.loc[[ts]], ts, seg_et_step)
+            diagnostics = self.advance(et_data.loc[[ts]], ts, seg_et_step, cancel=cancel)
             if diagnostics:
                 rows[ts] = diagnostics
 
@@ -530,11 +549,14 @@ class SoilSimulation(SoilBase):
         clip_total: ClipDiagnostics,
         sim_t0: pd.Timestamp,
         plot_interval: Optional[pd.Timedelta],
-    ) -> float:
+        cancel: Optional[Callable[[], bool]] = None,
+    ) -> WalkResult:
         """Adaptive-dt walk over ``window_s``.
 
         Under-converged substeps at ``dt_min`` are accepted; non-finite ones are skipped.
-        Returns the total skipped seconds (``WalkResult.skipped_s``) for this window.
+        Returns the underlying ``WalkResult`` so the caller can persist
+        ``skipped_s`` and react to ``cancelled`` (the shutdown-only escape
+        hatch; see ``walk_window``).
         """
 
         def on_step(t_offset: float) -> None:
@@ -548,6 +570,7 @@ class SoilSimulation(SoilBase):
             rates=rates,
             window_s=window_s,
             accept_at_dt_min=True,
+            cancel=cancel,
             on_step=on_step,
             log_name=self.name,
         )
@@ -569,7 +592,7 @@ class SoilSimulation(SoilBase):
                 window_s,
                 result.retries,
             )
-        return result.skipped_s
+        return result
 
     def _record_diagnostics(
         self,

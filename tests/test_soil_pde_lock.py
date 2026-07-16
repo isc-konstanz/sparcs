@@ -23,6 +23,9 @@ import pandas as pd
 soil = pytest.importorskip("sparcs.components.agriculture.simulation.soil")
 SoilSimulation = soil.SoilSimulation
 
+_soil_core = pytest.importorskip("sparcs.components.agriculture.simulation._soil")
+WalkResult = _soil_core.WalkResult
+
 
 class _FakePDE:
     """Stand-in for the FiPy solver: records the restore call, no real math."""
@@ -65,13 +68,14 @@ def _stubbed_sim(pde, events, enter_walk, release_walk):
     sim._compute_flux_rates = lambda et_data, seg_et, elapsed_s: "rates-stub"
     sim._record_diagnostics = lambda *a, **kw: {}
 
-    def fake_walk(*, rates, window_s, clip_total, sim_t0, plot_interval):
+    def fake_walk(*, rates, window_s, clip_total, sim_t0, plot_interval, cancel=None):
         events.append("advance:enter_walk")
         enter_walk.set()
         # Blocks "mid-solve" until the test releases it, holding the lock the
         # whole time -- it is called from inside advance()'s locked span.
         release_walk.wait(timeout=2.0)
         events.append("advance:exit_walk")
+        return WalkResult()
 
     sim._walk = fake_walk
 

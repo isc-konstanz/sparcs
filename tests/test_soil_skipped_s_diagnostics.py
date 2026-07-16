@@ -77,14 +77,14 @@ def _walk_and_record(sim, now: pd.Timestamp) -> dict[str, float]:
     """Reproduce ``advance()``'s ``_walk`` -> ``_record_diagnostics`` thread."""
     rates = FluxRates(seg_evap={}, seg_transp={}, flow_m3s=0.0, rain_flux=0.0)
     clip_total = ClipDiagnostics()
-    skipped_s = sim._walk(
+    walk_result = sim._walk(
         rates=rates,
         window_s=600.0,
         clip_total=clip_total,
         sim_t0=now - pd.Timedelta(seconds=600),
         plot_interval=None,
     )
-    return sim._record_diagnostics(rates, now, 0.0, 600.0, clip_total, skipped_s)
+    return sim._record_diagnostics(rates, now, 0.0, 600.0, clip_total, walk_result.skipped_s)
 
 
 def test_skipped_s_persists_channel_and_logs_error(monkeypatch, caplog):

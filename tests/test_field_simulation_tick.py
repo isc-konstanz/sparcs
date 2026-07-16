@@ -104,8 +104,8 @@ def _tick_sim(frontier, intake_delay=pd.Timedelta(0), interval_min: int = 60):
     sim._weather_channels = object()
     sim.soil_simulation = types.SimpleNamespace(
         _last_simulated_at=frontier,
-        advance=lambda et, now, seg: None,
-        simulate_loop=lambda et, seg: None,
+        advance=lambda et, now, seg, cancel=None: None,
+        simulate_loop=lambda et, seg, cancel=None: None,
         load_anchor_history=lambda start, end: None,
     )
     sim._spans = []
@@ -175,7 +175,7 @@ def test_on_tick_advances_only_to_the_logged_data_frontier():
     sim._read_weather_span = lambda start, end: weather
     sim._run_chain = lambda frame: (frame, {})
     advanced = []
-    sim.soil_simulation.simulate_loop = lambda et, seg: advanced.append(et.index[-1])
+    sim.soil_simulation.simulate_loop = lambda et, seg, cancel=None: advanced.append(et.index[-1])
 
     sim._on_tick(pd.Timestamp("2026-07-12 12:00", tz="UTC"))
     assert advanced == [pd.Timestamp("2026-07-12 10:45", tz="UTC")]
@@ -188,8 +188,8 @@ def test_on_tick_cold_start_uses_single_advance():
     sim._read_weather_span = lambda start, end: weather
     sim._run_chain = lambda frame: (frame, {})
     calls = []
-    sim.soil_simulation.advance = lambda et, now, seg: calls.append(("advance", now))
-    sim.soil_simulation.simulate_loop = lambda et, seg: calls.append(("loop", et.index[-1]))
+    sim.soil_simulation.advance = lambda et, now, seg, cancel=None: calls.append(("advance", now))
+    sim.soil_simulation.simulate_loop = lambda et, seg, cancel=None: calls.append(("loop", et.index[-1]))
 
     sim._on_tick(pd.Timestamp("2026-07-12 12:00", tz="UTC"))
     assert calls == [("advance", pd.Timestamp("2026-07-12 11:45", tz="UTC"))]
@@ -261,7 +261,7 @@ def test_predict_runs_after_a_tick_that_advanced():
     sim._read_weather_span = lambda start, end: pd.DataFrame({"ghi": [1.0, 2.0, 3.0]}, index=index)
     sim._run_chain = lambda frame: (frame, {})
 
-    def _advance_frontier(et, seg):
+    def _advance_frontier(et, seg, cancel=None):
         sim.soil_simulation._last_simulated_at = et.index[-1]
 
     sim.soil_simulation.simulate_loop = _advance_frontier
@@ -417,6 +417,32 @@ def test_stop_tick_thread_joins_promptly():
     sim._stop_tick_thread()
     assert time.monotonic() - started < 5.0
     assert not thread.is_alive()
+
+
+def test_on_tick_threads_live_interrupt_callable_into_soil_calls():
+    """B8: _on_tick must hand advance/simulate_loop the LIVE bound method
+    _tick_interrupt.is_set (not its called-once bool, not None) so a shutdown
+    signalled mid-walk is observed by walk_window's cancel checks."""
+    sim = _tick_sim(frontier=pd.Timestamp("2026-07-12 10:00", tz="UTC"))
+    sim._tick_interrupt = threading.Event()
+    index = pd.date_range("2026-07-12 10:15", periods=2, freq="15min", tz="UTC")
+    weather = pd.DataFrame({"ghi": [100.0, 200.0]}, index=index)
+    sim._read_weather_span = lambda start, end: weather
+    sim._run_chain = lambda frame: (frame, {})
+    received = []
+    sim.soil_simulation.simulate_loop = lambda et, seg, cancel=None: received.append(cancel)
+
+    sim._on_tick(pd.Timestamp("2026-07-12 12:00", tz="UTC"))
+
+    # Bound methods have no stable identity (each access creates a new object),
+    # so pin the binding (__self__ is the live Event) plus live behavior --
+    # exactly what an accidental `.is_set()` (frozen bool) would break.
+    assert received
+    for c in received:
+        assert c.__self__ is sim._tick_interrupt
+    assert received[0]() is False  # live callable: reads the event's CURRENT state
+    sim._tick_interrupt.set()
+    assert received[0]() is True
 
 
 # --- slot-boundary watchdog + overrun summary --------------------------------
