@@ -111,7 +111,6 @@ def _parse_anchor_config(configs: Configurations) -> AnchorConfig:
         r_vertical=float(configs.get("r_vertical", default=0.2)),
         staleness=to_timedelta(configs.get("staleness", default="6h")),
         sensors=sensors,
-        min_tension_hpa=float(configs.get("min_tension_hpa", default=1.0)),
     )
 
 
