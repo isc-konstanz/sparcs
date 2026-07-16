@@ -50,6 +50,7 @@ from ._soil import (
     apply_surface_forcing,
     design_flow_lpm,
     ensure_mesh,
+    resolve_pde_config,
     resolve_probes,
 )
 
@@ -301,7 +302,7 @@ class SoilPredictor(SoilBase):
         ``[soil_predictor.feddes]`` (which then win via ``apply_surface_forcing``).
         """
         if configs.has_member("pde"):
-            ode_config = PDEConfig(configs.get_member("pde"), model_configs=model_configs)
+            return resolve_pde_config(configs, model_configs, inherit_forcing_from=soil_pde)
         elif configs.has_member("ponding") or configs.has_member("feddes"):
             # Shallow copy is sufficient: apply_surface_forcing only ever REPLACES
             # .ponding/.feddes wholesale (never mutates them in place), so a copy

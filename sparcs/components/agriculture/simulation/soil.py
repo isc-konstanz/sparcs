@@ -37,12 +37,11 @@ from ._soil import (
     ClipDiagnostics,
     FluxRates,
     MeshConfig,
-    PDEConfig,
     ProbeSpec,
     SoilBase,
     WalkResult,
-    apply_surface_forcing,
     ensure_mesh,
+    resolve_pde_config,
     resolve_probe_from_sensor,
     resolve_probes,
 )
@@ -240,9 +239,8 @@ class SoilSimulation(SoilBase):
                 "params under [pde] are ignored; move them into a [model] block.",
                 self.name,
             )
-        self._ode_config = PDEConfig(configs.get_member("pde", defaults={}), model_configs=model_block)
         # ponding + feddes are sibling blocks of [pde], not nested under it.
-        apply_surface_forcing(self._ode_config, configs)
+        self._ode_config = resolve_pde_config(configs, model_block)
 
         self._register_state_channel()
         for c in (

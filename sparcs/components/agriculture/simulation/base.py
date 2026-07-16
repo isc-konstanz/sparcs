@@ -27,8 +27,8 @@ from ._soil import (
     _DEFAULT_BAY_WIDTH,
     MeshConfig,
     PDEConfig,
-    apply_surface_forcing,
     design_flow_lpm,
+    resolve_pde_config,
     top_segment_names_from_mesh,
 )
 from .evapotranspiration import Evapotranspiration, SegmentProperties
@@ -181,11 +181,7 @@ class FieldSimulation(Component):
             # merge equivalent by construction; it returns the SAME stored member
             # object as the soil_block fetch above (get_member mutates in place).
             soil_block, model_block = SoilPredictor._resolve_model_block(configs)
-            self._soil_pde_config = PDEConfig(
-                soil_block.get_member("pde", defaults={}, ensure_exists=True),
-                model_configs=model_block,
-            )
-            apply_surface_forcing(self._soil_pde_config, soil_block)
+            self._soil_pde_config = resolve_pde_config(soil_block, model_block)
 
             # Drip design flow [l/min] for the state-driven feed (broken meter).
             # has_member() is checked BEFORE ensure_exists=True materializes the block.

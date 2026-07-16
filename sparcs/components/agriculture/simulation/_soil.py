@@ -531,6 +531,60 @@ def apply_surface_forcing(
     return ode_config
 
 
+def resolve_pde_config(
+    component_block: Configurations,
+    model_block: Configurations,
+    inherit_forcing_from: Optional[PDEConfig] = None,
+) -> PDEConfig:
+    """Build a component's ``PDEConfig`` and populate its surface forcing in one place.
+
+    Collapses the construct-then-``apply_surface_forcing`` sequence duplicated
+    across ``SoilSimulation.configure`` (site a), ``FieldSimulation.configure``'s
+    eager ``_soil_pde_config`` parse (site b), and
+    ``SoilPredictor._resolve_ode_config``'s own-``[pde]`` branch (site c) into
+    one canonical resolution, so the three sites can never resolve
+    ``[pde]``/``[model]``/forcing differently.
+
+    ``component_block.get_member("pde", defaults={}, ensure_exists=True)`` parses
+    against the component's own ``[pde]`` block -- a no-op merge when the block
+    already exists; harmlessly materializes an empty one when absent.
+
+    When ``inherit_forcing_from`` is given (site c inheriting the live sim's
+    forcing), ``cfg.ponding``/``cfg.feddes`` are seeded to
+    ``inherit_forcing_from``'s SAME objects (``is`` identity) BEFORE
+    ``apply_surface_forcing`` runs, and that call passes
+    ``ponding_base``/``feddes_base=inherit_forcing_from.ponding``/``.feddes`` so a
+    present sibling block key-merges against the sim's resolved values instead
+    of the hardcoded ``PondingConfig``/``FeddesConfig`` defaults.
+
+    The seed-before-apply ORDER is mandatory, not cosmetic: reversing it --
+    seeding AFTER calling ``apply_surface_forcing`` -- would let the plain
+    identity assignment clobber ``apply_surface_forcing``'s merge result
+    whenever the component states its OWN explicit ``[ponding]``/``[feddes]``
+    override, silently discarding that override in favour of the sim's object.
+    Seeding first means ``apply_surface_forcing``'s own-block branch (when
+    present) always has the last word; the seed only supplies the correct
+    fallback ``cfg.ponding``/``.feddes`` for the absent-block case, where
+    ``apply_surface_forcing`` is a no-op.
+
+    Sites with no ``inherit_forcing_from`` (sites a/b, fresh-parse semantics)
+    call plain ``apply_surface_forcing(cfg, component_block)``.
+    """
+    cfg = PDEConfig(component_block.get_member("pde", defaults={}, ensure_exists=True), model_configs=model_block)
+    if inherit_forcing_from is not None:
+        cfg.ponding = inherit_forcing_from.ponding
+        cfg.feddes = inherit_forcing_from.feddes
+        apply_surface_forcing(
+            cfg,
+            component_block,
+            ponding_base=inherit_forcing_from.ponding,
+            feddes_base=inherit_forcing_from.feddes,
+        )
+    else:
+        apply_surface_forcing(cfg, component_block)
+    return cfg
+
+
 # eq=False: identity equality avoids ambiguous numpy array comparisons.
 @dataclass(eq=False)
 class ProbeSpec:
