@@ -307,6 +307,25 @@ class SoilPredictor(SoilBase):
         apply_surface_forcing(ode_config, configs)
         return ode_config
 
+    @staticmethod
+    def _resolve_model_block(context_configs: Configurations) -> tuple[Configurations, Configurations]:
+        """Resolve the live sim's ``[soil_simulation]`` block and its effective ``[model]``.
+
+        The sim reads ``[model]`` through the ``[soil_simulation]`` cascade
+        (``Component._build_defaults(includes=["model", "plot"])``, base.py), so a
+        ``[soil_simulation.model]`` key-level override (e.g. a tuned ``k_s``) wins
+        over the field-level ``[model]`` block. The parent's ``_build_child``
+        defaults-merge normally performs that cascade before any child configures,
+        but the predictor must not assume it (standalone/unit-test construction,
+        ordering-defensive since it configures BEFORE the sim) -- so it resolves
+        the same key-level merge itself here: soil-level keys win, keys the soil
+        block does not restate fall back to the field-level block.
+        """
+        soil_block = context_configs.get_member(SoilSimulation.TYPE, defaults={}, ensure_exists=True)
+        field_model = context_configs.get_member("model", defaults={}, ensure_exists=True)
+        model_block = soil_block.get_member("model", defaults=field_model, ensure_exists=True)
+        return soil_block, model_block
+
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
 
@@ -334,8 +353,7 @@ class SoilPredictor(SoilBase):
         self._interval_min = configs.get_int("interval", default=_DEFAULT_INTERVAL_MIN)
         self._offset_min = configs.get_int("offset", default=_DEFAULT_OFFSET_MIN)
 
-        model_block = self.context.configs.get_member("model", defaults={}, ensure_exists=True)
-        soil_block = self.context.configs.get_member(SoilSimulation.TYPE, defaults={}, ensure_exists=True)
+        soil_block, model_block = self._resolve_model_block(self.context.configs)
         soil_pde = PDEConfig(
             soil_block.get_member("pde", defaults={}, ensure_exists=True),
             model_configs=model_block,
