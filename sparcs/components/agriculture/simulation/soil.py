@@ -34,6 +34,7 @@ from ._anchor import AnchorConfig, AnchorSensor, SensorOverrides, anchor_update,
 from ._soil import (
     SE_MAX,
     SE_MIN,
+    SOIL_SIMULATION_ALLOWED_KEYS,
     ClipDiagnostics,
     FluxRates,
     MeshConfig,
@@ -45,6 +46,7 @@ from ._soil import (
     resolve_pde_config,
     resolve_probe_from_sensor,
     resolve_probes,
+    warn_unknown_keys,
 )
 
 logger = logging.getLogger(__name__)
@@ -217,6 +219,7 @@ class SoilSimulation(SoilBase):
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
+        warn_unknown_keys(configs, SOIL_SIMULATION_ALLOWED_KEYS, "soil_simulation")
 
         # Q11: created per configured instance; object.__new__ instances
         # (bypassing configure()) keep the class-level None default and run

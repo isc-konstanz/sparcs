@@ -35,7 +35,7 @@ def _png_data_uri(data: bytes) -> str:
 
 def progress_image_channel(component, constant: Constant) -> Optional[Channel]:
     """The component's progress-image channel, or None when it was never
-    registered (the channel only exists when ``plot_progress`` is enabled)."""
+    registered (the channel only exists when ``[plot] enabled`` is true)."""
     if component is None:
         return None
     try:
@@ -57,7 +57,7 @@ class FieldSimulationPage(ComponentPage[FieldSimulation]):
         super().create_layout(layout)
 
         # Cards are pure image panels, so gate on the progress-image channel:
-        # with plot_progress = false the component never registers it.
+        # with [plot] enabled = false the component never registers it.
         shading_image = progress_image_channel(self._component.ground_shading, GroundShading.SHADING_PROGRESS_IMAGE)
         soil_image = progress_image_channel(self._component.soil_simulation, SoilSimulation.SOIL_PROGRESS_IMAGE)
 

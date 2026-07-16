@@ -26,12 +26,14 @@ from sparcs.components.weather import validate_meteo_inputs
 from ._schedule import parse_tick_schedule, slot_ceil
 from ._soil import (
     _DEFAULT_BAY_WIDTH,
+    FIELD_SIMULATION_ALLOWED_KEYS,
     DripConfig,
     MeshConfig,
     PDEConfig,
     ProbeSpec,
     resolve_pde_config,
     top_segment_names_from_mesh,
+    warn_unknown_keys,
 )
 from .evapotranspiration import Evapotranspiration, SegmentProperties
 from .ground_shading import GroundShading
@@ -136,6 +138,7 @@ class FieldSimulation(Component):
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
+        warn_unknown_keys(configs, FIELD_SIMULATION_ALLOWED_KEYS, "field_simulation")
         # "plot" cascades a field-level [plot] block (enabled + interval) to every
         # subcomponent as its default, overridable by the child's own [<type>.plot]
         # -- the same mechanism [model] already uses.

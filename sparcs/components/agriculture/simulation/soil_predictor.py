@@ -43,6 +43,7 @@ from ._schedule import parse_tick_schedule, slot_floor
 from ._soil import (
     _DEFAULT_NOZZLE_COUNT,
     _DEFAULT_NOZZLE_FLOW_LPH,
+    SOIL_PREDICTOR_ALLOWED_KEYS,
     ClipDiagnostics,
     DripConfig,
     FluxRates,
@@ -57,6 +58,7 @@ from ._soil import (
     flow_m3s_per_m,
     resolve_pde_config,
     resolve_probes,
+    warn_unknown_keys,
 )
 
 logger = logging.getLogger(__name__)
@@ -367,6 +369,7 @@ class SoilPredictor(SoilBase):
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
+        warn_unknown_keys(configs, SOIL_PREDICTOR_ALLOWED_KEYS, "soil_predictor")
 
         mesh_config = getattr(self.context, "mesh_config", None)
         if mesh_config is None:

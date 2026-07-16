@@ -93,7 +93,7 @@ class AgriculturalFieldPage(ComponentGroup[AgriculturalField]):
         soil = sim.soil_simulation
         shading = sim.ground_shading
         et = sim.evapotranspiration
-        # None when plot_progress = false: the component never registers the channel.
+        # None when [plot] enabled = false: the component never registers the channel.
         image_channel = progress_image_channel(soil, SoilSimulation.SOIL_PROGRESS_IMAGE)
         et_channel = et.data[Evapotranspiration.EVAPOTRANSPIRATION.key] if et is not None else None
         drainage_channel = soil.data[SoilSimulation.WATER_BOTTOM.key] if soil is not None else None

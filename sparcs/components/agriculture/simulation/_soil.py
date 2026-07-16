@@ -18,7 +18,7 @@ import logging
 import os
 import warnings
 from dataclasses import dataclass, field, fields
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Collection, Optional
 
 import gmsh
 
@@ -57,6 +57,157 @@ SE_MAX: float = 0.999  # effective-saturation ceiling for source clipping
 # Floor on (SE_MAX - Se) when linearizing the implicit irrigation intake;
 # bounds the penalty coefficient B when the strip is already at saturation.
 IRR_HEADROOM_EPS: float = 1e-4
+
+
+# -- config-key linting (issue 18-w1-7) --------------------------------------
+#
+# Shared keys/members every component's own top-level block may carry
+# regardless of which component reads it: `id`/`type`/`key`/`name` are read
+# off the raw block by `_Registrator._build_id`/`_build_key`/`_build_name`
+# BEFORE `configure()` ever runs (lories/_core/_registrator.py:40-86);
+# `Configurations.enabled` reads `enabled`/`disabled` (configurations.py:
+# 296-297); `Component._at_configure`/`_on_configure` load the `data`/
+# `components`/`connectors`/`converters` members (lories/components/
+# component.py:45-62). `logger` is also a bare top-level connector-id string
+# some components read directly (e.g. SoilPredictor's OWN [soil_predictor]
+# `.logger`, soil_predictor.py) and `connector` its per-channel equivalent --
+# both common enough across the chain's three sections to list once here
+# instead of three times.
+FRAMEWORK_ALLOWED_KEYS: frozenset[str] = frozenset(
+    {
+        "id",
+        "type",
+        "enabled",
+        "disabled",
+        "key",
+        "name",
+        "logger",
+        "connector",
+        "data",
+        "components",
+        "connectors",
+        "converters",
+    }
+)
+
+# Per-section allowlists: the framework set above PLUS what that component's
+# OWN configure() reads (top-level scalars and member/sub-table names alike
+# -- has_member() counts a bare bool as a member too, so the scan never
+# distinguishes scalar vs. member, only key NAME). Kept next to the shared
+# helper (not scattered per component module) so the three call sites and
+# their allowlists stay in one auditable place.
+
+# [soil_predictor] (soil_predictor.py): horizon/interval/offset/combo_cap/
+# grid_mode/parallel/max_workers/max_windows/threshold_hpa/decision_probes
+# top-level; plot/state/drip/windows/pde/ponding/feddes members.
+SOIL_PREDICTOR_ALLOWED_KEYS: frozenset[str] = FRAMEWORK_ALLOWED_KEYS | frozenset(
+    {
+        "horizon",
+        "interval",
+        "offset",
+        "combo_cap",
+        "grid_mode",
+        "parallel",
+        "max_workers",
+        "max_windows",
+        "threshold_hpa",
+        "decision_probes",
+        "plot",
+        "state",
+        "drip",
+        "windows",
+        "pde",
+        "ponding",
+        "feddes",
+    }
+)
+
+# [soil_simulation] (soil.py): total_drip_line_length_m/plot_structure/
+# discover_sensor_probes top-level; mesh/model/pde/ponding/feddes/anchor/
+# plot/probes members. `drip` (and `mesh`) are parsed by the PARENT
+# FieldSimulation (base.py), not soil.py itself -- allowlisted anyway since
+# they are real keys on the SAME configs object the child scans (get_member
+# mutates in place; base.py's eager mesh/model/pde/drip parses already
+# materialize those members before SoilSimulation.configure() ever runs).
+# `testing` is consumed by the standalone soil_tuning.py replay/calibration
+# harness (documented in soil_tuning.md), never by SoilSimulation.configure()
+# -- allowlisted so that tool's own block never produces a false
+# unknown-key warning.
+SOIL_SIMULATION_ALLOWED_KEYS: frozenset[str] = FRAMEWORK_ALLOWED_KEYS | frozenset(
+    {
+        "total_drip_line_length_m",
+        "plot_structure",
+        "discover_sensor_probes",
+        "mesh",
+        "model",
+        "pde",
+        "ponding",
+        "feddes",
+        "anchor",
+        "plot",
+        "probes",
+        "drip",
+        "testing",
+    }
+)
+
+# [field_simulation] (base.py): lai_type/roughness/plant_height/ndvi/
+# bare_lai/bare_roughness/bare_plant_height/bare_ndvi/bay_width/
+# intake_delay/interval/offset top-level; model/plot/soil_simulation/
+# soil_predictor/ground_shading/evapotranspiration members.
+FIELD_SIMULATION_ALLOWED_KEYS: frozenset[str] = FRAMEWORK_ALLOWED_KEYS | frozenset(
+    {
+        "lai_type",
+        "roughness",
+        "plant_height",
+        "ndvi",
+        "bare_lai",
+        "bare_roughness",
+        "bare_plant_height",
+        "bare_ndvi",
+        "bay_width",
+        "intake_delay",
+        "interval",
+        "offset",
+        "model",
+        "plot",
+        "soil_simulation",
+        "soil_predictor",
+        "ground_shading",
+        "evapotranspiration",
+    }
+)
+
+
+def warn_unknown_keys(configs: Configurations, known: Collection[str], section_name: str) -> None:
+    """Warn (never raise) once per unrecognized TOP-LEVEL key in ``configs``.
+
+    Call this at the TOP of ``configure()``, right after
+    ``super().configure(configs)`` and before any local ``get_member(...)``
+    call on ``configs`` itself. ``Configurations.__iter__``
+    (configurations.py:182) yields every key already in the backing dict --
+    inline TOML sub-tables included -- but a ``.d``-file-only member (e.g.
+    ``field_simulation.d/soil_predictor.conf`` with no inline
+    ``[soil_predictor]`` table in the parent file) is not one of those keys
+    until something calls ``get_member(key, ..., ensure_exists=True)``, which
+    adds it via ``_add_member``/``self[key] = ...``
+    (configurations.py:335-369). Scanning first means the check reads exactly
+    what was declared on disk, not keys configure() itself would go on to
+    materialize (several of which -- ``mesh``/``model``/``pde``/``drip``/
+    ``plot`` in this chain -- get added with ``ensure_exists=True`` even when
+    the operator never wrote the block).
+
+    ``known`` is indifferent to scalar-vs-member: ``has_member`` counts a
+    bare ``True``/``False`` value as a member too (configurations.py:
+    311-319), so this checks by key NAME only.
+    """
+    for key in configs:
+        if key not in known:
+            logger.warning(
+                "[%s] config key '%s' is not read by any parser; check for a typo or a stale/dead key.",
+                section_name,
+                key,
+            )
 
 
 def design_flow_lpm(nozzle_count: int, nozzle_flow_lph: float) -> float:
