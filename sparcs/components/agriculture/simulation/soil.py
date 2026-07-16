@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+from contextlib import nullcontext
 from typing import Any, Optional
 
 import matplotlib
@@ -181,6 +183,21 @@ class SoilSimulation(SoilBase):
     _simulating: bool = False
     _strip_flux_warned: bool = False
 
+    # Q11: dedicated PDE-state lock serializing advance()'s PDE-mutating span
+    # against apply_state_blob (NOT FieldSimulation._tick_lock -- that guards
+    # tick re-entry on a different object; the race here is inside
+    # SoilSimulation itself). Class-level ``None`` default: ~20 test files
+    # build instances via ``object.__new__`` (no ``__init__``/``configure()``),
+    # so every acquire site below falls back to an unlocked no-op
+    # (``nullcontext()``) for those instances -- unchanged from pre-lock
+    # behavior. A plain ``Lock`` is safe (not ``RLock``): apply_state_blob is
+    # only ever invoked from the application's polled listener dispatch (a
+    # separate thread/executor from the simulation's own tick thread) or
+    # sequentially before simulate_loop starts (offline path) -- never
+    # synchronously from within advance()'s call stack -- so this lock is
+    # never re-acquired by the thread already holding it.
+    _pde_lock: Optional[threading.Lock] = None
+
     # Progress-plot state; _plot_config is None when plotting is disabled.
     _plot_fig: Any = None
     _plot_ax: Any = None
@@ -190,6 +207,11 @@ class SoilSimulation(SoilBase):
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
+
+        # Q11: created per configured instance; object.__new__ instances
+        # (bypassing configure()) keep the class-level None default and run
+        # advance()/apply_state_blob() unlocked (see _pde_lock).
+        self._pde_lock = threading.Lock()
 
         self._mesh_config = _resolve_mesh_config(self.context, configs)
         ensure_mesh(self._mesh_config)
@@ -290,39 +312,46 @@ class SoilSimulation(SoilBase):
 
             rates = self._compute_flux_rates(et_data, seg_et, elapsed_s)
             sim_t0 = now - pd.Timedelta(seconds=elapsed_s)
-            # Include the surface ponds so pond build-up/drain-down does not
-            # masquerade as bottom drainage in the balance diagnostics.
-            storage_before = self._total_water() + self._pde.surface_water()
-            interval = self._plot_config.interval if self._plot_config is not None else None
-            clip_total = ClipDiagnostics()
-            self._walk(
-                rates=rates,
-                window_s=elapsed_s,
-                clip_total=clip_total,
-                sim_t0=sim_t0,
-                plot_interval=interval,
-            )
+            # Q11: PDE-mutating span (through _save_state) serialized against
+            # apply_state_blob so a restore cannot land mid-solve. This is the
+            # widest correct scope: a narrower one reintroduces the race this
+            # lock exists to close; blocking callers for the walk's duration is
+            # accepted (correctness over latency). object.__new__ instances
+            # have _pde_lock=None and run this block unlocked, as before.
+            with self._pde_lock or nullcontext():
+                # Include the surface ponds so pond build-up/drain-down does not
+                # masquerade as bottom drainage in the balance diagnostics.
+                storage_before = self._total_water() + self._pde.surface_water()
+                interval = self._plot_config.interval if self._plot_config is not None else None
+                clip_total = ClipDiagnostics()
+                self._walk(
+                    rates=rates,
+                    window_s=elapsed_s,
+                    clip_total=clip_total,
+                    sim_t0=sim_t0,
+                    plot_interval=interval,
+                )
 
-            # End-of-window render, interval-gated: simulate_loop calls advance
-            # once per (minute-resolution) weather row, so an unconditional render
-            # here would emit one frame per minute no matter what [plot] interval
-            # says. Gate on the shared _last_plot_simtime (see _render_progress_if_due).
-            self._render_progress_if_due(now)
+                # End-of-window render, interval-gated: simulate_loop calls advance
+                # once per (minute-resolution) weather row, so an unconditional render
+                # here would emit one frame per minute no matter what [plot] interval
+                # says. Gate on the shared _last_plot_simtime (see _render_progress_if_due).
+                self._render_progress_if_due(now)
 
-            # Snapshot the PDE-only storage change before anchoring so the
-            # mass-balance residual sees the solver alone, not the correction.
-            delta_storage = self._total_water() + self._pde.surface_water() - storage_before
-            if self._anchor_cfg.enabled and self._anchor_sensors:
-                self._apply_anchor(now, water_after_walk=self._total_water())
-            diagnostics = self._record_diagnostics(
-                rates,
-                now,
-                delta_storage,
-                elapsed_s,
-                clip_total,
-            )
-            self._save_state(now)
-            return diagnostics
+                # Snapshot the PDE-only storage change before anchoring so the
+                # mass-balance residual sees the solver alone, not the correction.
+                delta_storage = self._total_water() + self._pde.surface_water() - storage_before
+                if self._anchor_cfg.enabled and self._anchor_sensors:
+                    self._apply_anchor(now, water_after_walk=self._total_water())
+                diagnostics = self._record_diagnostics(
+                    rates,
+                    now,
+                    delta_storage,
+                    elapsed_s,
+                    clip_total,
+                )
+                self._save_state(now)
+                return diagnostics
         finally:
             self._simulating = False
 
@@ -391,15 +420,31 @@ class SoilSimulation(SoilBase):
                 self._last_simulated_at,
             )
             return
-        try:
-            self._pde.load_state_blob(raw)
-        except Exception:  # noqa: BLE001
-            # A blob from a different mesh (config changed between runs) must not
-            # kill the state-restore callback; cold-start instead.
-            logger.exception("%s: ignoring incompatible soil state blob from %s", self.name, timestamp)
-            return
-        self._last_simulated_at = timestamp
-        logger.info("%s: restored soil state from %s", self.name, timestamp)
+        # Q11: serialized against advance()'s PDE-mutating span via the same
+        # lock, so a restore landing mid-advance blocks here until the tick's
+        # critical section (through _save_state) has finished, then applies.
+        with self._pde_lock or nullcontext():
+            # Re-check after acquiring: the advance() this restore blocked on
+            # may have ratcheted _last_simulated_at past this blob's timestamp
+            # (double-checked locking -- the unlocked guard above is only the
+            # cheap early-out).
+            if self._last_simulated_at is not None and timestamp <= self._last_simulated_at:
+                logger.debug(
+                    "%s: ignoring soil state blob from %s (superseded while waiting; simulated through %s)",
+                    self.name,
+                    timestamp,
+                    self._last_simulated_at,
+                )
+                return
+            try:
+                self._pde.load_state_blob(raw)
+            except Exception:  # noqa: BLE001
+                # A blob from a different mesh (config changed between runs) must not
+                # kill the state-restore callback; cold-start instead.
+                logger.exception("%s: ignoring incompatible soil state blob from %s", self.name, timestamp)
+                return
+            self._last_simulated_at = timestamp
+            logger.info("%s: restored soil state from %s", self.name, timestamp)
 
     def _save_state(self, timestamp: pd.Timestamp) -> None:
         self.data[SoilSimulation.SIMULATION_STATE].set(timestamp, self._pde.save_state_blob())
