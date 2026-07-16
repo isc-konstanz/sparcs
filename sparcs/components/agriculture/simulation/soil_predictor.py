@@ -304,7 +304,7 @@ class SoilPredictor(SoilBase):
         # seed is a no-op and only an explicit predictor override changes anything.)
         ode_config.ponding = soil_pde.ponding
         ode_config.feddes = soil_pde.feddes
-        apply_surface_forcing(ode_config, configs)
+        apply_surface_forcing(ode_config, configs, ponding_base=soil_pde.ponding, feddes_base=soil_pde.feddes)
         return ode_config
 
     @staticmethod

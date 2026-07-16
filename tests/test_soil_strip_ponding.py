@@ -187,6 +187,21 @@ def test_watering_h_max_config(tmp_path):
     assert explicit.watering_h_max_mm == 50.0
 
 
+def test_ponding_config_base_merge_watering_follows_base_not_new_h_max(tmp_path):
+    from sparcs.components.agriculture.simulation._soil import PondingConfig
+
+    base = PondingConfig(_configs(str(tmp_path), h_max_mm=8.0, watering_h_max_mm=50.0))
+    assert base.watering_h_max_mm == 50.0  # guard: base is fully resolved
+
+    merged = PondingConfig(_configs(str(tmp_path), h_max_mm=20.0), base=base)
+
+    assert merged.h_max_mm == 20.0
+    # base is fully resolved -- the base=None dynamic default (watering_h_max_mm
+    # follows the just-parsed h_max_mm) does NOT apply once a base is supplied;
+    # watering_h_max_mm inherits base's resolved value instead.
+    assert merged.watering_h_max_mm == 50.0
+
+
 def test_state_blob_roundtrip_and_pre_pond_compat(tmp_path):
     core = _build_core(tmp_path)
     core.walk_window(rates=_irrigation(EXTREME_FLOW), window_s=120.0)

@@ -112,3 +112,27 @@ def test_no_pde_block_inherits_soil_pde_wholesale(tmp_path):
     assert ode.ponding is soil_pde.ponding
     assert ode.ponding.watering_h_max_mm == 50.0
     assert ode.feddes is soil_pde.feddes
+
+
+def test_predictor_partial_ponding_override_merges_with_sim(tmp_path):
+    """Predictor sets ONLY watering_h_max_mm; enabled and h_max_mm must inherit
+    from the sim's resolved ponding, not reset to PondingConfig's hardcoded
+    defaults (enabled=False, h_max_mm=5.0) as a base=None re-parse would."""
+    model_block = _configs(tmp_path, name="model.conf")
+    soil_block = _configs(
+        tmp_path,
+        name="soil.conf",
+        pde={},
+        ponding={"enabled": True, "h_max_mm": 8.0},
+    )
+    soil_pde = PDEConfig(soil_block.get_member("pde"), model_configs=model_block)
+    apply_surface_forcing(soil_pde, soil_block)
+    assert soil_pde.ponding.enabled is True  # guard: fixture is set up right
+    assert soil_pde.ponding.h_max_mm == 8.0
+
+    predictor_cfg = _configs(tmp_path, pde={"dt": "5min"}, ponding={"watering_h_max_mm": 50.0})
+    ode = SoilPredictor._resolve_ode_config(predictor_cfg, soil_pde, model_block)
+
+    assert ode.ponding.enabled is True
+    assert ode.ponding.h_max_mm == 8.0
+    assert ode.ponding.watering_h_max_mm == 50.0

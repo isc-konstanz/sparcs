@@ -322,7 +322,7 @@ class FeddesConfig:
     # below ω_c total uptake = T_pot · ω / ω_c.
     omega_c: float = 1.0
 
-    def __init__(self, configs: Optional[Configurations] = None):
+    def __init__(self, configs: Optional[Configurations] = None, base: Optional[FeddesConfig] = None):
         if configs is None:
             self.enabled = False
             self.anaerobic = False
@@ -334,15 +334,24 @@ class FeddesConfig:
             self.root_decay_length = 0.3
             self.omega_c = 1.0
             return
-        self.enabled = configs.get_bool("enabled", default=False)
-        self.anaerobic = configs.get_bool("anaerobic", default=False)
-        self.p0_pf = float(configs.get("p0_pf", default=0.0))
-        self.p1_pf = float(configs.get("p1_pf", default=1.0))
-        self.p2_pf = float(configs.get("p2_pf", default=3.0))
-        self.p3_pf = float(configs.get("p3_pf", default=4.2))
-        self.root_distribution = str(configs.get("root_distribution", default="uniform")).strip().lower()
-        self.root_decay_length = float(configs.get("root_decay_length", default=0.3))
-        self.omega_c = float(configs.get("omega_c", default=1.0))
+        # base, when given, supplies the per-key parse default instead of the
+        # hardcoded defaults above -- a key-level merge for a predictor overriding
+        # only some of the sim's fields (see apply_surface_forcing).
+        self.enabled = configs.get_bool("enabled", default=False if base is None else base.enabled)
+        self.anaerobic = configs.get_bool("anaerobic", default=False if base is None else base.anaerobic)
+        self.p0_pf = float(configs.get("p0_pf", default=0.0 if base is None else base.p0_pf))
+        self.p1_pf = float(configs.get("p1_pf", default=1.0 if base is None else base.p1_pf))
+        self.p2_pf = float(configs.get("p2_pf", default=3.0 if base is None else base.p2_pf))
+        self.p3_pf = float(configs.get("p3_pf", default=4.2 if base is None else base.p3_pf))
+        self.root_distribution = (
+            str(configs.get("root_distribution", default="uniform" if base is None else base.root_distribution))
+            .strip()
+            .lower()
+        )
+        self.root_decay_length = float(
+            configs.get("root_decay_length", default=0.3 if base is None else base.root_decay_length)
+        )
+        self.omega_c = float(configs.get("omega_c", default=1.0 if base is None else base.omega_c))
 
 
 def _alpha_feddes_per_cell(
@@ -392,22 +401,35 @@ class PondingConfig:
     (the drip emitter physically ponds; discarding the excess was a numerics
     bug). ``watering_h_max_mm`` bounds that pond separately — an emitter
     basin holds far more water column over its narrow strip than sheet
-    ponding does on open ground — and defaults to ``h_max_mm`` when unset.
+    ponding does on open ground — and defaults to ``h_max_mm`` when unset
+    (with no ``base``; see ``base`` below).
+
+    ``base``, when supplied, becomes the per-key parse default instead of the
+    hardcoded defaults (a key-level merge rather than whole-block replacement)
+    and ``watering_h_max_mm`` then defaults to ``base.watering_h_max_mm``
+    instead of the just-parsed ``h_max_mm``.
     """
 
     enabled: bool = False
     h_max_mm: float = 5.0  # max rain-ponding depth before overflow [mm]
     watering_h_max_mm: float = 5.0  # max emitter-pond depth on the watering strip [mm]
 
-    def __init__(self, configs: Optional[Configurations] = None):
+    def __init__(self, configs: Optional[Configurations] = None, base: Optional[PondingConfig] = None):
         if configs is None:
             self.enabled = False
             self.h_max_mm = 5.0
             self.watering_h_max_mm = 5.0
             return
-        self.enabled = configs.get_bool("enabled", default=False)
-        self.h_max_mm = float(configs.get("h_max_mm", default=5.0))
-        self.watering_h_max_mm = float(configs.get("watering_h_max_mm", default=self.h_max_mm))
+        self.enabled = configs.get_bool("enabled", default=False if base is None else base.enabled)
+        self.h_max_mm = float(configs.get("h_max_mm", default=5.0 if base is None else base.h_max_mm))
+        if base is None:
+            # Dynamic default: an unset watering_h_max_mm follows the just-parsed
+            # h_max_mm (pinned by tests/test_soil_strip_ponding.py).
+            self.watering_h_max_mm = float(configs.get("watering_h_max_mm", default=self.h_max_mm))
+        else:
+            # base is fully resolved; the follow-h_max coupling above does not
+            # apply -- an unset key falls back to base's OWN resolved value.
+            self.watering_h_max_mm = float(configs.get("watering_h_max_mm", default=base.watering_h_max_mm))
 
 
 @dataclass
@@ -478,7 +500,12 @@ class PDEConfig:
         return create_soil_model(self.model, **kwargs)
 
 
-def apply_surface_forcing(ode_config: PDEConfig, configs: Optional[Configurations]) -> PDEConfig:
+def apply_surface_forcing(
+    ode_config: PDEConfig,
+    configs: Optional[Configurations],
+    ponding_base: Optional[PondingConfig] = None,
+    feddes_base: Optional[FeddesConfig] = None,
+) -> PDEConfig:
     """Populate ``ode_config.ponding`` / ``.feddes`` from a soil component's
     sibling ``[ponding]`` / ``[feddes]`` blocks (peers of ``[pde]``, not nested).
 
@@ -486,12 +513,18 @@ def apply_surface_forcing(ode_config: PDEConfig, configs: Optional[Configuration
     seed inherited defaults first (e.g. a predictor seeding the live sim's forcing)
     and let the component's own block override. Keeping ponding and feddes out of
     ``[pde]`` means a whole-block ``[pde]`` override can never silently drop them.
+
+    ``ponding_base`` / ``feddes_base``, when given, become the per-key parse
+    defaults for a present block -- a key-level merge instead of a whole-block
+    replacement against hardcoded defaults, so a predictor overriding only some
+    keys does not silently reset the rest. Sim-block parses pass neither (fresh
+    parse against the hardcoded defaults, unchanged).
     """
     if configs is not None and hasattr(configs, "has_member"):
         if configs.has_member("ponding"):
-            ode_config.ponding = PondingConfig(configs.get_member("ponding", defaults={}))
+            ode_config.ponding = PondingConfig(configs.get_member("ponding", defaults={}), base=ponding_base)
         if configs.has_member("feddes"):
-            ode_config.feddes = FeddesConfig(configs.get_member("feddes", defaults={}))
+            ode_config.feddes = FeddesConfig(configs.get_member("feddes", defaults={}), base=feddes_base)
     return ode_config
 
 
