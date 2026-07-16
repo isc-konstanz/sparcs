@@ -93,6 +93,28 @@ _DEFAULT_THRESHOLD_HPA: float = 300.0
 # set. Windows beyond what a deployment configures are left NULL (no sentinel).
 _DEFAULT_MAX_WINDOWS: int = 4
 
+# MeshConfig's eight __init__-set attributes (_soil.py): its generated
+# @dataclass __eq__ is vacuous (a hand-written __init__ with zero field
+# annotations means dataclasses.fields() is empty), so any two MeshConfig
+# instances compare equal via `==`. SoilPredictor._borrow_probes must never
+# use `==`; this is the attribute-wise fallback for when identity doesn't hold.
+_MESH_CONFIG_ATTRS: tuple[str, ...] = (
+    "filename",
+    "dl",
+    "width",
+    "height",
+    "plant_width",
+    "plant_height",
+    "watering_width",
+    "dx",
+)
+
+
+def _mesh_configs_equivalent(a: MeshConfig, b: MeshConfig) -> bool:
+    """Attribute-wise equality over MeshConfig's eight __init__-set fields
+    (see ``_MESH_CONFIG_ATTRS``) -- NEVER MeshConfig's own ``==`` (vacuous)."""
+    return all(getattr(a, attr, object()) == getattr(b, attr, object()) for attr in _MESH_CONFIG_ATTRS)
+
 
 @dataclass(frozen=True)
 class WateringWindow:
@@ -462,12 +484,16 @@ class SoilPredictor(SoilBase):
         self._pde = self._build_pde()
 
         probes_cfg = soil_block.get_member("probes", defaults={}, ensure_exists=True)
-        self._probes = resolve_probes(
-            probes_cfg,
-            self._pde.mesh,
-            self._mesh_config,
-            log_name=self.name,
-        )
+        borrowed_probes = self._borrow_probes(self.context, self._mesh_config)
+        if borrowed_probes is not None:
+            self._probes = borrowed_probes
+        else:
+            self._probes = resolve_probes(
+                probes_cfg,
+                self._pde.mesh,
+                self._mesh_config,
+                log_name=self.name,
+            )
 
         self._threshold_hpa = configs.get_float("threshold_hpa", default=_DEFAULT_THRESHOLD_HPA)
 
@@ -1228,6 +1254,40 @@ class SoilPredictor(SoilBase):
         the shared ``flow_m3s_per_m`` (also fed by ``SoilSimulation._compute_flux_rates``).
         """
         return flow_m3s_per_m(design_flow_lpm(nozzle_count, nozzle_flow_lph), total_drip_line_length_m)
+
+    # Probe borrowing (pure)
+
+    @staticmethod
+    def _borrow_probes(context: Any, mesh_config: MeshConfig) -> Optional[list[ProbeSpec]]:
+        """Adopt the sim's already-resolved probe specs instead of
+        re-resolving ``[soil_simulation.probes]`` against a second mesh
+        instance, when it is safe to: ``context.get_probes()`` is non-empty
+        AND the two meshes are the SAME configuration (identity -- the
+        common in-context case, this predictor's own ``_mesh_config`` was
+        read from ``context.mesh_config`` moments earlier at configure() --
+        or, failing identity, attribute-wise equality over MeshConfig's eight
+        __init__-set fields; see ``_mesh_configs_equivalent``. NEVER ``==``:
+        MeshConfig's generated ``__eq__`` is vacuous).
+
+        Returns ``None`` (caller falls back to its own ``resolve_probes``)
+        when ``context`` has no ``get_probes`` (a bare stub in tests),
+        ``get_probes()`` returns no probes, or the mesh guard fails -- never
+        raises. Callers must not defensively copy the returned ``ProbeSpec``
+        elements: sharing is by design (the parallel worker path already
+        reuses parent ProbeSpecs verbatim, see ``_worker_init``).
+        """
+        get_probes = getattr(context, "get_probes", None)
+        if not callable(get_probes):
+            return None
+        sim_probes = get_probes()
+        if not sim_probes:
+            return None
+        context_mesh = getattr(context, "mesh_config", None)
+        if context_mesh is mesh_config:
+            return list(sim_probes)
+        if context_mesh is not None and _mesh_configs_equivalent(context_mesh, mesh_config):
+            return list(sim_probes)
+        return None
 
     @staticmethod
     def _build_flow_schedule(

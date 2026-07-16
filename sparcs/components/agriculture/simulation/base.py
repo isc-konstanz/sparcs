@@ -28,6 +28,7 @@ from ._soil import (
     DripConfig,
     MeshConfig,
     PDEConfig,
+    ProbeSpec,
     resolve_pde_config,
     top_segment_names_from_mesh,
 )
@@ -301,6 +302,39 @@ class FieldSimulation(Component):
             if length is not None:
                 return length
         return self._total_drip_line_length_m
+
+    def get_probes(self) -> list[ProbeSpec]:
+        """Resolved probe sampling recipes (point + area), delegated from
+        ``SoilSimulation.get_probes()``.
+
+        Method (not ``@property``): ``ProbeSpec`` carries numpy arrays
+        (``@dataclass(eq=False)``, _soil.py) and lories' ``get_members``
+        reflection executes every property and value-compares the results --
+        the ambiguous-truth trap ``SoilSimulation.get_probes()`` already
+        dodges for the same reason (see its docstring, soil.py). Cross-ref
+        ``.scratch/lories-frictions/issues/01-reflection-truth-test-trap.md``
+        ("Reflection trap: get_members executes every property and
+        value-compares results") -- that issue's soil.py:348-360 refs predate
+        this refactor (now soil.py:421-433).
+
+        getattr-guards like ``mesh_config``: returns ``[]`` (never raises)
+        when ``soil_simulation`` is absent, or before
+        ``SoilSimulation._probes`` is assigned -- a bare class annotation
+        until ``_configure_probes`` runs, so a raw
+        ``soil_simulation.get_probes()`` call at that point would raise
+        ``AttributeError``.
+
+        Shared-object semantics: the returned list is a FRESH container (per
+        ``SoilSimulation.get_probes()``'s own contract), but its
+        ``ProbeSpec`` elements are the SAME objects the sim owns -- no
+        defensive copy, by design (the parallel worker path already reuses
+        parent ProbeSpecs verbatim); callers must not mutate them.
+        """
+        if self.soil_simulation is None:
+            return []
+        if getattr(self.soil_simulation, "_probes", None) is None:
+            return []
+        return self.soil_simulation.get_probes()
 
     @property
     def top_segment_names(self) -> list[str]:
