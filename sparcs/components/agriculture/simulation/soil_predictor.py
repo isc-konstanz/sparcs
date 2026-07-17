@@ -232,6 +232,15 @@ class SoilPredictor(SoilBase):
     # Last boundary `predict()` actually ran for; None before the first run.
     _last_boundary_run: Optional[pd.Timestamp] = None
 
+    # Why the last _fetch_forecast returned None (issue 23/W2.5): lories folds
+    # connector errors into empty frames, so "no forecast" needs a recorded
+    # cause to be diagnosable. Consumed by predict()'s skip block, which WARNs
+    # once per unclaimed boundary (_forecast_warn_boundary is the latch --
+    # _last_boundary_run itself deliberately stays unclaimed during an outage
+    # so retries continue, and thus cannot rate-limit the warning).
+    _forecast_empty_cause: Optional[str] = None
+    _forecast_warn_boundary: Optional[pd.Timestamp] = None
+
     _mesh_config: MeshConfig
     _ode_config: PDEConfig
     _pde: SoilPDECore
@@ -1006,6 +1015,18 @@ class SoilPredictor(SoilBase):
                 now,
                 now + self._horizon,
             )
+            cause = self._forecast_empty_cause
+            if cause is not None and boundary != self._forecast_warn_boundary:
+                # Once per unclaimed boundary (the INFO above fires every retry
+                # tick): a forecast-enabled predictor producing nothing is an
+                # anomaly worth an operator-visible signal, not routine no-data.
+                logger.warning(
+                    "%s: prediction is stalled at boundary %s: %s. Retrying every tick until forecast rows appear.",
+                    self.name,
+                    boundary,
+                    cause,
+                )
+                self._forecast_warn_boundary = boundary
             return
 
         field = self.context
@@ -1909,7 +1930,12 @@ class SoilPredictor(SoilBase):
     # Forecast retrieval
 
     def _fetch_forecast(self, now: pd.Timestamp) -> Optional[pd.DataFrame]:
-        """Read the in-memory forecast cache via ``data.to_frame()`` and slice to ``[now, now+horizon]``."""
+        """Read the in-memory forecast cache via ``data.to_frame()`` and slice to
+        ``[now, now+horizon]``. On a None return, ``_forecast_empty_cause`` records
+        why (empty cache vs rows-outside-horizon) for predict()'s boundary-latched
+        warning -- lories folds connector errors into empty frames, so the two
+        shapes are otherwise indistinguishable (issue 23/W2.5)."""
+        self._forecast_empty_cause = None
         weather = getattr(self.context, "weather", None)
         forecast_sub = getattr(weather, "forecast", None)
         if forecast_sub is None or not forecast_sub.is_enabled():
@@ -1920,11 +1946,21 @@ class SoilPredictor(SoilBase):
             logger.warning("%s: forecast read failed: %s", self.name, e)
             return None
         if df.empty:
+            self._forecast_empty_cause = (
+                "forecast cache is empty (upstream read produced no rows -- possibly a "
+                "connector error folded into an empty frame)"
+            )
             return None
         # Align tz: forecast index is location-tz-aware; ``now`` matches.
         end = now + self._horizon
         sliced = df.loc[(df.index >= now) & (df.index <= end)]
-        return sliced if not sliced.empty else None
+        if sliced.empty:
+            self._forecast_empty_cause = (
+                f"forecast rows exist but none cover [{now}, {end}] "
+                f"(cache spans {df.index.min()}..{df.index.max()} -- upstream forecast is stale)"
+            )
+            return None
+        return sliced
 
     # PDE integration over horizon
 

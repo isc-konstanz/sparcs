@@ -218,6 +218,12 @@ class SoilSimulation(SoilBase):
     # as _weather_stall_ticks above (issue 20/W2.2).
     _tick_failures: float = 0.0
 
+    # Staleness watch state (issue 23/W2.5): None on bare object.__new__
+    # instances (the _pde_lock idiom); _configure_probes assigns fresh
+    # per-instance containers, load_anchor_history lazy-inits the rest.
+    _anchor_last_read: Optional[dict[str, pd.Timestamp]] = None
+    _anchor_stale_warned: Optional[set[str]] = None
+
     # Q11: dedicated PDE-state lock serializing advance()'s PDE-mutating span
     # against apply_state_blob (NOT FieldSimulation._tick_lock -- that guards
     # tick re-entry on a different object; the race here is inside
@@ -666,6 +672,13 @@ class SoilSimulation(SoilBase):
         self._anchor_data: dict[str, Any] = {}
         self._anchor_history: dict[str, pd.Series] = {}
         self._last_anchored: dict[str, pd.Timestamp] = {}
+        # Wall-clock staleness watch (issue 23/W2.5): lories converts connector
+        # errors into EMPTY frames, so a dead tensiometer reads as benign no-data
+        # forever. Track the last non-empty read per sensor (wall clock, never the
+        # chunk bounds -- catch-up replays historical windows) and warn once per
+        # dry spell, latched until a non-empty read recovers the sensor.
+        self._anchor_last_read: dict[str, pd.Timestamp] = {}
+        self._anchor_stale_warned: set[str] = set()
         # Enabling [anchor] drives discovery on, so the operator sets one switch.
         self._discover_sensor_probes_enabled = (
             configs.get_bool("discover_sensor_probes", default=False) or self._anchor_cfg.enabled
@@ -841,6 +854,23 @@ class SoilSimulation(SoilBase):
                 "connector). Wire a tensiometer or disable [anchor]."
             )
 
+    def _warn_if_anchor_read_stale(self, key: str, wall_now: pd.Timestamp) -> None:
+        """WARN once (latched until recovery) when a sensor's last non-empty read
+        is older than its [anchor] staleness bound -- the error-empty-vs-no-data
+        distinction lories' empty-frame conversion erases (issue 23/W2.5)."""
+        age = wall_now - self._anchor_last_read.get(key, wall_now)
+        bound = self._anchor_cfg.sensor_staleness(key)
+        if age > bound and key not in self._anchor_stale_warned:
+            logger.warning(
+                "%s: anchor sensor %s has produced no readings for %s (staleness bound %s); "
+                "it stays predict-only until data returns -- check the tensiometer/connector.",
+                self.name,
+                key,
+                age,
+                bound,
+            )
+            self._anchor_stale_warned.add(key)
+
     def load_anchor_history(self, start: pd.Timestamp, end: pd.Timestamp) -> None:
         """Range-read each anchor sensor's tension over ``(start - lookback, end]`` for
         this tick, so the anchor assimilates each reading at its own timestamp rather
@@ -857,18 +887,31 @@ class SoilSimulation(SoilBase):
             default=pd.Timedelta(0),
         )
         read_start = start - lookback
+        # Lazy init for object.__new__ instances that bypassed _configure_probes
+        # (class defaults are None; see the class-body declarations).
+        if self._anchor_last_read is None:
+            self._anchor_last_read = {}
+        if self._anchor_stale_warned is None:
+            self._anchor_stale_warned = set()
+        wall_now = pd.Timestamp.now(tz="UTC")
         for sensor in self._anchor_sensors:
             data = self._anchor_data.get(sensor.key)
             channel = self._anchor_channels.get(sensor.key)
             if data is None or channel is None:
                 continue
+            # Seed on first sight so a dead-from-birth sensor warns once its
+            # staleness elapses (wall-clock-keyed; see _configure_probes note).
+            self._anchor_last_read.setdefault(sensor.key, wall_now)
             try:
                 frame = data.read(Channels([channel]), start=read_start, end=end, unique=True)
             except Exception:
                 logger.exception("%s: anchor history read failed for %s", self.name, sensor.key)
                 continue
             if frame is None or frame.empty:
+                self._warn_if_anchor_read_stale(sensor.key, wall_now)
                 continue
+            self._anchor_last_read[sensor.key] = wall_now
+            self._anchor_stale_warned.discard(sensor.key)
             series = frame.iloc[:, 0].dropna().sort_index()
             series = series[~series.index.duplicated(keep="last")]
             if not series.empty:
