@@ -170,9 +170,9 @@ def test_predict_grid_block_invokes_all_collaborators(caplog):
 def test_predict_writes_image_table_when_publish_returns_a_render(caplog):
     """When _publish_results returns a rendered (plot_index, pngs) tuple (plotting
     on), predict() persists it via _build_image_frame -> _write_image_table, after
-    the irrigation write. With no render (the default stub returns None) the image
-    write is skipped (covered by the happy path above, where 'write_image_table'
-    never appears)."""
+    the irrigation write (each table under its own per-table try since W2.6). With
+    no render (the default stub returns None) the image write is skipped (covered
+    by the happy path above, where 'write_image_table' never appears)."""
     calls = []
     predictor = _make_predictor([object()], calls)
     save_index = pd.DatetimeIndex([pd.Timestamp("2026-07-03 02:00", tz=_TZ)], name="timestamp")
@@ -186,8 +186,80 @@ def test_predict_writes_image_table_when_publish_returns_a_render(caplog):
 
     assert "build_image_frame" in calls
     assert "write_image_table" in calls
-    assert "image-write" not in caplog.text.lower(), f"secondary write try/except swallowed an error: {caplog.text}"
+    assert (
+        "-table write failed" not in caplog.text.lower()
+    ), f"a per-table write try/except swallowed an error: {caplog.text}"
     assert calls.index("write_irrigation_table") < calls.index("write_image_table")
+
+
+def test_predict_header_write_failure_does_not_skip_later_tables(caplog):
+    """W2.6: one try PER table -- a header build/write failure must not drop the
+    detail, irrigation, or image writes (previously a single try skipped them all)."""
+    calls = []
+    predictor = _make_predictor([object()], calls)
+    save_index = pd.DatetimeIndex([pd.Timestamp("2026-07-03 02:00", tz=_TZ)], name="timestamp")
+    predictor._publish_results = lambda *a, **k: calls.append("publish_results") or (save_index, [b"png"])
+    predictor._build_image_frame = lambda *a, **k: calls.append("build_image_frame") or pd.DataFrame()
+    predictor._write_image_table = lambda *a, **k: calls.append("write_image_table")
+
+    def _boom_header(*_a, **_k):
+        calls.append("write_header_table")
+        raise RuntimeError("header connector down")
+
+    predictor._write_header_table = _boom_header
+    now = pd.Timestamp("2026-07-03 01:30", tz=_TZ)
+
+    with caplog.at_level(logging.ERROR):
+        predictor.predict(now, forecast_creation=now)
+
+    for step in ("write_header_table", "write_detail_table", "write_irrigation_table", "write_image_table"):
+        assert step in calls, f"{step!r} skipped; per-table isolation broken. calls={calls}"
+    header_errors = [r for r in caplog.records if "header-table write failed" in r.getMessage()]
+    assert len(header_errors) == 1
+
+
+def test_predict_build_failure_does_not_skip_later_tables(caplog):
+    """W2.6: the BUILD half of a table's try -- a detail-frame build failure is
+    contained exactly like a write failure, and later tables still write."""
+    calls = []
+    predictor = _make_predictor([object()], calls)
+
+    def _boom_build(*_a, **_k):
+        calls.append("build_detail_frame")
+        raise RuntimeError("frame construction bug")
+
+    predictor._build_detail_frame = _boom_build
+    now = pd.Timestamp("2026-07-03 01:30", tz=_TZ)
+
+    with caplog.at_level(logging.ERROR):
+        predictor.predict(now, forecast_creation=now)
+
+    assert "write_detail_table" not in calls  # its own write is skipped with the build
+    assert "write_irrigation_table" in calls  # later tables are not
+    assert [r for r in caplog.records if "detail-table write failed" in r.getMessage()]
+
+
+def test_predict_irrigation_write_failure_does_not_skip_image_write(caplog):
+    """W2.6 twin: the table whose failure used to drop the image write."""
+    calls = []
+    predictor = _make_predictor([object()], calls)
+    save_index = pd.DatetimeIndex([pd.Timestamp("2026-07-03 02:00", tz=_TZ)], name="timestamp")
+    predictor._publish_results = lambda *a, **k: calls.append("publish_results") or (save_index, [b"png"])
+    predictor._build_image_frame = lambda *a, **k: calls.append("build_image_frame") or pd.DataFrame()
+    predictor._write_image_table = lambda *a, **k: calls.append("write_image_table")
+
+    def _boom_irrigation(*_a, **_k):
+        calls.append("write_irrigation_table")
+        raise RuntimeError("irrigation frame bug")
+
+    predictor._write_irrigation_table = _boom_irrigation
+    now = pd.Timestamp("2026-07-03 01:30", tz=_TZ)
+
+    with caplog.at_level(logging.ERROR):
+        predictor.predict(now, forecast_creation=now)
+
+    assert "write_image_table" in calls, f"image write dropped with the irrigation failure. calls={calls}"
+    assert [r for r in caplog.records if "irrigation-table write failed" in r.getMessage()]
 
 
 def test_predict_publishes_resolved_chosen_when_recommendation_is_nonzero(caplog):

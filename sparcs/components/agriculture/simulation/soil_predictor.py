@@ -140,6 +140,16 @@ _DIAGNOSTIC_CONSTANTS = (
     SoilSimulation.WATER_BALANCE_RESIDUAL,
 )
 
+# In-memory failure-counter channel key per _write_direct_frame table_label
+# (issue 24/W2.6). Deliberately NOT part of _DIAGNOSTIC_CONSTANTS -- its exact
+# membership is test-pinned.
+_WRITE_FAILURE_KEYS = {
+    "header table": "header_write_failures",
+    "detail table": "detail_write_failures",
+    "irrigation table": "irrigation_write_failures",
+    "image table": "image_write_failures",
+}
+
 
 class SoilPredictor(SoilBase):
     REL_SAT_NAME: str = "predictor relative saturation"
@@ -231,6 +241,11 @@ class SoilPredictor(SoilBase):
 
     # Last boundary `predict()` actually ran for; None before the first run.
     _last_boundary_run: Optional[pd.Timestamp] = None
+
+    # Monotonic per-table direct-write failure counts (issue 24/W2.6), keyed by
+    # table_label; None on bare object.__new__ instances (the _pde_lock idiom).
+    # Surfaced via the in-memory *_write_failures channels (Dash Data accordion).
+    _write_failures: Optional[dict[str, int]] = None
 
     # Why the last _fetch_forecast returned None (issue 23/W2.5): lories folds
     # connector errors into empty frames, so "no forecast" needs a recorded
@@ -561,6 +576,7 @@ class SoilPredictor(SoilBase):
         if self._plot_config is not None:
             self._register_plot_channel()
         self._register_diagnostic_channels()
+        self._register_write_failure_channels()
 
         if not self._probes:
             logger.warning(
@@ -659,6 +675,40 @@ class SoilPredictor(SoilBase):
         are no longer persisted."""
         for c in _DIAGNOSTIC_CONSTANTS:
             self.data.add(c, aggregate="last", logger={"enabled": False})
+
+    def _register_write_failure_channels(self) -> None:
+        """In-memory only (Dash/debug): monotonic per-table direct-write failure
+        counters (issue 24/W2.6). Registered or they surface nowhere -- they
+        appear in the component page's Data accordion, not the DB."""
+        for label, key in _WRITE_FAILURE_KEYS.items():
+            self.data.add(
+                key,
+                type=float,
+                name=f"{label.title()} Write Failures",
+                aggregate="last",
+                logger={"enabled": False},
+            )
+
+    def _bump_write_failure(self, table_label: str) -> None:
+        """Count a failed direct write and surface it on the matching in-memory
+        channel. Never raises -- the failure handler's job is to log, and bare
+        test predictors carry fake data accesses that raise on lookup."""
+        if self._write_failures is None:
+            self._write_failures = {}
+        count = self._write_failures.get(table_label, 0) + 1
+        self._write_failures[table_label] = count
+        key = _WRITE_FAILURE_KEYS.get(table_label)
+        if key is None:
+            return
+        try:
+            self.data[key].set(pd.Timestamp.now(tz="UTC"), float(count))
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "%s: write-failure channel '%s' unavailable; count=%d kept in memory.",
+                self.name,
+                key,
+                count,
+            )
 
     def _register_header_channels(self) -> tuple[list[str], list[str]]:
         """`agri_field_forecast`: one row per candidate per run. Bound to the
@@ -773,11 +823,12 @@ class SoilPredictor(SoilBase):
         A probe with no configured ``soil_id`` is warned (not raised, matching
         ``soil.py``) and gets no ``soil_id`` kwarg at all -- the detail write
         then fails at the next ``connector.write()`` for this table (caught by
-        the surrounding best-effort try/except and logged, not raised to the
-        caller), and because the write grouping raises on the FIRST resource
-        missing the attribute, ALL probes' rows for that tick are dropped
-        along with the misconfigured probe's. Accepted failure mode until the
-        fixtures carry soil_ids.
+        that table's best-effort try in predict(), logged and counted, not
+        raised to the caller), and because the write grouping raises on the
+        FIRST resource missing the attribute, ALL probes' rows for that tick
+        are dropped along with the misconfigured probe's. A residual
+        misconfiguration signal only -- the reference configs carry soil_ids
+        since the config overhaul.
         """
         channels_cfg = soil_block.get_member("data", defaults={}).get_member("channels", defaults={})
         field_id = channels_cfg.get("field_id", default=None)
@@ -1172,32 +1223,54 @@ class SoilPredictor(SoilBase):
         # agri_soil_forecast detail rows (ALL candidates), the chosen candidate's
         # agri_field_forecast_irrigation edge rows, and the recommended candidate's
         # agri_field_forecast_image field plots.
-        # Best-effort and only when the grid path produced a recommendation: a
-        # failure here never affects the forecast already published on the main
-        # channels above. `now` is the run time (every run's rows are kept, keyed
-        # by it -- see _build_header_frame / _build_detail_frame /
-        # _build_irrigation_frame / _build_image_frame); `forecast_creation` (the
-        # weather issue time) is persisted only as the header's weather_creation
-        # data column.
+        # Best-effort PER TABLE (issue 24/W2.6: one failed build/write must not
+        # skip the later tables) and only when the grid path produced a
+        # recommendation: a failure here never affects the forecast already
+        # published on the main channels above. `now` is the run time (every
+        # run's rows are kept, keyed by it -- see _build_header_frame /
+        # _build_detail_frame / _build_irrigation_frame / _build_image_frame);
+        # `forecast_creation` (the weather issue time) is persisted only as the
+        # header's weather_creation data column.
         if published and chosen is not None:
             try:
-                header_frame = self._build_header_frame(self._ladder, chosen, now, forecast_creation)
-                self._write_header_table(header_frame)
-                detail_frame = self._build_detail_frame(self._ladder, ladder_traj, now)
-                self._write_detail_table(detail_frame)
-                irrigation_frame = self._build_irrigation_frame(chosen, horizon_start, horizon_end, now)
-                self._write_irrigation_table(irrigation_frame)
-                if recommended_plot is not None:
-                    save_index, plot_values = recommended_plot
-                    self._write_image_table(self._build_image_frame(save_index, plot_values, now))
+                self._write_header_table(self._build_header_frame(self._ladder, chosen, now, forecast_creation))
             except Exception:  # noqa: BLE001
                 logger.exception(
-                    "%s: header/detail/irrigation/image-write failed (now=%s, creation=%s); "
+                    "%s: header-table write failed (now=%s, creation=%s); "
                     "the forecast published on the main channels is unaffected.",
                     self.name,
                     now,
                     forecast_creation,
                 )
+            try:
+                self._write_detail_table(self._build_detail_frame(self._ladder, ladder_traj, now))
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "%s: detail-table write failed (now=%s); "
+                    "the forecast published on the main channels is unaffected.",
+                    self.name,
+                    now,
+                )
+            try:
+                self._write_irrigation_table(self._build_irrigation_frame(chosen, horizon_start, horizon_end, now))
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "%s: irrigation-table write failed (now=%s); "
+                    "the forecast published on the main channels is unaffected.",
+                    self.name,
+                    now,
+                )
+            if recommended_plot is not None:
+                try:
+                    save_index, plot_values = recommended_plot
+                    self._write_image_table(self._build_image_frame(save_index, plot_values, now))
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "%s: image-table write failed (now=%s); "
+                        "the forecast published on the main channels is unaffected.",
+                        self.name,
+                        now,
+                    )
 
     # PDE backend
 
@@ -2499,11 +2572,13 @@ class SoilPredictor(SoilBase):
             connector.write(write_frame)
         except Exception:  # noqa: BLE001
             logger.exception(
-                "%s: direct write of the %s to logger '%s' failed.",
+                "%s: direct write of the %s (%d rows) to logger '%s' failed.",
                 self.name,
                 table_label,
+                len(write_frame),
                 self._logger_id,
             )
+            self._bump_write_failure(table_label)
             return
         logger.info(
             "%s: %s written: %d rows to logger '%s'.",
