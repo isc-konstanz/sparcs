@@ -53,7 +53,7 @@ def _bare_sim(walk_window):
     def _apply_anchor(now, water_after_walk):
         calls["anchor"].append(now)
 
-    def _record_diagnostics(rates, now, delta_storage, elapsed_s, clip, skipped_s):
+    def _record_diagnostics(rates, now, delta_storage, elapsed_s, clip, skipped_s, retries=0):
         calls["diagnostics"].append(now)
         return {"x": 1.0}
 

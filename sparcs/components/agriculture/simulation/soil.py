@@ -180,6 +180,11 @@ class SoilSimulation(SoilBase):
     # skipped: a column that only appears on failure cannot be dashboarded.
     WALK_SKIPPED_S = Constant(float, "skipped_s", "Skipped Walk Duration (dt_min Unsolvable)", "s", context="water")
 
+    # Adaptive-walk substep rollbacks for the window (walk_window shrinks dt and
+    # re-solves); persisted every tick (0 when clean) so a solver grinding
+    # through retries is visible in the data -- the log stays DEBUG (issue 22/W2.4).
+    WALK_RETRIES = Constant(float, "retries", "Walk Substep Retries", "-", context="water")
+
     # Count of consecutive fully-stalled ticks (every weather chunk in the
     # window empty/invalid) that PRECEDED the tick committing this row; 0.0 in
     # steady state, mirrored down from FieldSimulation._on_tick because
@@ -278,6 +283,7 @@ class SoilSimulation(SoilBase):
             SoilSimulation.WATER_BALANCE_RESIDUAL,
             SoilSimulation.WATER_ANCHOR,
             SoilSimulation.WALK_SKIPPED_S,
+            SoilSimulation.WALK_RETRIES,
             SoilSimulation.WEATHER_STALL,
             SoilSimulation.TICK_FAILURES,
         ):
@@ -399,6 +405,7 @@ class SoilSimulation(SoilBase):
                     elapsed_s,
                     clip_total,
                     walk_result.skipped_s,
+                    walk_result.retries,
                 )
                 self._save_state(now)
                 return diagnostics
@@ -626,12 +633,14 @@ class SoilSimulation(SoilBase):
         elapsed_s: float,
         clip: ClipDiagnostics,
         skipped_s: float,
+        retries: int = 0,
     ) -> dict[str, float]:
         """Write the seven per-callback flux-density channels [kg/(m²·h)], the
-        skipped-at-dt_min, weather-stall, and tick-failure diagnostics channels,
-        and sample probes."""
+        skipped-at-dt_min, walk-retries, weather-stall, and tick-failure
+        diagnostics channels, and sample probes."""
         diagnostics = self._compute_diagnostics(rates, delta_storage, elapsed_s, clip)
         diagnostics[SoilSimulation.WALK_SKIPPED_S.key] = skipped_s
+        diagnostics[SoilSimulation.WALK_RETRIES.key] = float(retries)
         diagnostics[SoilSimulation.WEATHER_STALL.key] = float(getattr(self, "_weather_stall_ticks", 0.0))
         diagnostics[SoilSimulation.TICK_FAILURES.key] = float(getattr(self, "_tick_failures", 0.0))
         for key, value in diagnostics.items():
