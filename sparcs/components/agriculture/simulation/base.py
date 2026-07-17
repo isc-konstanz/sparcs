@@ -431,6 +431,11 @@ class FieldSimulation(Component):
         self._irrigation_flow_channel = self._resolve_irrigation_channel(Irrigation.FLOW)
         self._irrigation_state_channel = self._resolve_irrigation_channel(Irrigation.STATE)
         self._validate_irrigation_input()
+        # Anchor sensor-probe discovery, before the tick thread can call advance():
+        # fail-fast when [anchor] is enabled but the sensor wiring is broken
+        # (issue 21/W2.3). Siblings are configured (not yet active) here, which
+        # is all discovery needs.
+        self.soil_simulation.validate_sensor_probes()
 
         for channel in self._weather_channels:
             key = channel.key

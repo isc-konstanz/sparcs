@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 from lories import Constant
 from lories.components.weather import Weather
-from lories.core import ConfigurationError
+from lories.core import ConfigurationError, ConfigurationUnavailableError
 from lories.data import Channels
 from lories.typing import Configurations
 from lories.util import to_timedelta
@@ -325,7 +325,6 @@ class SoilSimulation(SoilBase):
 
         self._simulating = True
         try:
-            self._ensure_sensor_probes()
             # Cold start: spin up with current weather to approximate steady state.
             if self._last_simulated_at is None:
                 elapsed = self._ode_config.cold_start
@@ -643,15 +642,14 @@ class SoilSimulation(SoilBase):
     def _configure_probes(self, configs: Configurations) -> None:
         """Resolve probe specs from ``[probes]`` and register one float channel per probe."""
         self._probes = []
-        # Sensor-derived probes are discovered lazily on first advance() (separate
-        # from config probes: sample-only, no logged channel). See _discover_sensor_probes.
-        # Opt-in: the only consumer is the (separate) anchor work, so discovery
-        # stays off unless a config explicitly enables it.
+        # Sensor-derived probes are discovered once at activation, via
+        # validate_sensor_probes() (separate from config probes: sample-only, no
+        # logged channel). Opt-in: the only consumer is the anchor work, so
+        # discovery stays off unless a config explicitly enables it.
         self._sensor_probes = []
-        self._sensor_probes_ready = False
         # Anchor sensors + their tension channels + per-sensor data context (for the
         # per-tick ranged read) + "last anchored at" map, populated by
-        # _discover_sensor_probes on first advance(). ``_anchor_history`` holds the
+        # _discover_sensor_probes at activation. ``_anchor_history`` holds the
         # per-sensor tension series load_anchor_history() range-reads each tick, so
         # each reading is assimilated at its own timestamp (see _read_history_tension).
         self._anchor_sensors: list[AnchorSensor] = []
@@ -743,26 +741,28 @@ class SoilSimulation(SoilBase):
 
     def get_sensor_probes(self) -> list[ProbeSpec]:
         """Probes derived from tension-measured SoilMoisture sensors, for
-        model-vs-sensor comparison (the live anchor). Populated lazily on the
-        first advance(); empty before then. Method (not property) for the same
-        reason as get_probes()."""
+        model-vs-sensor comparison (the live anchor). Populated at activation by
+        validate_sensor_probes(); empty before then. Method (not property) for
+        the same reason as get_probes()."""
         return list(getattr(self, "_sensor_probes", []))
 
-    def _discover_sensor_probes(self) -> None:
+    def _discover_sensor_probes(self) -> list[tuple[str, Exception]]:
         """Derive one probe per enabled, tension-measured SoilMoisture sensor in
         this field. A sensor is a probe that also carries measured data; here we
         resolve only the model-side sampling recipe (sample-only, no logged
-        channel). Runs once, on the first advance(), when the whole component tree
-        is configured. This sim's field is reached via SoilSimulation.context
-        (the FieldSimulation) -> .context (the AgriculturalField that owns the
-        sensors)."""
-        # Set the flag first so a failure here doesn't retry on every step.
-        self._sensor_probes_ready = True
+        channel). Runs once, from validate_sensor_probes() at activation --
+        every sibling has completed configure() by then, and discovery reads
+        only configure-time sensor state (channel-connector presence, geometry).
+        This sim's field is reached via SoilSimulation.context (the
+        FieldSimulation) -> .context (the AgriculturalField that owns the
+        sensors). Returns the per-sensor derivation failures (key, exception);
+        validate_sensor_probes decides whether they refuse startup."""
         from sparcs.components.agriculture.soil.moisture import SoilMoisture
 
+        failures: list[tuple[str, Exception]] = []
         field = getattr(getattr(self, "context", None), "context", None)
         if field is None:
-            return
+            return failures
         found: list[ProbeSpec] = []
         anchor_sensors: list[AnchorSensor] = []
         anchor_channels: dict[str, Any] = {}
@@ -779,30 +779,58 @@ class SoilSimulation(SoilBase):
                 # Keep the sensor's data context so load_anchor_history can issue a
                 # ranged tension read through its connector each tick.
                 anchor_data[comp.key] = comp.data
-            except Exception:
+            except Exception as e:
                 logger.exception(
                     "%s: failed to derive probe from sensor %s",
                     self.name,
                     getattr(comp, "key", "?"),
                 )
+                failures.append((str(getattr(comp, "key", "?")), e))
         self._sensor_probes = found
         self._anchor_sensors = anchor_sensors
         self._anchor_channels = anchor_channels
         self._anchor_data = anchor_data
         if found:
             logger.info("%s: discovered %d sensor probe(s) for anchoring", self.name, len(found))
+        return failures
 
-    def _ensure_sensor_probes(self) -> None:
-        """Run anchor sensor-probe discovery once, when enabled. Idempotent (guarded
-        by ``_sensor_probes_ready``); a failure marks ready so it never retries or
-        breaks the solve tick."""
-        if not self._discover_sensor_probes_enabled or self._sensor_probes_ready:
+    def validate_sensor_probes(self) -> None:
+        """Run sensor-probe/anchor discovery once, at activation (called by
+        FieldSimulation.activate before the tick thread starts). Anchoring is an
+        explicit operator opt-in, so with [anchor] enabled a discovery failure,
+        a sensor whose probe cannot be derived, or zero tension-measured sensors
+        is a wiring error and refuses startup (mirroring
+        _validate_irrigation_input). Discovery enabled only via
+        ``discover_sensor_probes`` (anchor off) is not a fail-fast opt-in:
+        failures are logged and the sim runs with whatever probes were
+        successfully derived (possibly none)."""
+        if not self._discover_sensor_probes_enabled:
             return
+        strict = self._anchor_cfg.enabled
         try:
-            self._discover_sensor_probes()
-        except Exception:
-            self._sensor_probes_ready = True
-            logger.exception("%s: sensor-probe discovery failed; continuing", self.name)
+            failures = self._discover_sensor_probes()
+        except Exception as e:
+            if strict:
+                raise ConfigurationUnavailableError(
+                    f"{self.name}: [anchor] is enabled but sensor-probe discovery failed: {e}. "
+                    "Verify the field's SoilMoisture sensor wiring before starting."
+                ) from e
+            logger.exception("%s: sensor-probe discovery failed; continuing without sensor probes", self.name)
+            return
+        if not strict:
+            return
+        if failures:
+            failed = ", ".join(key for key, _ in failures)
+            raise ConfigurationUnavailableError(
+                f"{self.name}: [anchor] is enabled but probe derivation failed for sensor(s): {failed}. "
+                "See the exception log above; fix the sensor geometry/mesh wiring before starting."
+            ) from failures[0][1]
+        if not self._anchor_sensors:
+            raise ConfigurationUnavailableError(
+                f"{self.name}: [anchor] is enabled but no tension-measured SoilMoisture sensor was "
+                "discovered in this field (a sensor counts when its water_tension channel has a "
+                "connector). Wire a tensiometer or disable [anchor]."
+            )
 
     def load_anchor_history(self, start: pd.Timestamp, end: pd.Timestamp) -> None:
         """Range-read each anchor sensor's tension over ``(start - lookback, end]`` for
@@ -813,7 +841,6 @@ class SoilSimulation(SoilBase):
         anchoring is off or no sensor was discovered; a per-sensor read failure leaves
         that sensor unanchored (predict-only) rather than breaking the tick."""
         self._anchor_history = {}
-        self._ensure_sensor_probes()
         if not (self._anchor_cfg.enabled and self._anchor_sensors):
             return
         lookback = max(
