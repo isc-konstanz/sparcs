@@ -66,12 +66,17 @@ def _walk_components(root) -> list:
         if children:
             try:
                 stack.extend(list(children.values()))
-            except Exception:
-                # Some contexts expose iteration differently, so be liberal.
+            except (AttributeError, TypeError):
+                # Not a mapping / no .values() -- some contexts expose iteration
+                # differently, so be liberal. (Real lories contexts yield string
+                # KEYS here, which callers' isinstance filters drop harmlessly.)
                 try:
                     stack.extend(list(children))
-                except Exception:
-                    pass
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "could not iterate the children of %s; skipping its subtree in the component walk.",
+                        getattr(c, "key", repr(c)),
+                    )
     return out
 
 
