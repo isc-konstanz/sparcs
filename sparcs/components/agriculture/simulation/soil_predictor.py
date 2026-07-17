@@ -34,6 +34,7 @@ from typing import Any, Callable, Optional
 import numpy as np
 import pandas as pd
 from lories.components.weather import Weather
+from lories.core import ConfigurationUnavailableError
 from lories.typing import Configurations
 from lories.util import to_timedelta
 from sparcs.components.agriculture.simulation.soil import SoilSimulation
@@ -608,6 +609,39 @@ class SoilPredictor(SoilBase):
             # also rendered (plotting enabled) -- no point declaring the table otherwise.
             if self._plot_config is not None:
                 self._register_image_channels()
+
+    def activate(self) -> None:
+        super().activate()
+        self._validate_logger_connector()
+
+    def _validate_logger_connector(self) -> None:
+        """Refuse to start a predictor whose ``logger =`` id can never resolve
+        (issue 25/W2.7, mirroring _validate_irrigation_input): lories connects
+        connectors BEFORE activating components, so a failed resolution here IS
+        a wiring error -- today it would instead warn "connector not found;
+        skipping" on every table write, forever. The write-time resolution
+        ladder and warn-and-skip degradation are unchanged; only the
+        never-resolvable case fails fast. ``logger`` unset stays a no-op (that
+        shape already warns at configure)."""
+        if self._logger_id is None:
+            return
+        connector = self._resolve_logger_connector(self._logger_id)
+        if connector is None:
+            raise ConfigurationUnavailableError(
+                f"{self.name}: [soil_predictor] logger = '{self._logger_id}' resolves to no "
+                "connector -- every forecast-table write would be skipped. Point it at a "
+                "declared [connectors.<id>] (bare root-level ids resolve via the bound "
+                "channels) or remove the key to disable the direct writes."
+            )
+        # Deliberately stricter than _write_direct_frame's hasattr check: a
+        # non-callable write attr should refuse startup here, not crash-and-log
+        # inside every write later.
+        if not callable(getattr(connector, "write", None)):
+            raise ConfigurationUnavailableError(
+                f"{self.name}: [soil_predictor] logger = '{self._logger_id}' resolved to "
+                f"{type(connector).__name__}, which has no write() -- the forecast tables "
+                "need a writable (SQL) connector."
+            )
 
     # --- Channel registration helpers (data.add() kwargs, unit-testable) -------
 
