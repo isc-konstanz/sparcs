@@ -371,6 +371,8 @@ class GroundShading(Component):
     _plot_fig: Any = None
     _plot_axes: Any = None
     _last_plot_ts: Optional[pd.Timestamp] = None
+    # Consecutive render failures toward plot_style.PLOT_DISABLE_AFTER (W2.9).
+    _plot_strikes: int = 0
     # Last sun-up PV-row geometry; reused for night structure-only frames.
     _last_pv_rows: list
 
@@ -414,9 +416,12 @@ class GroundShading(Component):
         self._plot_y_min = (-mesh.height - 0.5) if mesh is not None else -1.0
 
     def _register_channels(self) -> None:
-        """Register the bulk SHADING_FACTOR channel."""
+        """Register the bulk SHADING_FACTOR channel plus the in-memory
+        plot_strikes strike counter."""
         for c in self.CHANNELS:
             self.data.add(c, aggregate="mean", logger={"enabled": False})
+        # In-memory strike counter (W2.9): registered or it surfaces nowhere.
+        self.data.add("plot_strikes", type=float, name="Plot Strikes", aggregate="last", logger={"enabled": False})
 
     def _configure_plot(self, configs: Configurations) -> None:
         """Read the ``[plot]`` block and register SHADING_PROGRESS_IMAGE when enabled."""
@@ -889,8 +894,14 @@ class GroundShading(Component):
         try:
             self._render_progress(ts, ground, pv_rows, sun_state)
         except Exception:  # noqa: BLE001
-            logger.exception("%s: progress-plot render failed; disabling.", self.name)
-            self._plot_config = None
+            self._plot_strikes, disable = plot_style.count_render_failure(logger, self.name, self._plot_strikes)
+            plot_style.set_strike_channel(self, "plot_strikes", self._plot_strikes)
+            if disable:
+                self._plot_config = None
+            return
+        if self._plot_strikes:
+            self._plot_strikes = 0
+            plot_style.set_strike_channel(self, "plot_strikes", 0)
 
     def _init_progress_figure(self) -> None:
         """Create the matplotlib figure once; reuse across renders.

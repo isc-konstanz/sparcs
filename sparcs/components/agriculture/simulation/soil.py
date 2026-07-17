@@ -248,6 +248,9 @@ class SoilSimulation(SoilBase):
     _plot_fig: Any = None
     _plot_ax: Any = None
     _last_plot_simtime: Optional[pd.Timestamp] = None
+    # Consecutive render failures toward plot_style.PLOT_DISABLE_AFTER (W2.9);
+    # class default for object.__new__ fixtures driving _render_progress_safe.
+    _plot_strikes: int = 0
 
     _probes: list[ProbeSpec]
 
@@ -311,6 +314,8 @@ class SoilSimulation(SoilBase):
             self._plot_mesh(os.path.join(structure_dir, "mesh.png"))
 
         self._plot_config = plot_style.load_plot_config(configs, default_interval=_DEFAULT_PLOT_INTERVAL)
+        # In-memory strike counter (W2.9): registered or it surfaces nowhere.
+        self.data.add("plot_strikes", type=float, name="Plot Strikes", aggregate="last", logger={"enabled": False})
         if self._plot_config is not None:
             self._last_plot_simtime = None
             self._plot_fig = None
@@ -1038,15 +1043,22 @@ class SoilSimulation(SoilBase):
             self._render_progress_safe(now)
 
     def _render_progress_safe(self, sim_t: pd.Timestamp) -> None:
-        """Render at sim_t with error containment; a single render failure
-        disables progress plotting for the rest of the run (``_plot_config`` set
-        to None) rather than crashing the solver."""
+        """Render at sim_t with error containment: a failure skips this tick's
+        rendering, and plot_style.PLOT_DISABLE_AFTER consecutive failures
+        disable plotting for the rest of the run (W2.9 N-strikes policy) rather
+        than crashing the solver."""
         self._last_plot_simtime = sim_t
         try:
             self._render_progress(sim_t)
         except Exception:  # noqa: BLE001
-            logger.exception("%s: progress-plot render failed; disabling.", self.name)
-            self._plot_config = None
+            self._plot_strikes, disable = plot_style.count_render_failure(logger, self.name, self._plot_strikes)
+            plot_style.set_strike_channel(self, "plot_strikes", self._plot_strikes)
+            if disable:
+                self._plot_config = None
+            return
+        if self._plot_strikes:
+            self._plot_strikes = 0
+            plot_style.set_strike_channel(self, "plot_strikes", 0)
 
     def _init_progress_figure(self) -> None:
         # The solver runs on the field tick's worker thread, so render headless.

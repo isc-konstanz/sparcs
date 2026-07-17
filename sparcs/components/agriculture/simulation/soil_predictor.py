@@ -233,6 +233,9 @@ class SoilPredictor(SoilBase):
     # Chosen-candidate field-plot cadence lives in _plot_config (None = plotting off);
     # state-blob capture has its own [state] gate + interval (both snapshot the roll-out).
     _plot_config: Optional[plot_style.PlotConfig] = None
+    # Consecutive failing render TICKS toward plot_style.PLOT_DISABLE_AFTER
+    # (W2.9); one strike per failing tick, not per snapshot.
+    _plot_strikes: int = 0
     _state_freq: pd.Timedelta
     _save_state: bool
 
@@ -578,6 +581,7 @@ class SoilPredictor(SoilBase):
             self._register_plot_channel()
         self._register_diagnostic_channels()
         self._register_write_failure_channels()
+        self._register_plot_strike_channel()
 
         if not self._probes:
             logger.warning(
@@ -722,6 +726,11 @@ class SoilPredictor(SoilBase):
                 aggregate="last",
                 logger={"enabled": False},
             )
+
+    def _register_plot_strike_channel(self) -> None:
+        """In-memory only (Dash/debug): the W2.9 render-failure strike counter.
+        Separate from _register_diagnostic_channels (its count is test-pinned)."""
+        self.data.add("plot_strikes", type=float, name="Plot Strikes", aggregate="last", logger={"enabled": False})
 
     def _bump_write_failure(self, table_label: str) -> None:
         """Count a failed direct write and surface it on the matching in-memory
@@ -2310,14 +2319,20 @@ class SoilPredictor(SoilBase):
                 try:
                     plot_values.append(self._render_snapshot_png(snapshots[t][0], t))
                 except Exception:  # noqa: BLE001
-                    logger.exception(
-                        "%s: predict_plot render failed at %s; skipping remaining plot snapshots this tick.",
-                        self.name,
-                        t,
+                    # One strike per failing TICK; the tick contract is pinned:
+                    # no partial series, predict_plot never set, return None.
+                    self._plot_strikes, disable = plot_style.count_render_failure(
+                        logger, self.name, self._plot_strikes, what="predict_plot"
                     )
+                    plot_style.set_strike_channel(self, "plot_strikes", self._plot_strikes)
+                    if disable:
+                        self._plot_config = None
                     plot_values = []
                     break
             if plot_values:
+                if self._plot_strikes:
+                    self._plot_strikes = 0
+                    plot_style.set_strike_channel(self, "plot_strikes", 0)
                 self.data[self._PLOT_CHANNEL_KEY].set(
                     plot_index[0],
                     pd.Series(plot_values, index=plot_index, dtype=object),

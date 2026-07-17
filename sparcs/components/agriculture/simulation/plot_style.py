@@ -9,6 +9,7 @@ fixed width, equal-aspect axes, shared margins, plasma colormap, and timestamp t
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Optional
 
@@ -17,6 +18,8 @@ from matplotlib.colors import Normalize
 import numpy as np
 import pandas as pd
 from lories.typing import Configurations
+
+logger = logging.getLogger(__name__)
 
 # Progress-plot config + render cadence
 
@@ -61,6 +64,54 @@ def load_plot_config(configs: Configurations, *, default_interval: str) -> Optio
     else:
         interval = pd.Timedelta(interval)
     return PlotConfig(interval=interval)
+
+
+# Consecutive render failures after which a component disables its plotting
+# for the rest of the run (issue 27/W2.9). One transient matplotlib error
+# must not kill plotting until restart; a persistent one must not log forever.
+PLOT_DISABLE_AFTER: int = 3
+
+
+def count_render_failure(
+    component_logger: logging.Logger,
+    name: str,
+    strikes: int,
+    *,
+    what: str = "progress-plot",
+) -> tuple[int, bool]:
+    """Count one render failure toward the shared N-strikes policy and log it
+    (call from inside the except block -- both messages carry the traceback).
+    Returns ``(new_strikes, disable)``; the SITE owns the actual disable
+    (``self._plot_config = None``) and the reset-to-0 on a successful render.
+    The failed render is skipped for this tick either way."""
+    strikes += 1
+    if strikes >= PLOT_DISABLE_AFTER:
+        component_logger.exception(
+            "%s: %s render failed (%d consecutive); disabling plotting for the rest of the run.",
+            name,
+            what,
+            strikes,
+        )
+        return strikes, True
+    component_logger.exception(
+        "%s: %s render failed (strike %d of %d); skipping the rest of this tick's rendering.",
+        name,
+        what,
+        strikes,
+        PLOT_DISABLE_AFTER,
+    )
+    return strikes, False
+
+
+def set_strike_channel(component, key: str, strikes: int) -> None:
+    """Best-effort write of the strike count to the component's in-memory
+    channel (registered logger-off; surfaces in the Dash Data accordion).
+    A no-op when data/channel is absent -- bare test instances drive the real
+    render paths with fake or missing data access."""
+    try:
+        component.data[key].set(pd.Timestamp.now(tz="UTC"), float(strikes))
+    except Exception:  # noqa: BLE001
+        logger.debug("strike channel '%s' unavailable; count=%d kept in memory.", key, strikes)
 
 
 # Style constants
