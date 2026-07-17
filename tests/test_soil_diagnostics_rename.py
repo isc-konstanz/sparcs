@@ -50,6 +50,8 @@ ClipDiagnostics = _soil_core.ClipDiagnostics
         (SoilSimulation.WALK_SKIPPED_S, "skipped_s", "water_skipped_s"),
         # W2.1: consecutive weather-stall ticks preceding the committing tick.
         (SoilSimulation.WEATHER_STALL, "weather_stall", "water_weather_stall"),
+        # W2.2: consecutive tick failures preceding the committing tick.
+        (SoilSimulation.TICK_FAILURES, "tick_failures", "water_tick_failures"),
     ],
 )
 def test_diagnostic_constants_use_short_keys_with_water_registry_id(constant, expected_key, expected_id):

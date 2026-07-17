@@ -57,6 +57,11 @@ _LAI_BY_TYPE: dict[str, list[float]] = {
 # (count == N), not on every tick after.
 _WEATHER_STALL_ERROR_TICKS: int = 3
 
+# Consecutive _tick failures (see FieldSimulation._tick) from which the distinct
+# ERROR fires -- on that failure and EVERY one after (count >= N), unlike the
+# stall counter's one-shot crossing above.
+_TICK_FAILURE_ESCALATE_AT: int = 2
+
 
 class FieldSimulation(Component):
     TYPE: str = "field_simulation"
@@ -126,6 +131,13 @@ class FieldSimulation(Component):
     # was empty/invalid; reset to 0 by any tick that processes >=1 chunk. Class
     # default covers object.__new__ fixtures that never assign it.
     _weather_stall_ticks: int = 0
+
+    # Consecutive ticks (ending with this one) where _on_tick raised; reset to
+    # 0 as soon as _on_tick returns without raising (inside _tick's try, right
+    # after the call). Class default covers object.__new__ fixtures that never
+    # assign it (test_tick_releases_lock_after_failure's bare _sim never sets
+    # it before its one failure).
+    _tick_failures: int = 0
 
     _weather_channels: Optional[Channels] = None
     _required_weather_keys: tuple[str, ...] = ()
@@ -544,7 +556,11 @@ class FieldSimulation(Component):
             slot = self._next_slot(self._now())
 
     def _tick(self) -> None:
-        """Run one slot; skip (never queue) when the previous run still holds the lock."""
+        """Run one slot; skip (never queue) when the previous run still holds the lock.
+
+        Counts consecutive ``_on_tick`` failures (``_tick_failures``, reset the
+        moment ``_on_tick`` returns) and logs a distinct ERROR from the
+        ``_TICK_FAILURE_ESCALATE_AT``th consecutive failure on (issue 20/W2.2)."""
         if not self._tick_lock.acquire(blocking=False):
             logger.warning("%s: previous tick still running; skipping slot.", self.name)
             return
@@ -558,8 +574,23 @@ class FieldSimulation(Component):
             except Exception:
                 logger.exception("%s: failed to arm the slot watchdog; tick continues.", self.name)
             self._on_tick(start)
+            self._tick_failures = 0
         except Exception:
             logger.exception("%s: tick failed.", self.name)
+            self._tick_failures += 1
+            if self._tick_failures >= _TICK_FAILURE_ESCALATE_AT:
+                # Nested try/except so escalation can never itself escape _tick
+                # (hard pin: test_tick_releases_lock_after_failure -- _tick must
+                # not raise and must release the lock no matter what upstream
+                # failed, including a raising mirror inside _on_tick).
+                try:
+                    logger.error(
+                        "%s: tick has failed %d consecutive times.",
+                        self.name,
+                        self._tick_failures,
+                    )
+                except Exception:
+                    pass
         finally:
             watchdog_done.set()
             self._cancel_watchdog()
@@ -651,6 +682,11 @@ class FieldSimulation(Component):
         # count as of before this tick's own outcome is known. Plain setattr --
         # works on the _tick_sim SimpleNamespace stub too (no self.data there).
         self.soil_simulation._weather_stall_ticks = float(self._weather_stall_ticks)
+        # Mirror the count of consecutive _tick failures that PRECEDED this
+        # tick (the reset happens in _tick right after this call returns, so
+        # this still reads the pre-reset value): same rationale and
+        # plain-setattr idiom as the stall mirror above (issue 20/W2.2).
+        self.soil_simulation._tick_failures = float(self._tick_failures)
         # Shutdown-only cancel (B8): threaded into walk_window's existing cancel
         # param so a grinding walk exits promptly instead of blocking
         # _stop_tick_thread's 30s join. None outside a running tick thread (e.g.
