@@ -31,7 +31,7 @@ from lories.typing import Configurations
 from ._soil import ProbeSpec
 
 if TYPE_CHECKING:
-    from typing import Optional
+    from typing import Iterable, Optional
 
     from .soil_predictor import SoilPredictor
 
@@ -95,6 +95,60 @@ class ForecastTablePublisher:
 
     # --- Channel registration (data.add() kwargs, unit-testable) --------------
 
+    def _add_forecast_channel(
+        self,
+        key: str,
+        *,
+        table: str,
+        type: type,
+        name: str,
+        unit: "Optional[str]" = None,
+        column: "Optional[str]" = None,
+        primary: bool = False,
+        identity: "Optional[dict[str, Any]]" = None,
+    ) -> None:
+        """Declare one persisted-table channel: bound to the predictor's
+        ``logger`` connector id, ``aggregate="last"`` always, and the logger
+        dict built BY OMISSION -- no ``column`` key when ``column`` is None
+        (hard absence pin: the irrigation state channel must carry no column
+        key at all), ``primary=True``/``nullable=False`` emitted only for PK
+        partners. ``identity`` (soil_id/field_id) passes through as TOP-LEVEL
+        ``data.add`` kwargs, identical across a probe's channels; a probe with
+        a partial identity set stays warn-not-raise upstream
+        (``resolve_probe_identities``)."""
+        p = self._predictor
+        logger_cfg: dict[str, Any] = {"connector": p._logger_id, "table": table}
+        if column is not None:
+            logger_cfg["column"] = column
+        if primary:
+            logger_cfg["primary"] = True
+            logger_cfg["nullable"] = False
+        logger_cfg["enabled"] = True
+        kwargs: dict[str, Any] = {"type": type, "name": name}
+        if unit is not None:
+            kwargs["unit"] = unit
+        p.data.add(key, aggregate="last", logger=logger_cfg, **kwargs, **(identity or {}))
+
+    def _add_creation_twin(
+        self,
+        key: str,
+        table: str,
+        name: str,
+        identity: "Optional[dict[str, Any]]" = None,
+    ) -> None:
+        """Declare a ``timestamp_creation`` PK twin: the per-run timestamp
+        value channel every persisted table pairs with its rows (shared
+        ``timestamp_creation`` DB column, ``primary``/``nullable=False``)."""
+        self._add_forecast_channel(
+            key,
+            table=table,
+            type=pd.Timestamp,
+            name=name,
+            column="timestamp_creation",
+            primary=True,
+            identity=identity,
+        )
+
     def register_header_channels(self) -> tuple[list[str], list[str]]:
         """`agri_field_forecast`: one row per candidate per run. Bound to the
         configured `logger` connector; these channels are NEVER `.set()` by the
@@ -104,88 +158,31 @@ class ForecastTablePublisher:
         (window_min_keys, window_start_keys), w0 ... w{max_windows-1}, in order.
         Only called when `predictor._logger_id is not None` (see configure())."""
         p = self._predictor
-        p.data.add(
-            p._HEADER_FORECAST_ID_KEY,
-            name="Forecast candidate id",
-            type=int,
-            aggregate="last",
-            logger={
-                "connector": p._logger_id,
-                "table": p._HEADER_TABLE_NAME,
-                "primary": True,
-                "nullable": False,
-                "enabled": True,
-            },
+        table = p._HEADER_TABLE_NAME
+        self._add_forecast_channel(
+            p._HEADER_FORECAST_ID_KEY, table=table, type=int, name="Forecast candidate id", primary=True
         )
 
         window_min_keys = []
         for i in range(p._max_windows):
             key = f"w{i}_min"
             window_min_keys.append(key)
-            p.data.add(
-                key,
-                type=float,
-                name=f"Window {i} duration",
-                unit="min",
-                aggregate="last",
-                logger={
-                    "connector": p._logger_id,
-                    "table": p._HEADER_TABLE_NAME,
-                    "enabled": True,
-                },
-            )
+            self._add_forecast_channel(key, table=table, type=float, name=f"Window {i} duration", unit="min")
 
         window_start_keys = []
         for i in range(p._max_windows):
             key = f"w{i}_start"
             window_start_keys.append(key)
-            p.data.add(
-                key,
-                type=str,
-                name=f"Window {i} start",
-                aggregate="last",
-                logger={
-                    "connector": p._logger_id,
-                    "table": p._HEADER_TABLE_NAME,
-                    "enabled": True,
-                },
-            )
+            self._add_forecast_channel(key, table=table, type=str, name=f"Window {i} start")
 
-        p.data.add(
-            p._HEADER_IS_RECOMMENDED_KEY,
-            type=bool,
-            name="Is recommended candidate",
-            aggregate="last",
-            logger={
-                "connector": p._logger_id,
-                "table": p._HEADER_TABLE_NAME,
-                "enabled": True,
-            },
+        self._add_forecast_channel(
+            p._HEADER_IS_RECOMMENDED_KEY, table=table, type=bool, name="Is recommended candidate"
         )
-
-        p.data.add(
-            p._HEADER_TOTAL_MIN_KEY,
-            type=float,
-            name="Total watering duration",
-            unit="min",
-            aggregate="last",
-            logger={
-                "connector": p._logger_id,
-                "table": p._HEADER_TABLE_NAME,
-                "enabled": True,
-            },
+        self._add_forecast_channel(
+            p._HEADER_TOTAL_MIN_KEY, table=table, type=float, name="Total watering duration", unit="min"
         )
-
-        p.data.add(
-            p._HEADER_WEATHER_CREATION_KEY,
-            name="Weather forecast issue time",
-            type=pd.Timestamp,
-            aggregate="last",
-            logger={
-                "connector": p._logger_id,
-                "table": p._HEADER_TABLE_NAME,
-                "enabled": True,
-            },
+        self._add_forecast_channel(
+            p._HEADER_WEATHER_CREATION_KEY, table=table, type=pd.Timestamp, name="Weather forecast issue time"
         )
         return window_min_keys, window_start_keys
 
@@ -266,6 +263,7 @@ class ForecastTablePublisher:
         probe.channel_id -> that probe's channel key. Only called when
         `predictor._logger_id is not None` (see configure())."""
         p = self._predictor
+        table = p._DETAIL_TABLE_NAME
         tension_keys: dict[str, str] = {}
         creation_keys: dict[str, str] = {}
         forecast_id_keys: dict[str, str] = {}
@@ -273,55 +271,30 @@ class ForecastTablePublisher:
             identity = probe_identities.get(probe.channel_id, {})
             key = f"traj_{probe.channel_id}"
             tension_keys[probe.channel_id] = key
-            p.data.add(
+            self._add_forecast_channel(
                 key,
+                table=table,
                 type=float,
                 name=f"Trajectory {probe.name}",
                 unit="hPa",
-                aggregate="last",
-                logger={
-                    "connector": p._logger_id,
-                    "table": p._DETAIL_TABLE_NAME,
-                    "column": "water_tension",
-                    "enabled": True,
-                },
-                **identity,
+                column="water_tension",
+                identity=identity,
             )
 
             creation_key = f"{key}{p._DETAIL_TIMESTAMP_CREATION_SUFFIX}"
             creation_keys[probe.channel_id] = creation_key
-            p.data.add(
-                creation_key,
-                name=f"Trajectory {probe.name} run timestamp",
-                type=pd.Timestamp,
-                aggregate="last",
-                logger={
-                    "connector": p._logger_id,
-                    "table": p._DETAIL_TABLE_NAME,
-                    "column": "timestamp_creation",
-                    "primary": True,
-                    "nullable": False,
-                    "enabled": True,
-                },
-                **identity,
-            )
+            self._add_creation_twin(creation_key, table, f"Trajectory {probe.name} run timestamp", identity=identity)
 
             forecast_id_key = f"{key}{p._DETAIL_FORECAST_ID_SUFFIX}"
             forecast_id_keys[probe.channel_id] = forecast_id_key
-            p.data.add(
+            self._add_forecast_channel(
                 forecast_id_key,
-                name=f"Trajectory {probe.name} candidate id",
+                table=table,
                 type=int,
-                aggregate="last",
-                logger={
-                    "connector": p._logger_id,
-                    "table": p._DETAIL_TABLE_NAME,
-                    "column": "forecast_id",
-                    "primary": True,
-                    "nullable": False,
-                    "enabled": True,
-                },
-                **identity,
+                name=f"Trajectory {probe.name} candidate id",
+                column="forecast_id",
+                primary=True,
+                identity=identity,
             )
         return tension_keys, creation_keys, forecast_id_keys
 
@@ -333,31 +306,9 @@ class ForecastTablePublisher:
         a single shared `timestamp_creation` value channel is enough -- no
         per-probe twins like the detail table needs."""
         p = self._predictor
-        p.data.add(
-            p._IRRIGATION_STATE_KEY,
-            type=bool,
-            name="Irrigation plan state",
-            aggregate="last",
-            logger={
-                "connector": p._logger_id,
-                "table": p._IRRIGATION_TABLE_NAME,
-                "enabled": True,
-            },
-        )
-        p.data.add(
-            p._IRRIGATION_TIMESTAMP_CREATION_KEY,
-            name="Irrigation plan run timestamp",
-            type=pd.Timestamp,
-            aggregate="last",
-            logger={
-                "connector": p._logger_id,
-                "table": p._IRRIGATION_TABLE_NAME,
-                "column": "timestamp_creation",
-                "primary": True,
-                "nullable": False,
-                "enabled": True,
-            },
-        )
+        table = p._IRRIGATION_TABLE_NAME
+        self._add_forecast_channel(p._IRRIGATION_STATE_KEY, table=table, type=bool, name="Irrigation plan state")
+        self._add_creation_twin(p._IRRIGATION_TIMESTAMP_CREATION_KEY, table, "Irrigation plan run timestamp")
 
     def register_image_channels(self) -> None:
         """`agri_field_forecast_image`: the recommended candidate's field-plot PNGs.
@@ -368,33 +319,11 @@ class ForecastTablePublisher:
         `predictor._logger_id is not None` AND plotting is enabled
         (`predictor._plot_config is not None`; see configure())."""
         p = self._predictor
-        p.data.add(
-            p._IMAGE_KEY,
-            type=bytes,
-            name="Predicted soil field image",
-            unit="png",
-            aggregate="last",
-            logger={
-                "connector": p._logger_id,
-                "table": p._IMAGE_TABLE_NAME,
-                "column": p._IMAGE_COLUMN,
-                "enabled": True,
-            },
+        table = p._IMAGE_TABLE_NAME
+        self._add_forecast_channel(
+            p._IMAGE_KEY, table=table, type=bytes, name="Predicted soil field image", unit="png", column=p._IMAGE_COLUMN
         )
-        p.data.add(
-            p._IMAGE_TIMESTAMP_CREATION_KEY,
-            name="Predicted image run timestamp",
-            type=pd.Timestamp,
-            aggregate="last",
-            logger={
-                "connector": p._logger_id,
-                "table": p._IMAGE_TABLE_NAME,
-                "column": "timestamp_creation",
-                "primary": True,
-                "nullable": False,
-                "enabled": True,
-            },
-        )
+        self._add_creation_twin(p._IMAGE_TIMESTAMP_CREATION_KEY, table, "Predicted image run timestamp")
 
     # --- Frame builders (pure, unit-testable) ---------------------------------
 
@@ -664,64 +593,63 @@ class ForecastTablePublisher:
             p._logger_id,
         )
 
-    def header_id_by_key(self) -> dict[str, str]:
+    def _ids_for(self, keys: "Iterable[str]") -> dict[str, str]:
+        """key -> full channel id for ``keys`` (one ``data`` lookup per key).
+        Only ever called through ``_write_direct_frame``'s lazy ``id_by_key_fn``
+        -- the skip paths must never touch ``predictor.data``."""
         p = self._predictor
-        id_by_key = {
-            p._HEADER_FORECAST_ID_KEY: p.data[p._HEADER_FORECAST_ID_KEY].id,
-            p._HEADER_IS_RECOMMENDED_KEY: p.data[p._HEADER_IS_RECOMMENDED_KEY].id,
-            p._HEADER_TOTAL_MIN_KEY: p.data[p._HEADER_TOTAL_MIN_KEY].id,
-            p._HEADER_WEATHER_CREATION_KEY: p.data[p._HEADER_WEATHER_CREATION_KEY].id,
-        }
-        for key in p._header_window_min_keys:
-            id_by_key[key] = p.data[key].id
-        for key in p._header_window_start_keys:
-            id_by_key[key] = p.data[key].id
-        return id_by_key
+        return {key: p.data[key].id for key in keys}
 
     def write_header_table(self, frame: pd.DataFrame) -> None:
         """Direct-write the ``agri_field_forecast`` header frame."""
         p = self._predictor
-        p._write_direct_frame(frame, p._header_id_by_key, "header table")
-
-    def detail_id_by_key(self) -> dict[str, str]:
-        p = self._predictor
-        id_by_key: dict[str, str] = {}
-        for key in p._traj_channel_keys.values():
-            id_by_key[key] = p.data[key].id
-        for key in p._detail_creation_keys.values():
-            id_by_key[key] = p.data[key].id
-        for key in p._detail_forecast_id_keys.values():
-            id_by_key[key] = p.data[key].id
-        return id_by_key
+        p._write_direct_frame(
+            frame,
+            lambda: self._ids_for(
+                [
+                    p._HEADER_FORECAST_ID_KEY,
+                    *p._header_window_min_keys,
+                    *p._header_window_start_keys,
+                    p._HEADER_IS_RECOMMENDED_KEY,
+                    p._HEADER_TOTAL_MIN_KEY,
+                    p._HEADER_WEATHER_CREATION_KEY,
+                ]
+            ),
+            "header table",
+        )
 
     def write_detail_table(self, frame: pd.DataFrame) -> None:
         """Direct-write the ``agri_soil_forecast`` detail frame."""
         p = self._predictor
-        p._write_direct_frame(frame, p._detail_id_by_key, "detail table")
-
-    def irrigation_id_by_key(self) -> dict[str, str]:
-        p = self._predictor
-        return {
-            p._IRRIGATION_STATE_KEY: p.data[p._IRRIGATION_STATE_KEY].id,
-            p._IRRIGATION_TIMESTAMP_CREATION_KEY: p.data[p._IRRIGATION_TIMESTAMP_CREATION_KEY].id,
-        }
+        p._write_direct_frame(
+            frame,
+            lambda: self._ids_for(
+                [
+                    *p._traj_channel_keys.values(),
+                    *p._detail_creation_keys.values(),
+                    *p._detail_forecast_id_keys.values(),
+                ]
+            ),
+            "detail table",
+        )
 
     def write_irrigation_table(self, frame: pd.DataFrame) -> None:
         """Direct-write the ``agri_field_forecast_irrigation`` edge-row frame."""
         p = self._predictor
-        p._write_direct_frame(frame, p._irrigation_id_by_key, "irrigation table")
-
-    def image_id_by_key(self) -> dict[str, str]:
-        p = self._predictor
-        return {
-            p._IMAGE_KEY: p.data[p._IMAGE_KEY].id,
-            p._IMAGE_TIMESTAMP_CREATION_KEY: p.data[p._IMAGE_TIMESTAMP_CREATION_KEY].id,
-        }
+        p._write_direct_frame(
+            frame,
+            lambda: self._ids_for([p._IRRIGATION_STATE_KEY, p._IRRIGATION_TIMESTAMP_CREATION_KEY]),
+            "irrigation table",
+        )
 
     def write_image_table(self, frame: pd.DataFrame) -> None:
         """Direct-write the ``agri_field_forecast_image`` frame."""
         p = self._predictor
-        p._write_direct_frame(frame, p._image_id_by_key, "image table")
+        p._write_direct_frame(
+            frame,
+            lambda: self._ids_for([p._IMAGE_KEY, p._IMAGE_TIMESTAMP_CREATION_KEY]),
+            "image table",
+        )
 
     # --- Connector resolution ------------------------------------------------
 

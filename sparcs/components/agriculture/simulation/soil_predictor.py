@@ -1644,20 +1644,11 @@ class SoilPredictor(SoilBase):
     ) -> None:
         self._table_publisher().write_direct_frame(frame, id_by_key_fn, table_label)
 
-    def _header_id_by_key(self) -> dict[str, str]:
-        return self._table_publisher().header_id_by_key()
-
     def _write_header_table(self, frame: pd.DataFrame) -> None:
         self._table_publisher().write_header_table(frame)
 
-    def _detail_id_by_key(self) -> dict[str, str]:
-        return self._table_publisher().detail_id_by_key()
-
     def _write_detail_table(self, frame: pd.DataFrame) -> None:
         self._table_publisher().write_detail_table(frame)
-
-    def _irrigation_id_by_key(self) -> dict[str, str]:
-        return self._table_publisher().irrigation_id_by_key()
 
     def _write_irrigation_table(self, frame: pd.DataFrame) -> None:
         self._table_publisher().write_irrigation_table(frame)
@@ -1669,9 +1660,6 @@ class SoilPredictor(SoilBase):
         run_timestamp: pd.Timestamp,
     ) -> pd.DataFrame:
         return self._table_publisher().build_image_frame(save_index, plot_values, run_timestamp)
-
-    def _image_id_by_key(self) -> dict[str, str]:
-        return self._table_publisher().image_id_by_key()
 
     def _write_image_table(self, frame: pd.DataFrame) -> None:
         self._table_publisher().write_image_table(frame)
