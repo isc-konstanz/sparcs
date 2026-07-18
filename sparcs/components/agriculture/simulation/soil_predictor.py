@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Callable, Optional
+from typing import Any, Callable, NamedTuple, Optional
 
 import numpy as np
 import pandas as pd
@@ -131,6 +131,17 @@ _WRITE_FAILURE_KEYS = {
     "irrigation table": "irrigation_write_failures",
     "image table": "image_write_failures",
 }
+
+
+class GridResult(NamedTuple):
+    """One successful watering-grid pass (see ``SoilPredictor._run_grid``):
+    the chosen candidate, every candidate's tension trajectories, and the
+    recommended candidate's rendered field plots (``None`` when plotting is
+    off). ``predict()`` treats a non-``None`` GridResult as published."""
+
+    chosen: tuple[pd.Timedelta, ...]
+    ladder_traj: dict[tuple[pd.Timedelta, ...], tuple[list[pd.Timestamp], dict[str, list[float]]]]
+    recommended_plot: Optional[tuple[pd.DatetimeIndex, list[bytes]]]
 
 
 class SoilPredictor(SoilBase):
@@ -751,6 +762,14 @@ class SoilPredictor(SoilBase):
         partner (``now``, the predictor's own run time, is: see
         ``_build_header_frame``/``_build_detail_frame``). Falls back to ``now`` when
         unavailable so the column always gets a non-null value.
+
+        A spine over four phase methods -- ``_gate_boundary`` (cadence + dedup,
+        returns the boundary WITHOUT claiming), ``_prepare_inputs`` (forecast
+        fetch, sibling/cold-start guards, the boundary claim, chain replay),
+        ``_run_grid`` (the whole watering-grid block incl. its publish;
+        ``None`` on any failure) and ``_persist_grid_tables`` (the four
+        best-effort table writes) -- with the zero-flow solve and the fallback
+        publish kept inline between them.
         """
         if forecast_creation is None:
             logger.debug(
@@ -762,84 +781,15 @@ class SoilPredictor(SoilBase):
             )
             forecast_creation = now
 
-        tz = self.context.location.timezone
-        boundary = self._current_boundary(now, tz, self._interval_min, self._offset_min)
-        if boundary == self._last_boundary_run:
-            logger.debug(
-                "%s: predict skipped (no new %d-min boundary since %s).",
-                self.name,
-                self._interval_min,
-                self._last_boundary_run,
-            )
+        boundary = self._gate_boundary(now, forecast_creation)
+        if boundary is None:
             return
 
-        key = (now, forecast_creation)
-        if self._last_predicted_key == key:
-            logger.debug(
-                "%s: predict skipped (already published for now=%s, creation=%s).",
-                self.name,
-                now,
-                forecast_creation,
-            )
+        prepared = self._prepare_inputs(now, boundary)
+        if prepared is None:
             return
+        et_data, seg_et, ic_rel_sat = prepared
 
-        forecast = self._fetch_forecast(now)
-        if forecast is None or forecast.empty:
-            logger.info(
-                "%s: predict skipped: no forecast rows in [%s, %s].",
-                self.name,
-                now,
-                now + self._horizon,
-            )
-            cause = self._forecast_empty_cause
-            if cause is not None and boundary != self._forecast_warn_boundary:
-                # Once per unclaimed boundary (the INFO above fires every retry
-                # tick): a forecast-enabled predictor producing nothing is an
-                # anomaly worth an operator-visible signal, not routine no-data.
-                logger.warning(
-                    "%s: prediction is stalled at boundary %s: %s. Retrying every tick until forecast rows appear.",
-                    self.name,
-                    boundary,
-                    cause,
-                )
-                self._forecast_warn_boundary = boundary
-            return
-
-        field = self.context
-        soil = getattr(field, "soil_simulation", None)
-        if soil is None:
-            logger.info("%s: predict skipped: no soil_simulation sibling.", self.name)
-            return
-
-        if getattr(soil, "_last_simulated_at", None) is None:
-            logger.debug(
-                "%s: predict skipped: live solver has no state yet (cold-start still running) at %s.",
-                self.name,
-                now,
-            )
-            return
-
-        # Claim the boundary only once every transient precondition has passed (a
-        # present forecast AND live soil state), so a missing-forecast or cold-start
-        # tick retries on the next tick instead of silently burning the whole day,
-        # while a ready tick bounds the heavy chain replay + roll-out to one attempt
-        # per boundary.
-        self._last_boundary_run = boundary
-
-        try:
-            et_data, seg_et = field._run_chain(forecast, publish=False)
-        except Exception:  # noqa: BLE001
-            logger.exception("%s: chain replay on forecast failed; skipping tick.", self.name)
-            return
-        if et_data.empty or et_data.shape[0] < 2:
-            logger.info(
-                "%s: predict skipped: chain replay returned %d row(s), need ≥ 2.",
-                self.name,
-                et_data.shape[0],
-            )
-            return
-
-        ic_rel_sat = soil.get_rel_sat_snapshot()
         try:
             zf_timestamps, zf_trajectories, zf_snapshots, zf_diagnostics = self._solve(ic_rel_sat, et_data, seg_et)
         except Exception:  # noqa: BLE001
@@ -850,7 +800,7 @@ class SoilPredictor(SoilBase):
         # roll-mechanics tests hold), everything downstream is hPa. The zero-flow
         # roll is computed every tick but HELD, not published here: it is the
         # fallback that keeps a forecast on the main channels if the watering-grid
-        # block below throws, and the forecast for deployments with no windows.
+        # block throws, and the forecast for deployments with no windows.
         zf_trajectories = self._trajectories_to_tension(zf_trajectories)
 
         published = False
@@ -863,57 +813,19 @@ class SoilPredictor(SoilBase):
         horizon_start = et_data.index[0]
         horizon_end = et_data.index[-1]
 
-        # Watering-grid roll-out: pick the recommended candidate and publish ITS
-        # roll on the main channels (not the zero-flow roll). Only when windows are
-        # configured. Isolated in its own try/except so any roll-out/select/re-solve
-        # failure falls through to the zero-flow fallback publish below -- a ready
-        # tick always lands one complete, self-consistent forecast.
-        if self._windows:
-            try:
-                ladder_traj = self._rollout_dispatch(ic_rel_sat, et_data, seg_et, horizon_start, horizon_end)
-                # Same Se -> tension boundary as the zero-flow roll, per candidate.
-                ladder_traj = {
-                    candidate: (candidate_ts, self._trajectories_to_tension(probe_series))
-                    for candidate, (candidate_ts, probe_series) in ladder_traj.items()
-                }
-                chosen = self._select(
-                    self._ladder,
-                    ladder_traj,
-                    self._decision_probes,
-                    self._threshold_hpa,
-                    self._grid_mode,
-                )
-
-                # Recover the chosen candidate's snapshots + diagnostics for the main
-                # channels: the ladder roll keeps only trajectories, so re-solve the
-                # single chosen candidate. When it is the all-0min rung the zero-flow
-                # solve already IS that roll -- reuse it, no re-solve.
-                if chosen == tuple(pd.Timedelta(0) for _ in chosen):
-                    ch_timestamps, ch_trajectories = zf_timestamps, zf_trajectories
-                    ch_snapshots, ch_diagnostics = zf_snapshots, zf_diagnostics
-                else:
-                    ch_timestamps, ch_trajectories, ch_snapshots, ch_diagnostics = self._solve_candidate(
-                        ic_rel_sat, chosen, et_data, seg_et, horizon_start, horizon_end
-                    )
-                    ch_trajectories = self._trajectories_to_tension(ch_trajectories)
-
-                recommended_plot = self._publish_results(
-                    ch_trajectories,
-                    self._probes,
-                    ch_timestamps,
-                    ch_snapshots,
-                    ch_diagnostics,
-                    forecast_creation,
-                )
-                published = True
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "%s: watering-grid roll-out/selection/publish failed "
-                    "(now=%s, creation=%s); falling back to the zero-flow forecast.",
-                    self.name,
-                    now,
-                    forecast_creation,
-                )
+        grid = self._run_grid(
+            ic_rel_sat,
+            et_data,
+            seg_et,
+            (zf_timestamps, zf_trajectories, zf_snapshots, zf_diagnostics),
+            now,
+            forecast_creation,
+        )
+        if grid is not None:
+            published = True
+            chosen = grid.chosen
+            ladder_traj = grid.ladder_traj
+            recommended_plot = grid.recommended_plot
 
         if not published:
             try:
@@ -934,7 +846,7 @@ class SoilPredictor(SoilBase):
                 )
                 return
 
-        self._last_predicted_key = key
+        self._last_predicted_key = (now, forecast_creation)
         logger.info(
             "%s: predict OK: %d probes, %d rows emitted (now=%s, creation=%s).",
             self.name,
@@ -944,58 +856,245 @@ class SoilPredictor(SoilBase):
             forecast_creation,
         )
 
-        # Secondary watering-grid writes -- the agri_field_forecast header, the
-        # agri_soil_forecast detail rows (ALL candidates), the chosen candidate's
-        # agri_field_forecast_irrigation edge rows, and the recommended candidate's
-        # agri_field_forecast_image field plots.
-        # Best-effort PER TABLE (issue 24/W2.6: one failed build/write must not
-        # skip the later tables) and only when the grid path produced a
-        # recommendation: a failure here never affects the forecast already
-        # published on the main channels above. `now` is the run time (every
-        # run's rows are kept, keyed by it -- see _build_header_frame /
-        # _build_detail_frame / _build_irrigation_frame / _build_image_frame);
-        # `forecast_creation` (the weather issue time) is persisted only as the
-        # header's weather_creation data column.
         if published and chosen is not None:
+            self._persist_grid_tables(
+                chosen, ladder_traj, now, forecast_creation, horizon_start, horizon_end, recommended_plot
+            )
+
+    def _gate_boundary(self, now: pd.Timestamp, forecast_creation: pd.Timestamp) -> Optional[pd.Timestamp]:
+        """Cadence + dedup gate: compute the site-local run boundary and return
+        it, or ``None`` when this tick should skip (boundary already ran, or
+        this exact ``(now, forecast_creation)`` pair already published). Does
+        NOT claim the boundary -- ``_prepare_inputs`` claims it only once every
+        transient precondition has passed, so a missing-forecast or cold-start
+        tick retries on the next tick.
+        """
+        tz = self.context.location.timezone
+        boundary = self._current_boundary(now, tz, self._interval_min, self._offset_min)
+        if boundary == self._last_boundary_run:
+            logger.debug(
+                "%s: predict skipped (no new %d-min boundary since %s).",
+                self.name,
+                self._interval_min,
+                self._last_boundary_run,
+            )
+            return None
+
+        if self._last_predicted_key == (now, forecast_creation):
+            logger.debug(
+                "%s: predict skipped (already published for now=%s, creation=%s).",
+                self.name,
+                now,
+                forecast_creation,
+            )
+            return None
+
+        return boundary
+
+    def _prepare_inputs(
+        self,
+        now: pd.Timestamp,
+        boundary: pd.Timestamp,
+    ) -> Optional[tuple[pd.DataFrame, dict[str, pd.DataFrame], np.ndarray]]:
+        """Fetch the forecast, verify the live-soil preconditions, CLAIM the
+        boundary, and replay the ET chain: returns ``(et_data, seg_et,
+        ic_rel_sat)``, or ``None`` on any skip.
+        """
+        forecast = self._fetch_forecast(now)
+        if forecast is None or forecast.empty:
+            logger.info(
+                "%s: predict skipped: no forecast rows in [%s, %s].",
+                self.name,
+                now,
+                now + self._horizon,
+            )
+            cause = self._forecast_empty_cause
+            if cause is not None and boundary != self._forecast_warn_boundary:
+                # Once per unclaimed boundary (the INFO above fires every retry
+                # tick): a forecast-enabled predictor producing nothing is an
+                # anomaly worth an operator-visible signal, not routine no-data.
+                logger.warning(
+                    "%s: prediction is stalled at boundary %s: %s. Retrying every tick until forecast rows appear.",
+                    self.name,
+                    boundary,
+                    cause,
+                )
+                self._forecast_warn_boundary = boundary
+            return None
+
+        field = self.context
+        soil = getattr(field, "soil_simulation", None)
+        if soil is None:
+            logger.info("%s: predict skipped: no soil_simulation sibling.", self.name)
+            return None
+
+        if getattr(soil, "_last_simulated_at", None) is None:
+            logger.debug(
+                "%s: predict skipped: live solver has no state yet (cold-start still running) at %s.",
+                self.name,
+                now,
+            )
+            return None
+
+        # Claim the boundary only once every transient precondition has passed (a
+        # present forecast AND live soil state), so a missing-forecast or cold-start
+        # tick retries on the next tick instead of silently burning the whole day,
+        # while a ready tick bounds the heavy chain replay + roll-out to one attempt
+        # per boundary.
+        self._last_boundary_run = boundary
+
+        try:
+            et_data, seg_et = field._run_chain(forecast, publish=False)
+        except Exception:  # noqa: BLE001
+            logger.exception("%s: chain replay on forecast failed; skipping tick.", self.name)
+            return None
+        if et_data.empty or et_data.shape[0] < 2:
+            logger.info(
+                "%s: predict skipped: chain replay returned %d row(s), need ≥ 2.",
+                self.name,
+                et_data.shape[0],
+            )
+            return None
+
+        return et_data, seg_et, soil.get_rel_sat_snapshot()
+
+    def _run_grid(
+        self,
+        ic_rel_sat: np.ndarray,
+        et_data: pd.DataFrame,
+        seg_et: dict[str, pd.DataFrame],
+        zf_solution: tuple[
+            list[pd.Timestamp],
+            dict[str, list[float]],
+            dict[pd.Timestamp, tuple[Optional[np.ndarray], Optional[bytes]]],
+            dict[str, list[float]],
+        ],
+        now: pd.Timestamp,
+        forecast_creation: pd.Timestamp,
+    ) -> Optional[GridResult]:
+        """Watering-grid roll-out: pick the recommended candidate and publish ITS
+        roll on the main channels (not the zero-flow roll). Only when windows are
+        configured. The whole block sits in one try/except so any
+        roll-out/select/re-solve/publish failure returns ``None`` and the
+        zero-flow fallback publish in ``predict()`` still runs -- a ready tick
+        always lands one complete, self-consistent forecast. ``zf_solution`` is
+        the already-tension-converted zero-flow solve, reused verbatim when the
+        chosen candidate is the all-0min rung (no re-solve).
+        """
+        if not self._windows:
+            return None
+
+        zf_timestamps, zf_trajectories, zf_snapshots, zf_diagnostics = zf_solution
+        horizon_start = et_data.index[0]
+        horizon_end = et_data.index[-1]
+        try:
+            ladder_traj = self._rollout_dispatch(ic_rel_sat, et_data, seg_et, horizon_start, horizon_end)
+            # Same Se -> tension boundary as the zero-flow roll, per candidate.
+            ladder_traj = {
+                candidate: (candidate_ts, self._trajectories_to_tension(probe_series))
+                for candidate, (candidate_ts, probe_series) in ladder_traj.items()
+            }
+            chosen = self._select(
+                self._ladder,
+                ladder_traj,
+                self._decision_probes,
+                self._threshold_hpa,
+                self._grid_mode,
+            )
+
+            # Recover the chosen candidate's snapshots + diagnostics for the main
+            # channels: the ladder roll keeps only trajectories, so re-solve the
+            # single chosen candidate. When it is the all-0min rung the zero-flow
+            # solve already IS that roll -- reuse it, no re-solve.
+            if chosen == tuple(pd.Timedelta(0) for _ in chosen):
+                ch_timestamps, ch_trajectories = zf_timestamps, zf_trajectories
+                ch_snapshots, ch_diagnostics = zf_snapshots, zf_diagnostics
+            else:
+                ch_timestamps, ch_trajectories, ch_snapshots, ch_diagnostics = self._solve_candidate(
+                    ic_rel_sat, chosen, et_data, seg_et, horizon_start, horizon_end
+                )
+                ch_trajectories = self._trajectories_to_tension(ch_trajectories)
+
+            recommended_plot = self._publish_results(
+                ch_trajectories,
+                self._probes,
+                ch_timestamps,
+                ch_snapshots,
+                ch_diagnostics,
+                forecast_creation,
+            )
+            return GridResult(chosen=chosen, ladder_traj=ladder_traj, recommended_plot=recommended_plot)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "%s: watering-grid roll-out/selection/publish failed "
+                "(now=%s, creation=%s); falling back to the zero-flow forecast.",
+                self.name,
+                now,
+                forecast_creation,
+            )
+            return None
+
+    def _persist_grid_tables(
+        self,
+        chosen: tuple[pd.Timedelta, ...],
+        ladder_traj: dict[tuple[pd.Timedelta, ...], tuple[list[pd.Timestamp], dict[str, list[float]]]],
+        now: pd.Timestamp,
+        forecast_creation: pd.Timestamp,
+        horizon_start: pd.Timestamp,
+        horizon_end: pd.Timestamp,
+        recommended_plot: Optional[tuple[pd.DatetimeIndex, list[bytes]]],
+    ) -> None:
+        """Secondary watering-grid writes -- the agri_field_forecast header, the
+        agri_soil_forecast detail rows (ALL candidates), the chosen candidate's
+        agri_field_forecast_irrigation edge rows, and the recommended candidate's
+        agri_field_forecast_image field plots.
+
+        Best-effort PER TABLE (issue 24/W2.6: one failed build/write must not
+        skip the later tables) and only called when the grid path produced a
+        recommendation (see predict()'s gate): a failure here never affects the
+        forecast already published on the main channels. ``now`` is the run
+        time (every run's rows are kept, keyed by it -- see _build_header_frame
+        / _build_detail_frame / _build_irrigation_frame / _build_image_frame);
+        ``forecast_creation`` (the weather issue time) is persisted only as the
+        header's weather_creation data column.
+        """
+        try:
+            self._write_header_table(self._build_header_frame(self._ladder, chosen, now, forecast_creation))
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "%s: header-table write failed (now=%s, creation=%s); "
+                "the forecast published on the main channels is unaffected.",
+                self.name,
+                now,
+                forecast_creation,
+            )
+        try:
+            self._write_detail_table(self._build_detail_frame(self._ladder, ladder_traj, now))
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "%s: detail-table write failed (now=%s); the forecast published on the main channels is unaffected.",
+                self.name,
+                now,
+            )
+        try:
+            self._write_irrigation_table(self._build_irrigation_frame(chosen, horizon_start, horizon_end, now))
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "%s: irrigation-table write failed (now=%s); "
+                "the forecast published on the main channels is unaffected.",
+                self.name,
+                now,
+            )
+        if recommended_plot is not None:
             try:
-                self._write_header_table(self._build_header_frame(self._ladder, chosen, now, forecast_creation))
+                save_index, plot_values = recommended_plot
+                self._write_image_table(self._build_image_frame(save_index, plot_values, now))
             except Exception:  # noqa: BLE001
                 logger.exception(
-                    "%s: header-table write failed (now=%s, creation=%s); "
-                    "the forecast published on the main channels is unaffected.",
-                    self.name,
-                    now,
-                    forecast_creation,
-                )
-            try:
-                self._write_detail_table(self._build_detail_frame(self._ladder, ladder_traj, now))
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "%s: detail-table write failed (now=%s); "
-                    "the forecast published on the main channels is unaffected.",
+                    "%s: image-table write failed (now=%s); the forecast published on the main channels is unaffected.",
                     self.name,
                     now,
                 )
-            try:
-                self._write_irrigation_table(self._build_irrigation_frame(chosen, horizon_start, horizon_end, now))
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "%s: irrigation-table write failed (now=%s); "
-                    "the forecast published on the main channels is unaffected.",
-                    self.name,
-                    now,
-                )
-            if recommended_plot is not None:
-                try:
-                    save_index, plot_values = recommended_plot
-                    self._write_image_table(self._build_image_frame(save_index, plot_values, now))
-                except Exception:  # noqa: BLE001
-                    logger.exception(
-                        "%s: image-table write failed (now=%s); "
-                        "the forecast published on the main channels is unaffected.",
-                        self.name,
-                        now,
-                    )
 
     # PDE backend
 
