@@ -24,16 +24,13 @@ import numpy as np
 import pandas as pd
 from lories import Constant
 from lories.components.weather import Weather
-from lories.core import ConfigurationError, ConfigurationUnavailableError
+from lories.core import ConfigurationError
 from lories.data import Channels
 from lories.typing import Configurations
-from lories.util import to_timedelta
 
-from . import plot_render, plot_style
-from ._anchor import AnchorConfig, AnchorSensor, SensorOverrides, anchor_update, latest_reading_at
+from . import _anchor_runtime, plot_render, plot_style
+from ._anchor import AnchorSensor
 from ._soil import (
-    SE_MAX,
-    SE_MIN,
     SOIL_SIMULATION_ALLOWED_KEYS,
     ClipDiagnostics,
     FluxRates,
@@ -44,7 +41,6 @@ from ._soil import (
     ensure_mesh,
     flow_m3s_per_m,
     resolve_pde_config,
-    resolve_probe_from_sensor,
     resolve_probes,
     warn_unknown_keys,
 )
@@ -55,76 +51,11 @@ logger = logging.getLogger(__name__)
 _DEFAULT_PLOT_INTERVAL: str = "5min"
 
 
-def _walk_components(root) -> list:
-    """Flatten a component subtree into a list (root first)."""
-    out: list = []
-    stack = [root]
-    while stack:
-        c = stack.pop()
-        out.append(c)
-        children = getattr(c, "components", None)
-        if children:
-            try:
-                stack.extend(list(children.values()))
-            except (AttributeError, TypeError):
-                # Not a mapping / no .values() -- some contexts expose iteration
-                # differently, so be liberal. (Real lories contexts yield string
-                # KEYS here, which callers' isinstance filters drop harmlessly.)
-                try:
-                    stack.extend(list(children))
-                except Exception:  # noqa: BLE001
-                    logger.warning(
-                        "could not iterate the children of %s; skipping its subtree in the component walk.",
-                        getattr(c, "key", repr(c)),
-                    )
-    return out
-
-
-def _opt_float(spec: Configurations, key: str) -> Optional[float]:
-    """Read an optional float override from a per-sensor sub-block (``None`` if absent)."""
-    value = spec.get(key, default=None)
-    return None if value is None else float(value)
-
-
-def _parse_anchor_config(configs: Configurations) -> AnchorConfig:
-    """Parse an ``[anchor]`` block into the FiPy-free ``AnchorConfig``.
-
-    Off by default, so existing configs and calibration runs are unaffected. Two
-    mutually exclusive ways to name the allowlist:
-
-    - a bare ``sensors`` value (list of keys, or a comma string) -- every sensor
-      inherits the ``[anchor]`` globals; or
-    - per-sensor ``[anchor.sensors.<key>]`` sub-blocks (mirroring the
-      ``[probes.points.<name>]`` precedent), each optionally overriding
-      ``sigma_meas_pf``/``staleness``/``r_horizontal``/``r_vertical``; any omitted
-      key inherits the global. ``sigma_sys`` stays global (see ``SensorOverrides``).
-    """
-    if configs.has_member("sensors"):
-        sensors: dict[str, SensorOverrides | None] = {
-            str(key): SensorOverrides(
-                sigma_meas_pf=_opt_float(spec, "sigma_meas_pf"),
-                staleness=(
-                    None if spec.get("staleness", default=None) is None else to_timedelta(spec.get("staleness"))
-                ),
-                r_horizontal=_opt_float(spec, "r_horizontal"),
-                r_vertical=_opt_float(spec, "r_vertical"),
-            )
-            for key, spec in configs.get_member("sensors").items()
-        }
-    else:
-        raw = configs.get("sensors", default=[]) or []
-        if isinstance(raw, str):
-            raw = [s.strip() for s in raw.split(",") if s.strip()]
-        sensors = {str(key): None for key in raw}
-    return AnchorConfig(
-        enabled=configs.get_bool("enabled", default=False),
-        sigma_sys=float(configs.get("sigma_sys", default=0.05)),
-        sigma_meas_pf=float(configs.get("sigma_meas_pf", default=0.15)),
-        r_horizontal=float(configs.get("r_horizontal", default=0.5)),
-        r_vertical=float(configs.get("r_vertical", default=0.2)),
-        staleness=to_timedelta(configs.get("staleness", default="6h")),
-        sensors=sensors,
-    )
+# The anchor lifecycle (config parse, sensor discovery, per-tick history read,
+# assimilation apply) lives in _anchor_runtime; re-export the two module-level
+# names that tests and configure() reach via this module's path.
+_walk_components = _anchor_runtime._walk_components
+_parse_anchor_config = _anchor_runtime._parse_anchor_config
 
 
 def _resolve_mesh_config(context: Any, configs: Configurations) -> MeshConfig:
@@ -778,190 +709,46 @@ class SoilSimulation(SoilBase):
         the same reason as get_probes()."""
         return list(getattr(self, "_sensor_probes", []))
 
-    def _discover_sensor_probes(self) -> list[tuple[str, Exception]]:
-        """Derive one probe per enabled, tension-measured SoilMoisture sensor in
-        this field. A sensor is a probe that also carries measured data; here we
-        resolve only the model-side sampling recipe (sample-only, no logged
-        channel). Runs once, from validate_sensor_probes() at activation --
-        every sibling has completed configure() by then, and discovery reads
-        only configure-time sensor state (channel-connector presence, geometry).
-        This sim's field is reached via SoilSimulation.context (the
-        FieldSimulation) -> .context (the AgriculturalField that owns the
-        sensors). Returns the per-sensor derivation failures (key, exception);
-        validate_sensor_probes decides whether they refuse startup."""
-        from sparcs.components.agriculture.soil.moisture import SoilMoisture
+    # Anchor lifecycle -- bodies live in _anchor_runtime.AnchorRuntime, a
+    # per-call duck-typed view over this sim; the delegates below keep the
+    # pinned names/signatures, and anchor STATE stays resident on the sim.
+    # The view is constructed INLINE per call (never a shared helper, never
+    # cached): the history-read pins call these unbound on SimpleNamespace
+    # fakes, which carry only the ``_anchor_*`` attributes themselves.
 
-        failures: list[tuple[str, Exception]] = []
-        field = getattr(getattr(self, "context", None), "context", None)
-        if field is None:
-            return failures
-        found: list[ProbeSpec] = []
-        anchor_sensors: list[AnchorSensor] = []
-        anchor_channels: dict[str, Any] = {}
-        anchor_data: dict[str, Any] = {}
-        for comp in _walk_components(field):
-            if not isinstance(comp, SoilMoisture):
-                continue
-            try:
-                if not comp.has_measured_tension:
-                    continue
-                found.append(resolve_probe_from_sensor(comp, self._mesh_fipy, self._mesh_config))
-                anchor_sensors.append(AnchorSensor(key=comp.key, x_offset_cm=comp.x_offset, depth_cm=comp.depth))
-                anchor_channels[comp.key] = comp.data[SoilMoisture.WATER_TENSION]
-                # Keep the sensor's data context so load_anchor_history can issue a
-                # ranged tension read through its connector each tick.
-                anchor_data[comp.key] = comp.data
-            except Exception as e:
-                logger.exception(
-                    "%s: failed to derive probe from sensor %s",
-                    self.name,
-                    getattr(comp, "key", "?"),
-                )
-                failures.append((str(getattr(comp, "key", "?")), e))
-        self._sensor_probes = found
-        self._anchor_sensors = anchor_sensors
-        self._anchor_channels = anchor_channels
-        self._anchor_data = anchor_data
-        if found:
-            logger.info("%s: discovered %d sensor probe(s) for anchoring", self.name, len(found))
-        return failures
+    def _discover_sensor_probes(self) -> list[tuple[str, Exception]]:
+        """Sensor-probe/anchor discovery; see ``AnchorRuntime.discover``."""
+        return _anchor_runtime.AnchorRuntime(self).discover()
 
     def validate_sensor_probes(self) -> None:
         """Run sensor-probe/anchor discovery once, at activation (called by
-        FieldSimulation.activate before the tick thread starts). Anchoring is an
-        explicit operator opt-in, so with [anchor] enabled a discovery failure,
-        a sensor whose probe cannot be derived, or zero tension-measured sensors
-        is a wiring error and refuses startup (mirroring
-        _validate_irrigation_input). Discovery enabled only via
-        ``discover_sensor_probes`` (anchor off) is not a fail-fast opt-in:
-        failures are logged and the sim runs with whatever probes were
-        successfully derived (possibly none)."""
-        if not self._discover_sensor_probes_enabled:
-            return
-        strict = self._anchor_cfg.enabled
-        try:
-            failures = self._discover_sensor_probes()
-        except Exception as e:
-            if strict:
-                raise ConfigurationUnavailableError(
-                    f"{self.name}: [anchor] is enabled but sensor-probe discovery failed: {e}. "
-                    "Verify the field's SoilMoisture sensor wiring before starting."
-                ) from e
-            logger.exception("%s: sensor-probe discovery failed; continuing without sensor probes", self.name)
-            return
-        if not strict:
-            return
-        if failures:
-            failed = ", ".join(key for key, _ in failures)
-            raise ConfigurationUnavailableError(
-                f"{self.name}: [anchor] is enabled but probe derivation failed for sensor(s): {failed}. "
-                "See the exception log above; fix the sensor geometry/mesh wiring before starting."
-            ) from failures[0][1]
-        if not self._anchor_sensors:
-            raise ConfigurationUnavailableError(
-                f"{self.name}: [anchor] is enabled but no tension-measured SoilMoisture sensor was "
-                "discovered in this field (a sensor counts when its water_tension channel has a "
-                "connector). Wire a tensiometer or disable [anchor]."
-            )
-
-    def _warn_if_anchor_read_stale(self, key: str, wall_now: pd.Timestamp) -> None:
-        """WARN once (latched until recovery) when a sensor's last non-empty read
-        is older than its [anchor] staleness bound -- the error-empty-vs-no-data
-        distinction lories' empty-frame conversion erases (issue 23/W2.5)."""
-        age = wall_now - self._anchor_last_read.get(key, wall_now)
-        bound = self._anchor_cfg.sensor_staleness(key)
-        if age > bound and key not in self._anchor_stale_warned:
-            logger.warning(
-                "%s: anchor sensor %s has produced no readings for %s (staleness bound %s); "
-                "it stays predict-only until data returns -- check the tensiometer/connector.",
-                self.name,
-                key,
-                age,
-                bound,
-            )
-            self._anchor_stale_warned.add(key)
+        FieldSimulation.activate before the tick thread starts); with [anchor]
+        enabled a wiring failure refuses startup. See
+        ``_anchor_runtime.AnchorRuntime.validate`` for the full semantics."""
+        _anchor_runtime.AnchorRuntime(self).validate()
 
     def load_anchor_history(self, start: pd.Timestamp, end: pd.Timestamp) -> None:
-        """Range-read each anchor sensor's tension over ``(start - lookback, end]`` for
-        this tick, so the anchor assimilates each reading at its own timestamp rather
-        than smearing the latest value across the window. ``lookback`` is the widest
-        sensor staleness, so a reading just before ``start`` still covers the opening
-        rows; ``anchor_update``'s staleness gate drops anything too old. No-op when
-        anchoring is off or no sensor was discovered; a per-sensor read failure leaves
-        that sensor unanchored (predict-only) rather than breaking the tick."""
-        self._anchor_history = {}
-        if not (self._anchor_cfg.enabled and self._anchor_sensors):
-            return
-        lookback = max(
-            (self._anchor_cfg.sensor_staleness(s.key) for s in self._anchor_sensors),
-            default=pd.Timedelta(0),
-        )
-        read_start = start - lookback
-        # Lazy init for object.__new__ instances that bypassed _configure_probes
-        # (class defaults are None; see the class-body declarations).
-        if self._anchor_last_read is None:
-            self._anchor_last_read = {}
-        if self._anchor_stale_warned is None:
-            self._anchor_stale_warned = set()
-        wall_now = pd.Timestamp.now(tz="UTC")
-        for sensor in self._anchor_sensors:
-            data = self._anchor_data.get(sensor.key)
-            channel = self._anchor_channels.get(sensor.key)
-            if data is None or channel is None:
-                continue
-            # Seed on first sight so a dead-from-birth sensor warns once its
-            # staleness elapses (wall-clock-keyed; see _configure_probes note).
-            self._anchor_last_read.setdefault(sensor.key, wall_now)
-            try:
-                frame = data.read(Channels([channel]), start=read_start, end=end, unique=True)
-            except Exception:
-                logger.exception("%s: anchor history read failed for %s", self.name, sensor.key)
-                continue
-            if frame is None or frame.empty:
-                self._warn_if_anchor_read_stale(sensor.key, wall_now)
-                continue
-            self._anchor_last_read[sensor.key] = wall_now
-            self._anchor_stale_warned.discard(sensor.key)
-            series = frame.iloc[:, 0].dropna().sort_index()
-            series = series[~series.index.duplicated(keep="last")]
-            if not series.empty:
-                self._anchor_history[sensor.key] = series
+        """Range-read each anchor sensor's tension for this tick (called by
+        FieldSimulation._on_tick). See ``_anchor_runtime.AnchorRuntime.load_history``."""
+        _anchor_runtime.AnchorRuntime(self).load_history(start, end)
 
     def _read_history_tension(self, sensor: AnchorSensor, now: pd.Timestamp) -> tuple[Optional[pd.Timestamp], float]:
-        """Assimilation backend: the tensiometer reading contemporaneous with sim step
-        ``now`` -- the latest at or before it from this tick's ranged read
-        (:meth:`load_anchor_history`), or ``(None, nan)`` when none. Replaces the old
-        single-latest live read so each reading anchors at its own time."""
-        return latest_reading_at(self._anchor_history.get(sensor.key), now)
+        """Assimilation backend; see ``AnchorRuntime.read_history_tension``."""
+        return _anchor_runtime.AnchorRuntime(self).read_history_tension(sensor, now)
 
     def _apply_anchor(self, now: pd.Timestamp, water_after_walk: float) -> None:
         """Nudge the post-walk saturation field toward fresh tensiometer readings.
 
         Runs only on the live path (advance()); the SoilPredictor forecast never
         anchors. Called after the walk and after the PDE-only mass-balance snapshot
-        is taken, so the correction is excluded from the residual. Publishes the
-        assimilation increment and logs each sensor's innovation.
+        is taken, so the correction is excluded from the residual. The state
+        update happens in ``AnchorRuntime.apply``; the WATER_ANCHOR publish and
+        the per-sensor innovation log stay here (they need ``self.data`` /
+        ``self._total_water``).
         """
-        sensors = [s for s in self._anchor_sensors if s.key in self._anchor_cfg.sensors]
-        if not sensors:
-            return
-        result = anchor_update(
-            np.asarray(self._pde.rel_sat.value),
-            np.asarray(self._pde.mesh.cellCenters),
-            sensors,
-            lambda sensor: self._read_history_tension(sensor, now),
-            now,
-            self._anchor_cfg,
-            self._pde.soil_model,
-            self._mesh_config.width,
-            self._last_anchored,
-            SE_MIN,
-            SE_MAX,
-        )
+        result = _anchor_runtime.AnchorRuntime(self).apply(now, water_after_walk)
         if result is None:
             return
-        self._pde.set_state(result.se_new, update_old=True)
-        self._last_anchored.update(result.anchored_at)
         self.data[SoilSimulation.WATER_ANCHOR].set(now, self._total_water() - water_after_walk)
         for key, innovation in result.innovations.items():
             logger.debug("%s: anchor innovation %s = %+.4f Se", self.name, key, innovation)
