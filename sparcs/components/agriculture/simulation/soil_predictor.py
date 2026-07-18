@@ -1304,17 +1304,13 @@ class SoilPredictor(SoilBase):
 
         The PDE roll (``_roll_segment`` / ``_integrate_horizon``) works in the solver's
         native relative saturation Se, and the roll-mechanics tests compare it against
-        ``SoilPDECore.sample`` (also Se). This is the single boundary where the roll
-        output crosses into the tension-native decision + publish layer; ``psi_from_se``
-        returns the signed matric potential (negative hPa; drier soil -> more
-        negative). It is published unchanged; the scorer compares its magnitude to
-        ``threshold_hpa`` (see ``_score_candidate``).
+        ``SoilPDECore.sample`` (also Se). This is the single predictor boundary where
+        the roll output crosses into the tension-native decision + publish layer
+        (``SoilBase._tension_from_se``: signed matric potential, negative hPa). It is
+        published unchanged; the scorer compares its magnitude to ``threshold_hpa``
+        (see ``_score_candidate``).
         """
-        model = self._pde.soil_model
-        return {
-            channel_id: [float(v) for v in model.psi_from_se(np.asarray(values, dtype=float))]
-            for channel_id, values in trajectories.items()
-        }
+        return {channel_id: self._tension_from_se(values) for channel_id, values in trajectories.items()}
 
     # Forecast retrieval
 

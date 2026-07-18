@@ -1592,6 +1592,25 @@ class SoilBase(Component):
     def _total_water(self) -> float:
         return self._pde.total_water()
 
+    # -- shared publish-side conversion ---------------------------------------
+
+    def _tension_from_se(self, values: float | Collection[float] | np.ndarray) -> float | list[float]:
+        """Publish-side Se -> water tension conversion shared by the sim's
+        per-probe publish and the predictor's trajectory conversion: scalar
+        in -> ``float`` out, sequence/ndarray in -> ``list[float]`` out.
+
+        The published value is the signed matric potential (negative hPa; 0
+        at saturation, more negative as the soil dries) -- the tensiometer /
+        DB convention. That sign convention is enforced by
+        ``SoilModel.psi_from_se`` itself, not here; this seam owns only the
+        publish-side shape coercion. The PDE core (``sample``, anchoring,
+        ``total_water``) stays in Se.
+        """
+        if np.ndim(values) == 0:
+            return float(self._soil_model.psi_from_se(values))
+        result = self._soil_model.psi_from_se(np.asarray(values, dtype=float))
+        return [float(v) for v in result]
+
     # -- shared diagnostic math -----------------------------------------------
 
     def _face_weighted_mean(
