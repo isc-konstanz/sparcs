@@ -281,9 +281,7 @@ class SoilPredictor(SoilBase):
     _threshold_hpa: float
     _decision_probes: list[str]
 
-    _plot_fig: Any = None
-    _plot_ax: Any = None
-    _plot_norm: Any = None
+    _plot_session: Any = None
 
     _channel_keys: dict[str, str]
 
@@ -1705,18 +1703,23 @@ class SoilPredictor(SoilBase):
     def _render_snapshot_png(
         self, rel_sat: np.ndarray, sim_t: pd.Timestamp, *, title: str = "Predicted relative saturation"
     ) -> bytes:
-        """Render a saturation snapshot to PNG bytes; fig/ax/norm are lazily initialised and reused."""
-        if self._plot_fig is None:
-            self._plot_fig, self._plot_ax, self._plot_norm = plot_render.init_rel_sat_figure(
+        """Render a saturation snapshot to PNG bytes; the fig/ax/norm session is
+        lazily initialised and reused. Resolves the site-local timezone ITSELF,
+        rooted at ``getattr(self, "context", None)`` -- several tests drive the
+        real ``_publish_results`` on bare context-less predictors, so the
+        ``self.context``-rooted sim pattern would raise here -- so persisted
+        ``agri_field_forecast_image`` titles carry the same site-local clock as
+        the sim's progress images."""
+        if self._plot_session is None:
+            self._plot_session = plot_render.RenderSession(
                 self._mesh_config.width,
                 self._mesh_config.height,
             )
-        return plot_render.render_rel_sat_png(
-            self._plot_fig,
-            self._plot_ax,
-            self._plot_norm,
+        tz = getattr(getattr(getattr(self, "context", None), "location", None), "timezone", None)
+        return self._plot_session.render(
             self._pde.mesh,
             rel_sat,
             sim_t,
             title=title,
+            tz=tz,
         )

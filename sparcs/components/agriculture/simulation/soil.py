@@ -15,7 +15,6 @@ import threading
 from contextlib import nullcontext
 from typing import Any, Callable, Optional
 
-import matplotlib
 import matplotlib.pyplot as plt
 import meshio
 from matplotlib.collections import LineCollection, PolyCollection
@@ -176,8 +175,7 @@ class SoilSimulation(SoilBase):
     _pde_lock: Optional[threading.Lock] = None
 
     # Progress-plot state; _plot_config is None when plotting is disabled.
-    _plot_fig: Any = None
-    _plot_ax: Any = None
+    _plot_session: Any = None
     _last_plot_simtime: Optional[pd.Timestamp] = None
     # Consecutive render failures toward plot_style.PLOT_DISABLE_AFTER (W2.9);
     # class default for object.__new__ fixtures driving _render_progress_safe.
@@ -249,8 +247,7 @@ class SoilSimulation(SoilBase):
         self.data.add("plot_strikes", type=float, name="Plot Strikes", aggregate="last", logger={"enabled": False})
         if self._plot_config is not None:
             self._last_plot_simtime = None
-            self._plot_fig = None
-            self._plot_ax = None
+            self._plot_session = None
             self._register_progress_image_channel()
 
         self._pde = self._build_pde()
@@ -847,30 +844,17 @@ class SoilSimulation(SoilBase):
             self._plot_strikes = 0
             plot_style.set_strike_channel(self, "plot_strikes", 0)
 
-    def _init_progress_figure(self) -> None:
-        # The solver runs on the field tick's worker thread, so render headless.
-        if matplotlib.get_backend().lower() not in (
-            "agg",
-            "module://matplotlib_inline.backend_inline",
-        ):
-            matplotlib.use("Agg", force=True)
-        fig, ax, norm = plot_render.init_rel_sat_figure(
-            self._mesh_config.width,
-            self._mesh_config.height,
-        )
-        self._plot_fig = fig
-        self._plot_ax = ax
-        self._plot_norm = norm
-
     def _render_progress(self, sim_t: pd.Timestamp) -> None:
-        if self._plot_fig is None:
-            self._init_progress_figure()
-
+        # plot_render._ensure_safe_backend (inside the session's lazy figure
+        # init) forces Agg when off the main thread / headless -- the solver
+        # runs on the field tick's worker thread.
+        if self._plot_session is None:
+            self._plot_session = plot_render.RenderSession(
+                self._mesh_config.width,
+                self._mesh_config.height,
+            )
         timezone = getattr(getattr(self.context, "location", None), "timezone", None)
-        png_bytes = plot_render.render_rel_sat_png(
-            self._plot_fig,
-            self._plot_ax,
-            self._plot_norm,
+        png_bytes = self._plot_session.render(
             self._pde.mesh,
             self._pde.rel_sat.value,
             sim_t,
