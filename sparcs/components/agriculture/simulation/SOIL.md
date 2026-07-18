@@ -418,9 +418,9 @@ Two components consume it:
 - `SoilPredictor` — forecast roll-outs over the planning horizon.
   Uses the same PDE core. Rolls the Richards equation forward over the
   weather forecast to answer two questions: the zero-irrigation "what
-  happens if we do nothing" forecast, and — once per day — the
-  least-watering schedule that keeps the root zone above its dryness
-  limit. See §11.1.
+  happens if we do nothing" forecast, and — once per day — the watering
+  schedule whose tension trajectory tracks the `threshold_hpa` setpoint
+  most closely (RMS argmin, `_score_candidate`/`_select`). See §11.1.
 
 ### 11.1 The watering-strategy grid predictor
 
@@ -462,9 +462,9 @@ actuate irrigation.
   chain. The count is static at `configure()`, so an over-`combo_cap`
   ladder fails at configuration, never a silent runtime skip.
 - **`grid_mode = "full"`** is the escape hatch for fields where a late or
-  overnight peak binds: it restores the full Cartesian product and a
-  least-total-minutes selector (with tie-breaks), at the cost of more
-  roll-outs.
+  overnight peak binds: it restores the full Cartesian product under the
+  same RMS argmin scorer (see "Decision rule" below; least total watering
+  only breaks ties), at the cost of more roll-outs.
 - **Prefix-shared roll-out (the caterpillar, `parallel = false`).**
   Candidates share integration prefixes: the segment before the first
   window is integrated once from the initial condition; each window's
@@ -520,7 +520,14 @@ actuate irrigation.
   `soil_id`; `water_tension` for ALL candidates). Both tables are written via
   **direct connector write**, because the automatic log path collapses
   duplicate timestamps; the trajectory channels are never `.set()`, so the
-  auto flush stays silent for them. The chosen candidate's watering schedule
+  auto flush stays silent for them. This is deliberate: the live sim's
+  tables (`agri_field_simulation`, `agri_soil_simulation`, the blob side
+  tables) use the opposite idiom — the auto-logger, one row per tick per
+  table, zero write code — and converging the two paths onto one idiom is
+  **rejected by design**: logger surrogate attributes are static per
+  channel and cannot carry per-run values like `forecast_id` /
+  `timestamp_creation` (PRD). Two writer idioms, each matched to its table
+  shape. The chosen candidate's watering schedule
   is additionally persisted as **edge rows** on `agri_field_forecast_irrigation` (PK
   `timestamp` = edge time, `timestamp_creation` = run time, `id` ←
   `field_id`; `irrigation_state` bool) — one row per planned on/off
@@ -605,9 +612,12 @@ and add `AND h.is_recommended = 1` for a single-series "the pick" panel.
 
 ## 12. Configuration reference (TOML)
 
-The live driver is configured under `[soil_simulation]`; the `[pde]`, `[model]`,
-`[mesh]`, `[anchor]`, `[probes]`, and `[plot]` blocks below nest under it. The
-run schedule and the replication knob sit one level up on the parent
+The live driver is configured under `[soil_simulation]`; the `[pde]` (with its
+`[feddes]`/`[ponding]` siblings) and `[plot]` blocks documented below nest
+under it, as do `[model]`, `[mesh]`, `[anchor]`, and `[probes]` — those four
+are not documented here; their reference is the parsing code
+(`soil.py` `configure()`, the `_soil.py` `*Config` dataclasses, `_anchor.py`).
+The run schedule and the replication knob sit one level up on the parent
 `[field_simulation]` because they govern the whole chain, not just the PDE:
 
 ```toml
