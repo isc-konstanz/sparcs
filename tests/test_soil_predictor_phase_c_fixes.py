@@ -8,9 +8,11 @@ soil-predictor cluster first landed:
 - ``_resolve_window_start`` (and therefore ``_build_flow_schedule``) rolled a
   window forward with a fixed ``Timedelta(days=1)``, landing an hour off across a
   DST transition. It now re-resolves the wall-clock on the next calendar day.
-- ``_peak_tension`` returned ``-inf`` when the decision-probe subset matched no
-  probe in the trajectory, making every rung vacuously feasible. It now returns
-  ``+inf`` (infeasible / fail-safe).
+- The empty-decision-set fallback returned ``-inf``, making every rung
+  vacuously feasible in the feasibility-era selector (the ``_peak_tension``
+  helper that carried the original fix is gone). The live scoring path,
+  ``_score_candidate``, returns ``+inf`` when the decision-probe subset
+  matches no probe in the trajectory (fail-safe worst score).
 
 Each test is red against the pre-fix behavior (a fixed-24h add / a ``-inf``
 fallback).

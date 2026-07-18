@@ -173,7 +173,6 @@ class FieldSimulation(Component):
         if self._lai_type not in _LAI_BY_TYPE:
             raise ValueError(f"Unsupported lai_type '{self._lai_type}'. Must be one of: {sorted(_LAI_BY_TYPE)}")
 
-        # TODO: remove this later from configs
         self.roughness = configs.get("roughness", default=0.002)
         self.plant_height = configs.get("plant_height", default=0.1)
         self.ndvi = configs.get("ndvi", default=0.25)

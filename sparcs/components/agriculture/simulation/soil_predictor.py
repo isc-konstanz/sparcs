@@ -613,10 +613,9 @@ class SoilPredictor(SoilBase):
 
     def _register_timestamp_creation_channel(self) -> None:
         """Main run-time channel: kept for in-memory/Dash use, but no longer
-        logged -- once the reference config's stale `table = "soil_predictor"`
-        default is dropped, a lone enabled channel here would still auto-create a
-        vestigial group-named table of PK-only rows. The run time now travels
-        via the header's timestamp index and the detail rows' timestamp_creation
+        logged -- a lone enabled channel here would auto-create a vestigial
+        group-named table of PK-only rows. The run time travels via the
+        header's timestamp index and the detail rows' timestamp_creation
         value channel (`_register_detail_channels`)."""
         self.data.add(
             self._TIMESTAMP_CREATION_KEY,

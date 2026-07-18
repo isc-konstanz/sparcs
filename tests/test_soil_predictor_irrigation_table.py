@@ -315,12 +315,12 @@ def _patch_connectors(monkeypatch, fake_connectors) -> None:
 
 def test_write_irrigation_table_renames_to_channel_ids_and_never_calls_set(monkeypatch):
     """Exercises the REAL write path end to end (``_build_irrigation_frame`` ->
-    ``_write_irrigation_table`` -> ``_irrigation_id_by_key`` -> rename ->
-    ``connector.write``) against a recording fake connector: the frame the
-    connector receives must be keyed by the RESOLVED channel ids, not the
-    bare in-frame keys, and neither irrigation channel is ever ``.set()``. A
-    typo'd key in ``_irrigation_id_by_key`` would surface here as a KeyError
-    or a column that never got renamed."""
+    ``_write_irrigation_table`` -> the publisher's lazy ``_ids_for`` id map ->
+    rename -> ``connector.write``) against a recording fake connector: the
+    frame the connector receives must be keyed by the RESOLVED channel ids,
+    not the bare in-frame keys, and neither irrigation channel is ever
+    ``.set()``. A typo'd key in the ``_ids_for`` registration would surface
+    here as a KeyError or a column that never got renamed."""
     predictor = _make_bare_predictor()
     predictor._logger_id = "db"
     keys = [SoilPredictor._IRRIGATION_STATE_KEY, SoilPredictor._IRRIGATION_TIMESTAMP_CREATION_KEY]
