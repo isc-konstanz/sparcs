@@ -39,6 +39,7 @@ WateringWindow = soil_predictor.WateringWindow
 
 from lories import Configurations  # noqa: E402
 from lories.components.weather import Weather  # noqa: E402
+from sparcs.components.agriculture.simulation import _predictor_rollout  # noqa: E402
 from sparcs.components.agriculture.simulation._soil import (  # noqa: E402
     MeshConfig,
     PDEConfig,
@@ -136,11 +137,11 @@ def test_worker_init_pins_one_core_before_building_pde(monkeypatch):
             seen["kmp"] = __import__("os").environ.get("KMP_DUPLICATE_LIB_OK")
             seen["rel_sat_name"] = rel_sat_name
 
-    monkeypatch.setattr(soil_predictor, "SoilPDECore", _FakePDE)
-    monkeypatch.setattr(soil_predictor, "ensure_mesh", lambda mesh_config: seen.setdefault("ensure_mesh", True))
+    monkeypatch.setattr(_predictor_rollout, "SoilPDECore", _FakePDE)
+    monkeypatch.setattr(_predictor_rollout, "ensure_mesh", lambda mesh_config: seen.setdefault("ensure_mesh", True))
     monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
 
-    soil_predictor._worker_init(
+    _predictor_rollout._worker_init(
         mesh_config=object(),
         ode_config=object(),
         rel_sat_name="predictor relative saturation",
@@ -160,9 +161,9 @@ def test_worker_init_pins_one_core_before_building_pde(monkeypatch):
     assert seen["kmp"] == "TRUE", "worker must set KMP_DUPLICATE_LIB_OK before building the PDE"
     assert seen.get("ensure_mesh") is True
     assert seen["rel_sat_name"] == "predictor relative saturation"
-    # The rebuilt predictor + shared inputs are stashed for the task function.
-    assert soil_predictor._WORKER["predictor"]._name == "worker"
-    assert soil_predictor._WORKER["seg_et"] == {}
+    # The rebuilt engine + shared inputs are stashed for the task function.
+    assert _predictor_rollout._WORKER["engine"].name == "worker"
+    assert _predictor_rollout._WORKER["seg_et"] == {}
 
 
 # ---------------------------------------------------------------------------
@@ -224,13 +225,15 @@ def test_rollout_parallel_fans_out_and_gathers_by_candidate(monkeypatch):
     p = _parallel_predictor(ladder, max_workers=2)
 
     init_seen = {}
-    monkeypatch.setattr(soil_predictor, "_worker_init", lambda *initargs: init_seen.setdefault("initargs", initargs))
     monkeypatch.setattr(
-        soil_predictor,
+        _predictor_rollout, "_worker_init", lambda *initargs: init_seen.setdefault("initargs", initargs)
+    )
+    monkeypatch.setattr(
+        _predictor_rollout,
         "_worker_roll",
         lambda candidate: (candidate, (["ts"], {"probe": [_candidate_value(candidate)]})),
     )
-    monkeypatch.setattr(soil_predictor, "ProcessPoolExecutor", _FakeExecutor)
+    monkeypatch.setattr(_predictor_rollout, "ProcessPoolExecutor", _FakeExecutor)
 
     out = p._rollout_parallel("ic", pd.DataFrame(), {}, "hs", "he")
 
@@ -255,9 +258,9 @@ def test_rollout_parallel_worker_count_capped_to_ladder(monkeypatch, max_workers
     ladder = [(pd.Timedelta(minutes=i),) for i in range(n_candidates)]
     p = _parallel_predictor(ladder, max_workers=max_workers)
 
-    monkeypatch.setattr(soil_predictor, "_worker_init", lambda *initargs: None)
-    monkeypatch.setattr(soil_predictor, "_worker_roll", lambda candidate: (candidate, (["ts"], {"probe": [0.0]})))
-    monkeypatch.setattr(soil_predictor, "ProcessPoolExecutor", _FakeExecutor)
+    monkeypatch.setattr(_predictor_rollout, "_worker_init", lambda *initargs: None)
+    monkeypatch.setattr(_predictor_rollout, "_worker_roll", lambda candidate: (candidate, (["ts"], {"probe": [0.0]})))
+    monkeypatch.setattr(_predictor_rollout, "ProcessPoolExecutor", _FakeExecutor)
 
     out = p._rollout_parallel("ic", pd.DataFrame(), {}, "hs", "he")
 
@@ -282,9 +285,9 @@ def test_rollout_parallel_restores_env_on_success_and_on_raise(monkeypatch):
     monkeypatch.setenv("OMP_NUM_THREADS", "5")
     monkeypatch.delenv("KMP_DUPLICATE_LIB_OK", raising=False)
 
-    monkeypatch.setattr(soil_predictor, "_worker_init", lambda *initargs: None)
-    monkeypatch.setattr(soil_predictor, "_worker_roll", lambda candidate: (candidate, (["ts"], {"probe": [0.0]})))
-    monkeypatch.setattr(soil_predictor, "ProcessPoolExecutor", _FakeExecutor)
+    monkeypatch.setattr(_predictor_rollout, "_worker_init", lambda *initargs: None)
+    monkeypatch.setattr(_predictor_rollout, "_worker_roll", lambda candidate: (candidate, (["ts"], {"probe": [0.0]})))
+    monkeypatch.setattr(_predictor_rollout, "ProcessPoolExecutor", _FakeExecutor)
 
     p._rollout_parallel("ic", pd.DataFrame(), {}, "hs", "he")
 
@@ -295,7 +298,7 @@ def test_rollout_parallel_restores_env_on_success_and_on_raise(monkeypatch):
         def __enter__(self):
             raise RuntimeError("pool failed mid-block")
 
-    monkeypatch.setattr(soil_predictor, "ProcessPoolExecutor", _RaisingExecutor)
+    monkeypatch.setattr(_predictor_rollout, "ProcessPoolExecutor", _RaisingExecutor)
 
     with pytest.raises(RuntimeError):
         p._rollout_parallel("ic", pd.DataFrame(), {}, "hs", "he")
@@ -345,7 +348,7 @@ def test_stringify_columns_makes_constant_labels_pickle_safe():
         raised = True
     assert raised, "a raw lories Constant column label should not round-trip through pickle"
 
-    safe = soil_predictor._stringify_columns(frame)
+    safe = _predictor_rollout._stringify_columns(frame)
     restored = pickle.loads(pickle.dumps(safe))  # must not raise
     assert list(restored.columns) == ["precipitation"]
     # Constant-keyed access still resolves (Constant equals its key str), so the
