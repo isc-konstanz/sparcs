@@ -29,7 +29,7 @@ import pandas as pd
 from lories.components.weather import Weather
 
 from ._predictor_candidates import WateringWindow, build_flow_schedule, resolve_window_start, split_interval
-from ._soil import FluxRates, MeshConfig, PDEConfig, ProbeSpec, SoilPDECore, ensure_mesh
+from ._soil import ClipDiagnostics, FluxRates, MeshConfig, PDEConfig, ProbeSpec, SoilPDECore, ensure_mesh
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +105,9 @@ class RolloutEngine:
         seg_et: dict[str, pd.DataFrame],
         on_intervals: list[tuple[pd.Timestamp, pd.Timestamp]],
         snapshot_sink: Optional[Callable[[pd.Timestamp], None]] = None,
+        interval_begin: Optional[Callable[[pd.Timestamp, pd.Timestamp, float], None]] = None,
+        interval_end: Optional[Callable[..., None]] = None,
+        sample_on_zero_dt: bool = True,
     ) -> tuple[list[pd.Timestamp], dict[str, list[float]]]:
         """Walk the PDE across ``idx`` (>=1 forecast timestamps; the live PDE state is
         already the state at ``idx[0]``), applying ``on_intervals`` inside each
@@ -112,13 +115,31 @@ class RolloutEngine:
         timestamp Se at every probe, including ``idx[0]`` (sampled as-is, no walk).
 
         Shared by the prefix roll and every per-window sweep in ``rollout_ladder``,
-        and by ``rollout_independent``'s single full-horizon roll.
+        by ``rollout_independent``'s single full-horizon roll, and -- via the
+        interval observers -- by ``SoilPredictor._integrate_horizon``'s published
+        re-solve, so candidate selection and publish run this one stepping loop.
 
         ``snapshot_sink``, when given, is called with each recorded forecast timestamp
         right after that state is reached -- the live ``self.pde`` is the field at
-        that timestamp, so the sink can read ``self.pde.snapshot()``. Only the debug
-        field-plot re-roll passes it; the forecast/recommendation paths leave it
-        ``None`` (no per-step cost).
+        that timestamp, so the sink can read ``self.pde.snapshot()``.
+
+        ``interval_begin(ts_prev, ts_next, elapsed_s)`` / ``interval_end(ts_next,
+        elapsed_s, seg_evap, seg_transp, rain_flux, clip_total, irrigated_mass)``
+        fire once per WALKED interval: ``begin`` after the segment fluxes are
+        resolved and before the first ``walk_window`` (so a storage-before read
+        straddles the walk), ``end`` after the interval's probe samples are
+        appended and before ``snapshot_sink``. When ``interval_end`` is set, the
+        engine accumulates each ``walk_window`` result's ``ClipDiagnostics`` and
+        the irrigated mass across sub-segments; when it is ``None``, walk results
+        are discarded exactly as before.
+
+        ``sample_on_zero_dt`` selects the ``elapsed_s <= 0`` behavior: ``True``
+        appends the timestamp and samples every probe (the candidate-roll
+        convention -- trajectory length always equals index length); ``False``
+        skips the interval entirely (the publish-path convention -- no sample, no
+        sinks). Observers never fire for a zero-dt interval (no walk happened);
+        pass ``sample_on_zero_dt=False`` whenever observers are set, so observer
+        rows stay aligned with the recorded timestamps.
         """
         timestamps: list[pd.Timestamp] = [idx[0]]
         trajectories: dict[str, list[float]] = {p.channel_id: [self.pde.sample(p)] for p in self.probes}
@@ -128,6 +149,8 @@ class RolloutEngine:
         for ts_prev, ts_next in zip(idx[:-1], idx[1:]):
             elapsed_s = (ts_next - ts_prev).total_seconds()
             if elapsed_s <= 0:
+                if not sample_on_zero_dt:
+                    continue
                 timestamps.append(ts_next)
                 for p in self.probes:
                     trajectories[p.channel_id].append(self.pde.sample(p))
@@ -137,7 +160,11 @@ class RolloutEngine:
 
             seg_evap, seg_transp = _segment_flux_dicts(seg_et, ts_next)
             rain_flux = _rain_flux(et_data, ts_next, elapsed_s)
+            if interval_begin is not None:
+                interval_begin(ts_prev, ts_next, elapsed_s)
             sub_segments = split_interval(on_intervals, ts_prev, ts_next, self.flow_m3s)
+            clip_total = ClipDiagnostics() if interval_end is not None else None
+            irrigated_mass = 0.0
             for sub_window_s, sub_flow_m3s in sub_segments:
                 if sub_window_s <= 0.0:
                     continue
@@ -147,16 +174,21 @@ class RolloutEngine:
                     flow_m3s=sub_flow_m3s,
                     rain_flux=rain_flux,
                 )
-                self.pde.walk_window(
+                walk = self.pde.walk_window(
                     rates=sub_rates,
                     window_s=sub_window_s,
                     accept_at_dt_min=True,
                     log_name=self.name,
                 )
+                if clip_total is not None:
+                    clip_total.add(walk.clip)
+                    irrigated_mass += sub_flow_m3s * sub_window_s
 
             timestamps.append(ts_next)
             for p in self.probes:
                 trajectories[p.channel_id].append(self.pde.sample(p))
+            if interval_end is not None:
+                interval_end(ts_next, elapsed_s, seg_evap, seg_transp, rain_flux, clip_total, irrigated_mass)
             if snapshot_sink is not None:
                 snapshot_sink(ts_next)
 

@@ -1370,10 +1370,16 @@ class SoilPredictor(SoilBase):
         ``None``/empty applies no irrigation, reproducing today's zero-flow roll exactly
         (each forecast interval is a single ``walk_window`` call at ``flow_m3s=0.0``).
         When non-empty, each forecast interval is split at every on/off edge that falls
-        strictly inside it (``_split_interval``) and walked once per sub-segment at that
+        strictly inside it (``split_interval``) and walked once per sub-segment at that
         sub-segment's flow, so a sub-hourly duration integrates the exact water volume.
         Trajectories/diagnostics/snapshots are still sampled once per forecast interval,
         at ``ts_next`` -- the split is for integration accuracy, not extra sample points.
+
+        The stepping itself is ``RolloutEngine.roll_segment`` -- the same loop the
+        candidate-selection rolls run -- configured here with the interval observers
+        that rebuild this method's diagnostics and with ``sample_on_zero_dt=False``
+        (the publish path skips zero-dt forecast rows entirely, keeping timestamps,
+        trajectories, diagnostics, and snapshots aligned with each other).
 
         Returns ``(timestamps, trajectories, snapshots, diagnostics)``.
         ``diagnostics`` values are kg/(m²·h) flux densities; NaN at the IC row (no interval yet).
@@ -1382,10 +1388,10 @@ class SoilPredictor(SoilBase):
         """
         on_intervals = flow_schedule or []
         idx = et_data.index
-        timestamps: list[pd.Timestamp] = []
-        trajectories: dict[str, list[float]] = {p.channel_id: [] for p in self._probes}
         snapshots: dict[pd.Timestamp, tuple[Optional[np.ndarray], Optional[bytes]]] = {}
         diagnostics: dict[str, list[float]] = {c.key: [] for c in _DIAGNOSTIC_CONSTANTS}
+        if len(idx) == 0:
+            return [], {p.channel_id: [] for p in self._probes}, snapshots, diagnostics
         # One snapshot dict captured at the UNION of the plot and state cadences; the
         # per-sink subsets are re-derived in _publish_results (_cadence_subset). Plot
         # and state have independent intervals, so a snapshot is taken whenever either
@@ -1419,47 +1425,21 @@ class SoilPredictor(SoilBase):
             if state_due:
                 last_state_ts = ts
 
-        if len(idx) > 0:
-            timestamps.append(idx[0])
-            for p in self._probes:
-                trajectories[p.channel_id].append(self._pde.sample(p))
-            for key in diagnostics:
-                diagnostics[key].append(float("nan"))
-            _maybe_snapshot(idx[0])
+        storage_before = 0.0
 
-        for ts_prev, ts_next in zip(idx[:-1], idx[1:]):
-            elapsed_s = (ts_next - ts_prev).total_seconds()
-            if elapsed_s <= 0:
-                continue
-
-            seg_evap, seg_transp = self._segment_flux_dicts(seg_et, ts_next)
-            rain_flux = self._rain_flux(et_data, ts_next, elapsed_s)
+        def _interval_begin(ts_prev: pd.Timestamp, ts_next: pd.Timestamp, elapsed_s: float) -> None:
+            nonlocal storage_before
             storage_before = self._total_water() + self._pde.surface_water()
 
-            sub_segments = self._split_interval(on_intervals, ts_prev, ts_next, self._flow_m3s)
-            clip_total = ClipDiagnostics()
-            irrigated_mass = 0.0
-            for sub_window_s, sub_flow_m3s in sub_segments:
-                if sub_window_s <= 0.0:
-                    continue
-                sub_rates = FluxRates(
-                    seg_evap=seg_evap,
-                    seg_transp=seg_transp,
-                    flow_m3s=sub_flow_m3s,
-                    rain_flux=rain_flux,
-                )
-                walk = self._pde.walk_window(
-                    rates=sub_rates,
-                    window_s=sub_window_s,
-                    accept_at_dt_min=True,
-                    log_name=self.name,
-                )
-                clip_total.add(walk.clip)
-                irrigated_mass += sub_flow_m3s * sub_window_s
-
-            timestamps.append(ts_next)
-            for p in self._probes:
-                trajectories[p.channel_id].append(self._pde.sample(p))
+        def _interval_end(
+            ts_next: pd.Timestamp,
+            elapsed_s: float,
+            seg_evap: dict[str, float],
+            seg_transp: dict[str, float],
+            rain_flux: float,
+            clip_total: ClipDiagnostics,
+            irrigated_mass: float,
+        ) -> None:
             delta_storage = self._total_water() + self._pde.surface_water() - storage_before
             # Time-weighted average flow over the interval: rates.flow_m3s * elapsed_s
             # reproduces the same irrigated mass that _compute_diagnostics' mass-balance
@@ -1479,7 +1459,23 @@ class SoilPredictor(SoilBase):
             )
             for key in diagnostics:
                 diagnostics[key].append(interval_diag.get(key, float("nan")))
-            _maybe_snapshot(ts_next)
+
+        # IC NaN row, appended before the engine runs: the engine unconditionally
+        # records idx[0], so this keeps diagnostics length-aligned with timestamps
+        # (each _interval_end call appends exactly one row per walked interval).
+        for key in diagnostics:
+            diagnostics[key].append(float("nan"))
+
+        timestamps, trajectories = self._rollout_engine().roll_segment(
+            idx,
+            et_data,
+            seg_et,
+            on_intervals,
+            snapshot_sink=_maybe_snapshot,
+            interval_begin=_interval_begin,
+            interval_end=_interval_end,
+            sample_on_zero_dt=False,
+        )
 
         if capture_snapshots and timestamps:
             final_ts = timestamps[-1]
