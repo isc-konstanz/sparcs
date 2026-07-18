@@ -83,15 +83,3 @@ def test_align_replays_history_not_current_value():
     frame = _flow_frame({"2026-05-01 10:00": 0.0, "2026-05-01 11:30": 99.0})
     aligned = FieldSimulation._align_flow(frame, index)
     assert list(aligned) == [0.0, 0.0, 0.0, 0.0]
-
-
-# --- _read_flow_span ----------------------------------------------------------
-
-
-def test_read_flow_span_without_channel_is_zero_series():
-    sim = object.__new__(FieldSimulation)
-    sim._name = "test_field_simulation"
-    sim._irrigation_flow_channel = None
-    index = _weather_index()
-    series = sim._read_flow_span(index[0], index[-1], index)
-    assert list(series) == [0.0, 0.0, 0.0, 0.0]

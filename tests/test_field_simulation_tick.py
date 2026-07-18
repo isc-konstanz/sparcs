@@ -229,19 +229,6 @@ def test_read_weather_span_reads_connector_not_logger():
     assert sim.data.calls == [("read", start, end, True)]
 
 
-def test_read_flow_span_reads_connector_not_logger():
-    """Irrigation flow is read from its connector over the (lookback, end] span too."""
-    sim = _sim()
-    sim._irrigation_flow_channel = types.SimpleNamespace(id="irrigation_flow")
-    sim._Component__data = _RecordingData()  # backs the read-only `data` property
-
-    index = pd.date_range("2026-07-12 10:00", periods=2, freq="30min", tz="UTC")
-    series = sim._read_flow_span(index[0], index[-1], index)
-
-    assert [c[0] for c in sim.data.calls] == ["read"]
-    assert list(series) == [0.0, 0.0]  # empty history aligns to zeros
-
-
 # --- predictor on the tick ----------------------------------------------------
 
 

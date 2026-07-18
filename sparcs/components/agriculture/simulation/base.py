@@ -813,13 +813,6 @@ class FieldSimulation(Component):
             return None
         return self._align_flow(frame, index)
 
-    def _read_flow_span(self, start: pd.Timestamp, end: pd.Timestamp, index: pd.DatetimeIndex) -> pd.Series:
-        """Irrigation flow [l/min] aligned onto the weather timesteps, or an all-0.0
-        series when the meter channel is unwired or silent. Thin wrapper over
-        ``_read_measured_flow``; the fallback chain uses ``_irrigation_flow_lpm``."""
-        measured = self._read_measured_flow(start, end, index)
-        return measured if measured is not None else pd.Series(0.0, index=index)
-
     def _read_state_span(self, start: pd.Timestamp, end: pd.Timestamp, index: pd.DatetimeIndex) -> pd.Series:
         """Irrigation on/off state read from its connector, aligned onto the weather
         timesteps as 0.0/1.0. Backward-filled; NULL rows and leading gaps read as
