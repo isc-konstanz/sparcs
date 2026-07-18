@@ -22,7 +22,6 @@ from matplotlib.collections import LineCollection, PolyCollection
 import numpy as np
 import pandas as pd
 from lories import Constant
-from lories.components.weather import Weather
 from lories.core import ConfigurationError
 from lories.data import Channels
 from lories.typing import Configurations
@@ -39,8 +38,10 @@ from ._soil import (
     WalkResult,
     ensure_mesh,
     flow_m3s_per_m,
+    rain_flux,
     resolve_pde_config,
     resolve_probes,
+    segment_flux_dicts,
     warn_unknown_keys,
 )
 
@@ -460,18 +461,14 @@ class SoilSimulation(SoilBase):
     ) -> FluxRates:
         """Per-zone mass fluxes [kg/(m²·s)] constant over the advance window.
 
-        Negative ET (radiative cooling) is clipped to zero.
-        ``rain_flux = precip_mm / elapsed_s`` distributes precipitation mass-conservatively over substeps.
+        ET clipping and the rain conversion delegate to the shared ``_soil``
+        helpers, keyed at this frame's LAST timestamp: ``simulate_loop`` passes
+        single-row frames, and the cold-start caller passes
+        ``now = et_data.index[-1]`` with seg frames built on the same index, so
+        the keyed lookup is equivalent to the former ``iloc[-1]``.
         """
-        seg_evap: dict[str, float] = {}
-        seg_transp: dict[str, float] = {}
-        for name, frame in seg_et.items():
-            evap = max(0.0, float(frame["evap"].iloc[-1]))
-            transp = max(0.0, float(frame["transp"].iloc[-1]))
-            if evap > 0.0:
-                seg_evap[name] = evap
-            if transp > 0.0:
-                seg_transp[name] = transp
+        ts = et_data.index[-1]
+        seg_evap, seg_transp = segment_flux_dicts(seg_et, ts)
 
         # Whole-field meter [l/min] → m³/s per out-of-plane metre (see configure()).
         # NULL/absent flow means "not watering"; NaN must never reach the source.
@@ -483,17 +480,11 @@ class SoilSimulation(SoilBase):
         flow_m3s = flow_m3s_per_m(flow_lpm, self._total_drip_line_length_m)
         self._warn_absurd_strip_flux(flow_m3s)
 
-        rain_flux = 0.0
-        if elapsed_s > 0 and Weather.PRECIPITATION in et_data.columns:
-            precip_mm = et_data[Weather.PRECIPITATION].iloc[-1]
-            if pd.notna(precip_mm) and precip_mm > 0:
-                rain_flux = float(precip_mm) / elapsed_s  # mm/s == kg/(m²·s)
-
         return FluxRates(
             seg_evap=seg_evap,
             seg_transp=seg_transp,
             flow_m3s=flow_m3s,
-            rain_flux=rain_flux,
+            rain_flux=rain_flux(et_data, ts, elapsed_s),
         )
 
     def _warn_absurd_strip_flux(self, flow_m3s: float) -> None:

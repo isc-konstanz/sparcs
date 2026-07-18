@@ -26,40 +26,13 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 import pandas as pd
-from lories.components.weather import Weather
 
 from ._predictor_candidates import WateringWindow, build_flow_schedule, resolve_window_start, split_interval
 from ._soil import ClipDiagnostics, FluxRates, MeshConfig, PDEConfig, ProbeSpec, SoilPDECore, ensure_mesh
+from ._soil import rain_flux as _rain_flux
+from ._soil import segment_flux_dicts as _segment_flux_dicts
 
 logger = logging.getLogger(__name__)
-
-
-def _segment_flux_dicts(
-    seg_et: dict[str, pd.DataFrame],
-    ts: pd.Timestamp,
-) -> tuple[dict[str, float], dict[str, float]]:
-    seg_evap: dict[str, float] = {}
-    seg_transp: dict[str, float] = {}
-    for name, frame in seg_et.items():
-        if ts not in frame.index:
-            continue
-        evap = max(0.0, float(frame.loc[ts, "evap"]))
-        transp = max(0.0, float(frame.loc[ts, "transp"]))
-        if evap > 0.0:
-            seg_evap[name] = evap
-        if transp > 0.0:
-            seg_transp[name] = transp
-    return seg_evap, seg_transp
-
-
-def _rain_flux(et_data: pd.DataFrame, ts: pd.Timestamp, elapsed_s: float) -> float:
-    col = Weather.PRECIPITATION
-    if elapsed_s <= 0 or col not in et_data.columns or ts not in et_data.index:
-        return 0.0
-    precip = et_data.loc[ts, col]
-    if pd.isna(precip) or precip <= 0:
-        return 0.0
-    return float(precip) / elapsed_s  # mm/s == kg/(m²·s)
 
 
 class RolloutEngine:

@@ -39,6 +39,7 @@ from fipy.tools import serialComm
 import numpy as np
 import pandas as pd
 from lories import Component
+from lories.components.weather import Weather
 from lories.typing import Configurations
 from lories.util import to_timedelta
 from sparcs.components.agriculture.soil import (
@@ -373,6 +374,45 @@ class FluxRates:
     seg_transp: dict[str, float]
     flow_m3s: float
     rain_flux: float
+
+
+def segment_flux_dicts(
+    seg_et: dict[str, pd.DataFrame],
+    ts: pd.Timestamp,
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Per-segment ET flux dicts at ``ts``: negative ET (radiative cooling) is
+    clipped to zero and zero-flux segments are skipped, so ``FluxRates`` only
+    carries segments that actually pull water. Shared by the predictor's roll
+    loop and the sim's ``_compute_flux_rates`` (which passes its frame's last
+    timestamp).
+    """
+    seg_evap: dict[str, float] = {}
+    seg_transp: dict[str, float] = {}
+    for name, frame in seg_et.items():
+        if ts not in frame.index:
+            continue
+        evap = max(0.0, float(frame.loc[ts, "evap"]))
+        transp = max(0.0, float(frame.loc[ts, "transp"]))
+        if evap > 0.0:
+            seg_evap[name] = evap
+        if transp > 0.0:
+            seg_transp[name] = transp
+    return seg_evap, seg_transp
+
+
+def rain_flux(et_data: pd.DataFrame, ts: pd.Timestamp, elapsed_s: float) -> float:
+    """Rain flux density [kg/(m²·s)] for the interval ending at ``ts``:
+    ``precip_mm / elapsed_s`` distributes the precipitation mass-conservatively
+    over the interval; missing column / missing row / NaN / non-positive
+    precipitation all mean "no rain".
+    """
+    col = Weather.PRECIPITATION
+    if elapsed_s <= 0 or col not in et_data.columns or ts not in et_data.index:
+        return 0.0
+    precip = et_data.loc[ts, col]
+    if pd.isna(precip) or precip <= 0:
+        return 0.0
+    return float(precip) / elapsed_s  # mm/s == kg/(m²·s)
 
 
 # Shared with FieldSimulation._bay_width's default (base.py) so the standalone

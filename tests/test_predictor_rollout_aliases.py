@@ -72,3 +72,13 @@ def test_worker_init_stashes_rollout_engine_with_six_fields(monkeypatch):
     assert engine.windows is windows
     assert engine.flow_m3s == 1.0e-5
     assert engine.grid_mode == "fill_order"
+
+
+def test_module_flux_functions_are_soil_functions():
+    """W4.2: the keyed flux helpers live in ``_soil`` (shared by the sim's
+    ``_compute_flux_rates`` delegation); ``_predictor_rollout`` keeps the
+    pinned underscore names as import-aliases of the same function objects."""
+    from sparcs.components.agriculture.simulation import _soil
+
+    assert _predictor_rollout._segment_flux_dicts is _soil.segment_flux_dicts
+    assert _predictor_rollout._rain_flux is _soil.rain_flux
