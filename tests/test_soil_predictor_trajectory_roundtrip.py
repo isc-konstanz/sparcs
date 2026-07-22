@@ -236,9 +236,10 @@ def test_duplicate_timestamp_distinct_forecast_id_survive_as_distinct_rows(sql_c
     # persistence here: both rows physically survive as DISTINCT PK tuples.
     from sqlalchemy import text
 
-    rows = connector.connection.execute(
-        text(f"SELECT forecast_id, traj_root_20 FROM {TABLE_NAME} ORDER BY forecast_id")
-    ).fetchall()
+    with connector.engine.connect() as connection:
+        rows = connection.execute(
+            text(f"SELECT forecast_id, traj_root_20 FROM {TABLE_NAME} ORDER BY forecast_id")
+        ).fetchall()
 
     assert len(rows) == 2, (
         "two rows sharing `timestamp` but differing in `forecast_id` must survive as "
