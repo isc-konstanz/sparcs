@@ -695,6 +695,10 @@ class GroundShading(Component):
             ghi_vals: list[float] = []
             for t, ground in enumerate(combined_per_t):
                 qinc = _qinc_in_range(ground, x0, x1)
+                if not np.isfinite(qinc):
+                    # A stray non-finite qinc (pvfactors edge case) must not
+                    # poison the time means for the whole segment.
+                    continue
                 ghi_vals.append(qinc)
                 ref = ghi_open[t]
                 if ref <= 0:
@@ -735,6 +739,12 @@ class GroundShading(Component):
         if df.empty:
             return df
         df = df[df["solar_zenith"] < _ZENITH_DAYTIME_LIMIT]
+        # Lightless rows carry no shading information, and the Perez
+        # transposition is undefined at DHI=0 (sky-clearness epsilon is 0/0:
+        # pvlib returns NaN and solarfactors' ``poa_sky_diffuse == 0``
+        # luminance guard misses NaN) -- one such twilight row poisons the
+        # whole chunk's per-segment GHI mean with NaN.
+        df = df[(df["dni"] > 0) | (df["dhi"] > 0)]
         if df.empty:
             return df
 
@@ -828,18 +838,23 @@ class GroundShading(Component):
         return rows
 
     def _publish_per_segment_ghi(self, ts: pd.Timestamp, seg_ghi: dict[str, float]) -> None:
-        """Publish per-segment GHI [W/m²] to SEG_GHI; non-finite values become NaN with a warning."""
+        """Publish per-segment GHI [W/m²] to SEG_GHI; non-finite values become 0.0 with a warning.
+
+        The placeholder must be 0.0, not NaN: a NaN in a VALID-state channel
+        write raises ResourceError in lories (Channel._is_empty), which kills
+        the tick and stalls the frontier on the same chunk forever.
+        """
         cleaned = {}
         missing = []
         for name, v in seg_ghi.items():
             if v is not None and np.isfinite(v):
                 cleaned[name] = float(v)
             else:
-                cleaned[name] = float("nan")
+                cleaned[name] = 0.0
                 missing.append(name)
         if missing:
             logger.warning(
-                "%s: SEG_GHI has no value for segment(s) %s at %s; writing NaN placeholder.",
+                "%s: SEG_GHI has no value for segment(s) %s at %s; writing 0.0 placeholder.",
                 self.name,
                 sorted(missing),
                 ts,
