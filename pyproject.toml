@@ -44,6 +44,9 @@ dependencies = [
     "solarfactors",
     "bifacial-radiance",
     "scipy",
+    "torch >= 2.0",
+    "torchvision >= 0.15",
+    "onnxruntime",
 ]
 
 [project.optional-dependencies]

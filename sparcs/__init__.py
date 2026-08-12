@@ -23,6 +23,7 @@ from .components import (  # noqa: F401
     AgriculturalField,
     ElectricalEnergyStorage,
     ThermalEnergyStorage,
+    CameraWithInference,
 )
 
 from . import system  # noqa: F401
