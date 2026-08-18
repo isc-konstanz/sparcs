@@ -12,6 +12,7 @@ import logging
 import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from time import sleep
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
@@ -44,9 +45,7 @@ class AppleInference(Component):
     ROIS = tuple(Constant(str, f"roi_{i + 1}", f"Plant ROI {i + 1} detections") for i in range(ROI_COUNT))
     TOTAL = Constant(int, "total_count", "Total apple detections")
     PREVIEW = Constant(bytes, "preview", "Live annotated preview frame")
-
-    SYNC_TRIGGER = Constant(bool, "sync_trigger", "Prediction sync-check trigger")
-    PREDICT_TRIGGER = Constant(bool, "predict_trigger", "Stored-frame prediction trigger")
+    SYNC_TRIGGER = Constant(bool, "sync_trigger", "Scheduled prediction backfill trigger")
 
     _model: Optional[Model] = None
     _pad_hw: Optional[Tuple[int, int]] = None
@@ -57,13 +56,14 @@ class AppleInference(Component):
     _stop_event: Optional[threading.Event] = None
     _worker: Optional[threading.Thread] = None
 
-    live_stream: bool = True
-    predict_freq: str = "1min"
-    sync_freq: str = "5min"
     workers: int = 8
     score_threshold: float = 0.35
 
-    _synchronized: bool = False
+    sync_predictions: bool = False
+    sync_schedule: str = "1D"
+    sync_at: Optional[str] = None
+
+    log_live_predictions: bool = True
 
     @classmethod
     def _assert_context(cls, context: _Camera) -> _Camera:
@@ -79,11 +79,13 @@ class AppleInference(Component):
             self._logger.warning("inference.weights not set in camera.conf; inference disabled")
             return
 
-        self.live_stream = configs.get_bool("live_stream", default=AppleInference.live_stream)
-        self.predict_freq = configs.get("predict_freq", default=AppleInference.predict_freq)
-        self.sync_freq = configs.get("sync_freq", default=AppleInference.sync_freq)
         self.workers = configs.get_int("workers", default=AppleInference.workers)
         self.score_threshold = configs.get_float("score_threshold", default=AppleInference.score_threshold)
+        self.sync_predictions = configs.get_bool("sync_predictions", default=AppleInference.sync_predictions)
+        self.sync_schedule = configs.get("sync_schedule", default=AppleInference.sync_schedule)
+        self.sync_at = configs.get("sync_at", default=AppleInference.sync_at)
+        self.log_live_predictions = configs.get_bool("log_live_predictions",
+                                                     default=AppleInference.log_live_predictions)
         device = configs.get("device", default="auto")
         num_classes = configs.get_int("num_classes", default=2)
         nms_iou_threshold = configs.get_float("nms_iou_threshold", default=0.5)
@@ -129,20 +131,13 @@ class AppleInference(Component):
             logger={"connector": logger_connector, "table": logger_table, "column": "total_count"},
         )
 
-        if self.live_stream:
-            self.data.add(AppleInference.PREVIEW, aggregate="last", freq=None, stream=True)
-        else:
-            self.data.add(
-                AppleInference.PREDICT_TRIGGER,
-                aggregate="last",
-                freq=self.predict_freq,
-                connector="dummy",
-                default=False,
-            )
+        self.data.add(AppleInference.PREVIEW, aggregate="last", freq=None, stream=True)
+
+        if self.sync_predictions:
             self.data.add(
                 AppleInference.SYNC_TRIGGER,
                 aggregate="last",
-                freq=self.sync_freq,
+                freq="1min" if self.sync_at else self.sync_schedule,
                 connector="dummy",
                 default=False,
             )
@@ -164,16 +159,15 @@ class AppleInference(Component):
         self._worker.start()
 
         camera = self.context
-        if self.live_stream:
-            if _Camera.FRAME not in camera.data:
-                raise ResourceError(
-                    f"AppleInference '{self.id}' requires camera-level 'frame = true' "
-                    f"to enable the {_Camera.FRAME!s} channel"
-                )
-            camera.data.register(self._on_frame, _Camera.FRAME, how="any", unique=False)
-        else:
-            self.data.register(self._on_sync_check, AppleInference.SYNC_TRIGGER, how="any", unique=False)
-            self.data.register(self._on_predict_trigger, AppleInference.PREDICT_TRIGGER, how="any", unique=False)
+        if _Camera.FRAME not in camera.data:
+            raise ResourceError(
+                f"AppleInference '{self.id}' requires camera-level 'frame = true' "
+                f"to enable the {_Camera.FRAME!s} channel"
+            )
+        camera.data.register(self._on_frame, _Camera.FRAME, how="any", unique=False)
+
+        if self.sync_predictions:
+            self.data.register(self._on_sync_trigger, AppleInference.SYNC_TRIGGER, how="any", unique=False)
 
     def deactivate(self) -> None:
         if self._stop_event is not None:
@@ -185,97 +179,78 @@ class AppleInference(Component):
     def _worker_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
-                timestamp, jpeg_bytes = self._frame_queue.get(timeout=1.0)
+                timestamp, jpeg_bytes, publish_preview, persist = self._frame_queue.get(timeout=1.0)
             except queue.Empty:
                 continue
             try:
-                self._run_inference(timestamp, jpeg_bytes)
+                self._run_inference(timestamp, jpeg_bytes, publish_preview, persist)
             except Exception as exc:
                 self._logger.error("Inference pipeline error at %s: %s", timestamp, exc, exc_info=True)
 
     def _on_frame(self, data: pd.DataFrame) -> None:
         camera = self.context
-        frame_id = camera.data.frame.id
-        if data is None or data.empty or frame_id not in data.columns:
+        frame_key = camera.data.frame.key
+        if data is None or data.empty or frame_key not in data.columns:
             return
-        jpeg_bytes = data[frame_id].iloc[-1]
+        jpeg_bytes = data[frame_key].iloc[-1]
         if jpeg_bytes is None:
             return
         timestamp = data.index[-1]
-        self._frame_queue.put_nowait((timestamp, jpeg_bytes))
+        self._frame_queue.put_nowait((timestamp, jpeg_bytes, True, self.log_live_predictions))
 
-    def _on_sync_check(self, data: pd.DataFrame) -> None:
-        threading.Thread(target=self._run_check_sync, name=f"{self.id}-sync", daemon=True).start()
-
-    def _run_check_sync(self) -> None:
-        try:
-            self._check_sync()
-        except Exception as exc:
-            self._logger.error("Frame/prediction sync check error: %s", exc, exc_info=True)
-
-    def _check_sync(self) -> None:
-        camera = self.context
-        latest_frame = self._latest_timestamp(camera.data.read_logged(channels=camera.data.frame.to_list()))
-        latest_prediction = self._latest_timestamp(self.data.read_logged(channels=[AppleInference.TOTAL]))
-        self._synchronized = (
-            latest_frame is None or (latest_prediction is not None and latest_prediction >= latest_frame)
-        )
-        self._logger.debug("Frame/prediction sync check: synchronized=%s", self._synchronized)
-
-    def _on_predict_trigger(self, data: pd.DataFrame) -> None:
-        if self._synchronized:
-            self._logger.debug("Frames and predictions synchronized; skipping prediction pass")
+    def _on_sync_trigger(self, data: pd.DataFrame) -> None:
+        if self.sync_at and pd.Timestamp.now(tz="UTC").strftime("%H:%M") != self.sync_at:
             return
-        threading.Thread(target=self._run_predict_from_database, name=f"{self.id}-scan", daemon=True).start()
+        threading.Thread(target=self._run_sync_predictions, name=f"{self.id}-sync", daemon=True).start()
 
-    def _run_predict_from_database(self) -> None:
+    def _run_sync_predictions(self) -> None:
         try:
-            self._predict_from_database()
+            self._sync_predictions()
         except Exception as exc:
-            self._logger.error("Backlog prediction scan error: %s", exc, exc_info=True)
+            self._logger.error("Scheduled prediction backfill error: %s", exc, exc_info=True)
 
     _BACKLOG_WINDOW: pd.Timedelta = pd.Timedelta(minutes=30)
     _BACKLOG_EPOCH: pd.Timestamp = pd.Timestamp("2020-01-01", tz="UTC")
 
-    def _predict_from_database(self) -> None:
-        if not self._frame_queue.empty():
-            self._logger.debug("Previous prediction batch still processing; skipping this trigger")
-            return
-
+    def _sync_predictions(self) -> None:
         camera = self.context
         frame_channels = camera.data.frame.to_list()
-        start = self._latest_timestamp(self.data.read_logged(channels=[AppleInference.TOTAL]))
         now = pd.Timestamp.now(tz="UTC")
 
-        lo = start + pd.Timedelta(milliseconds=1) if start is not None else AppleInference._BACKLOG_EPOCH
-        window_start = self._find_earliest_frame(camera, frame_channels, lo, now)
-        if window_start is None:
-            self._synchronized = True
-            return
+        while True:
+            if not self._frame_queue.empty():
+                self._logger.debug("Previous prediction batch still processing; deferring sync pass")
+                return
 
-        frames = camera.data.read_logged(
-            channels=frame_channels,
-            start=window_start,
-            end=window_start + AppleInference._BACKLOG_WINDOW,
-        )
-        if start is not None:
-            frames = frames[frames.index > start]
+            start = self._latest_timestamp(self.data.read_logged(channels=[AppleInference.TOTAL]))
+            lo = start + pd.Timedelta(milliseconds=1) if start is not None else AppleInference._BACKLOG_EPOCH
+            window_start = self._find_earliest_frame(camera, frame_channels, lo, now)
+            if window_start is None:
+                return
 
-        if frames.empty:
-            self._synchronized = True
-            return
+            frames = camera.data.read_logged(
+                channels=frame_channels,
+                start=window_start,
+                end=window_start + AppleInference._BACKLOG_WINDOW,
+            )
+            if start is not None:
+                frames = frames[frames.index > start]
+            if frames.empty:
+                return
 
-        for timestamp, jpeg_bytes in frames.iloc[:, 0].items():
-            if jpeg_bytes is not None:
-                self._frame_queue.put_nowait((timestamp, jpeg_bytes))
-        self._synchronized = False
+            for timestamp, jpeg_bytes in frames.iloc[:, 0].items():
+                if jpeg_bytes is not None:
+                    self._frame_queue.put_nowait((timestamp, jpeg_bytes, False, True))
+
+            while not self._frame_queue.empty():
+                sleep(1)
 
     @staticmethod
     def _find_earliest_frame(
-        camera: _Camera,
-        channels: List[str],
-        lo: pd.Timestamp,
-        hi: pd.Timestamp,
+            camera: _Camera,
+            channels: List[str],
+            lo: pd.Timestamp,
+            hi: pd.Timestamp,
     ) -> Optional[pd.Timestamp]:
         if lo >= hi or not camera.data.has_logged(channels=channels, start=lo, end=hi):
             return None
@@ -293,7 +268,13 @@ class AppleInference(Component):
             return None
         return data.index.max()
 
-    def _run_inference(self, timestamp: pd.Timestamp, jpeg_bytes: bytes) -> None:
+    def _run_inference(
+            self,
+            timestamp: pd.Timestamp,
+            jpeg_bytes: bytes,
+            publish_preview: bool,
+            persist: bool,
+    ) -> None:
         arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
         frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         if frame is None:
@@ -321,28 +302,42 @@ class AppleInference(Component):
             total,
         )
 
-        if self.live_stream:
+        if publish_preview:
             self._publish_preview(timestamp, frame, roi_boxes, total)
-
-        self._write_predictions(timestamp, roi_boxes, total)
+        if persist:
+            self._write_predictions(timestamp, roi_boxes, total)
 
     def _publish_preview(
-        self,
-        timestamp: pd.Timestamp,
-        frame: np.ndarray,
-        roi_boxes: List[List[List[float]]],
-        total: int,
+            self,
+            timestamp: pd.Timestamp,
+            frame: np.ndarray,
+            roi_boxes: List[List[List[float]]],
+            total: int,
     ) -> None:
-        annotated = draw_on_frame(frame, roi_boxes, total)
+        annotated = draw_on_frame(frame, roi_boxes, total, target_size=self._stream_target_size())
         ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
         if ok:
             self.data.get(AppleInference.PREVIEW).set(timestamp, buf.tobytes())
 
+    def _stream_target_size(self) -> Optional[Tuple[int, int]]:
+        camera = self.context
+        if _Camera.STREAM not in camera.data:
+            return None
+        stream = camera.data.stream
+        if not stream.is_valid():
+            return None
+        arr = np.frombuffer(stream.value, dtype=np.uint8)
+        sub_frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if sub_frame is None:
+            return None
+        h, w = sub_frame.shape[:2]
+        return w, h
+
     def _write_predictions(
-        self,
-        timestamp: pd.Timestamp,
-        roi_boxes: List[List[List[float]]],
-        total: int,
+            self,
+            timestamp: pd.Timestamp,
+            roi_boxes: List[List[List[float]]],
+            total: int,
     ) -> None:
         if self._db is None:
             return
@@ -357,7 +352,6 @@ class AppleInference(Component):
 # noinspection SpellCheckingInspection
 @register_component_type("camera", replace=True)
 class CameraWithInference(Camera):
-
     inference: Optional[AppleInference] = None
 
     def configure(self, configs: Configurations) -> None:

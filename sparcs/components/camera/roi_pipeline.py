@@ -179,19 +179,25 @@ def postprocess_detections(
     return result
 
 
-def draw_on_frame(frame: np.ndarray, roi_boxes: List[List[List[float]]], total: int) -> np.ndarray:
+def draw_on_frame(
+    frame: np.ndarray,
+    roi_boxes: List[List[List[float]]],
+    total: int,
+    target_size: Optional[Tuple[int, int]] = None,
+) -> np.ndarray:
     fh, fw = frame.shape[:2]
-    out_w, out_h = int(fw * DISPLAY_SCALE), int(fh * DISPLAY_SCALE)
+    out_w, out_h = target_size if target_size is not None else (int(fw * DISPLAY_SCALE), int(fh * DISPLAY_SCALE))
+    sx, sy = out_w / fw, out_h / fh
     canvas = cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_AREA)
 
     for roi_index, boxes in enumerate(roi_boxes):
-        pts = (np.array(WARP_QUADS[roi_index], dtype=np.float32) * DISPLAY_SCALE).astype(np.int32)
+        pts = (np.array(WARP_QUADS[roi_index], dtype=np.float32) * [sx, sy]).astype(np.int32)
         cv2.polylines(canvas, [pts], isClosed=True, color=BOX_COLOR_BGR, thickness=2, lineType=cv2.LINE_AA)
         for box in boxes:
-            x1 = int(max(0, round(box[0] * DISPLAY_SCALE)))
-            y1 = int(max(0, round(box[1] * DISPLAY_SCALE)))
-            x2 = int(min(out_w - 1, round(box[2] * DISPLAY_SCALE)))
-            y2 = int(min(out_h - 1, round(box[3] * DISPLAY_SCALE)))
+            x1 = int(max(0, round(box[0] * sx)))
+            y1 = int(max(0, round(box[1] * sy)))
+            x2 = int(min(out_w - 1, round(box[2] * sx)))
+            y2 = int(min(out_h - 1, round(box[3] * sy)))
             if x2 <= x1 or y2 <= y1:
                 continue
             cv2.rectangle(canvas, (x1, y1), (x2, y2), BOX_COLOR_BGR, 2)
