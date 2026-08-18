@@ -32,7 +32,7 @@ def test_net_irradiance_clear_night_loses_more_than_overcast_night():
 
 def test_aerodynamic_resistance_finite_at_calm_wind():
     ra = Evapotranspiration._aerodynamic_resistance(
-        wind_speed=_series(0.0),  # km/h
+        wind_speed=_series(0.0),  # m/s
         roughness=_series(0.002),
         plant_height=_series(0.1),
         measure_height=2.0,

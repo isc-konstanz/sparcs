@@ -333,7 +333,7 @@ class Evapotranspiration(Component):
         z_eff = measure_height - displacement_height
         z_eff = z_eff.clip(lower=1e-6)
 
-        wind_ms = np.maximum(_kmh_to_ms(wind_speed), WIND_FLOOR_MS)
+        wind_ms = np.maximum(wind_speed, WIND_FLOOR_MS)
         ra = np.log(z_eff / roughness_momentum) * np.log(z_eff / roughness_heat) / (VON_KARMAN**2 * wind_ms)
 
         return pd.Series(ra, index=wind_speed.index)
@@ -413,8 +413,3 @@ class Evapotranspiration(Component):
 def _celsius_to_kelvin(temp_celsius: pd.Series | float) -> pd.Series | float:
     """Convert temperature from Celsius to Kelvin."""
     return temp_celsius + 273.15
-
-
-def _kmh_to_ms(speed_kmh: pd.Series | float) -> pd.Series | float:
-    """Converts speed from km/h to m/s."""
-    return speed_kmh / 3.6
