@@ -8,8 +8,11 @@ sparcs.components
 
 from . import weather  # noqa: F401
 
+from . import electrical  # noqa: F401
+from .electrical import ElectricalDevice  # noqa: F401
+
 from . import meter  # noqa: F401
-from .meter import Meter  # noqa: F401
+from .meter import EnergyMeter  # noqa: F401
 
 from . import storage  # noqa: F401
 from .storage import (  # noqa: F401

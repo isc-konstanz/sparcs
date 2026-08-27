@@ -13,12 +13,12 @@ from lories.connectors.opcua import OpcUaConnector
 from lories.core import Constant
 from lories.data import Channels
 from lories.typing import Configurations, ContextArgument
-from sparcs.components import Meter
+from sparcs.components.meter import EnergyMeter
 from sparcs.components.vehicle import EVSE
 
 
 @register_component_type("charge_big")
-class ChargeBig(Meter):
+class ChargeBig(EnergyMeter):
     SETPOINT = Constant(float, "setpoint", "Setpoint Current", "A")
     SETPOINT_MAX = Constant(float, "setpoint_max", "Setpoint Current Maximum", "A")
     SETPOINT_POWER = Constant(float, "setpoint_power", "Setpoint Power", "W")
@@ -29,7 +29,15 @@ class ChargeBig(Meter):
     L2_COS_PHI = Constant(float, "l2_cos_phi", "L2 Cos Phi", "")
     L3_COS_PHI = Constant(float, "l3_cos_phi", "L3 Cos Phi", "")
 
+    ENERGY_L1 = Constant(float, "l1_active_energy", "Phase 1 Active Energy", "kWh", context="chargebig")
+    ENERGY_L2 = Constant(float, "l2_active_energy", "Phase 2 Active Energy", "kWh", context="chargebig")
+    ENERGY_L3 = Constant(float, "l3_active_energy", "Phase 3 Active Energy", "kWh", context="chargebig")
+
     _stations: int
+
+    def _add_channels(self, configs: Configurations) -> None:
+        """The OPC UA server exposes a fixed point list; the base vocabulary groups would add
+        `frequency` and phase voltages it cannot feed, so the channels are declared in `configure`."""
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
@@ -57,25 +65,25 @@ class ChargeBig(Meter):
 
         add_channel(ChargeBig.SETPOINT, "Sollwert_aktiv")
 
-        add_channel(Meter.POWER_L1_ACTIVE, "Zähler_Leistung_Phase1")
-        add_channel(Meter.POWER_L2_ACTIVE, "Zähler_Leistung_Phase2")
-        add_channel(Meter.POWER_L3_ACTIVE, "Zähler_Leistung_Phase3")
+        add_channel(EnergyMeter.POWER_L1, "Zähler_Leistung_Phase1")
+        add_channel(EnergyMeter.POWER_L2, "Zähler_Leistung_Phase2")
+        add_channel(EnergyMeter.POWER_L3, "Zähler_Leistung_Phase3")
 
-        add_channel(Meter.ENERGY_L1_ACTIVE, "Zähler_Energiebezug_Phase1", aggregate="last")
-        add_channel(Meter.ENERGY_L2_ACTIVE, "Zähler_Energiebezug_Phase2", aggregate="last")
-        add_channel(Meter.ENERGY_L3_ACTIVE, "Zähler_Energiebezug_Phase3", aggregate="last")
+        add_channel(ChargeBig.ENERGY_L1, "Zähler_Energiebezug_Phase1", aggregate="last")
+        add_channel(ChargeBig.ENERGY_L2, "Zähler_Energiebezug_Phase2", aggregate="last")
+        add_channel(ChargeBig.ENERGY_L3, "Zähler_Energiebezug_Phase3", aggregate="last")
 
-        add_channel(Meter.CURRENT_L1, "Zähler_Strom_Phase1")
-        add_channel(Meter.CURRENT_L2, "Zähler_Strom_Phase2")
-        add_channel(Meter.CURRENT_L3, "Zähler_Strom_Phase3")
+        add_channel(EnergyMeter.CURRENT_L1, "Zähler_Strom_Phase1")
+        add_channel(EnergyMeter.CURRENT_L2, "Zähler_Strom_Phase2")
+        add_channel(EnergyMeter.CURRENT_L3, "Zähler_Strom_Phase3")
 
         add_channel(ChargeBig.L1_COS_PHI, "Zähler_CosPhi_Phase1")
         add_channel(ChargeBig.L2_COS_PHI, "Zähler_CosPhi_Phase2")
         add_channel(ChargeBig.L3_COS_PHI, "Zähler_CosPhi_Phase3")
 
         add_virtual_channel(ChargeBig.CURRENT)
-        add_virtual_channel(Meter.POWER_ACTIVE)
-        add_virtual_channel(Meter.POWER_REACTIVE)
+        add_virtual_channel(EnergyMeter.POWER)
+        add_virtual_channel(EnergyMeter.POWER_REACTIVE)
         add_virtual_channel(ChargeBig.SETPOINT_POWER)
         add_virtual_channel(ChargeBig.SETPOINT_MAX)
 
@@ -104,37 +112,41 @@ class ChargeBig(Meter):
         super().activate()
         self.data.register(
             self._on_power_received,
-            [self.data[Meter.POWER_L1_ACTIVE], self.data[Meter.POWER_L2_ACTIVE], self.data[Meter.POWER_L3_ACTIVE]],
+            [self.data[EnergyMeter.POWER_L1], self.data[EnergyMeter.POWER_L2], self.data[EnergyMeter.POWER_L3]],
             how="any",
             unique=False,
         )
         self.data.register(
             self._on_current_received,
-            [self.data[Meter.CURRENT_L1], self.data[Meter.CURRENT_L2], self.data[Meter.CURRENT_L3]],
+            [self.data[EnergyMeter.CURRENT_L1], self.data[EnergyMeter.CURRENT_L2], self.data[EnergyMeter.CURRENT_L3]],
             how="any",
             unique=False,
         )
         self.data.register(
             self._on_reactive_power_received,
             [
-                self.data[Meter.POWER_L1_ACTIVE], self.data[Meter.POWER_L2_ACTIVE], self.data[Meter.POWER_L3_ACTIVE],
-                self.data[ChargeBig.L1_COS_PHI], self.data[ChargeBig.L2_COS_PHI], self.data[ChargeBig.L3_COS_PHI],
+                self.data[EnergyMeter.POWER_L1],
+                self.data[EnergyMeter.POWER_L2],
+                self.data[EnergyMeter.POWER_L3],
+                self.data[ChargeBig.L1_COS_PHI],
+                self.data[ChargeBig.L2_COS_PHI],
+                self.data[ChargeBig.L3_COS_PHI],
             ],
             how="any",
             unique=False,
         )
 
     def _on_power_received(self, data: pd.DataFrame) -> None:
-        power = data.loc[:, Meter.POWER_L1_ACTIVE].dropna()
-        power = power + data.loc[power.index, Meter.POWER_L2_ACTIVE].fillna(0)
-        power = power + data.loc[power.index, Meter.POWER_L3_ACTIVE].fillna(0)
+        power = data.loc[:, EnergyMeter.POWER_L1].dropna()
+        power = power + data.loc[power.index, EnergyMeter.POWER_L2].fillna(0)
+        power = power + data.loc[power.index, EnergyMeter.POWER_L3].fillna(0)
         if not power.empty:
-            self.data[Meter.POWER_ACTIVE].set(power.index[0], power)
+            self.data[EnergyMeter.POWER].set(power.index[0], power)
 
     def _on_current_received(self, data: pd.DataFrame) -> None:
-        current = data.loc[:, Meter.CURRENT_L1].dropna()
-        current = current + data.loc[current.index, Meter.CURRENT_L2].fillna(0)
-        current = current + data.loc[current.index, Meter.CURRENT_L3].fillna(0)
+        current = data.loc[:, EnergyMeter.CURRENT_L1].dropna()
+        current = current + data.loc[current.index, EnergyMeter.CURRENT_L2].fillna(0)
+        current = current + data.loc[current.index, EnergyMeter.CURRENT_L3].fillna(0)
         if not current.empty:
             self.data[ChargeBig.CURRENT].set(current.index[0], current)
 
@@ -144,11 +156,14 @@ class ChargeBig(Meter):
             cos_phi = data.loc[:, cos_phi_col]
             return power * np.sqrt(1 - cos_phi**2) / cos_phi
 
-        reactive = phase_reactive(Meter.POWER_L1_ACTIVE, ChargeBig.L1_COS_PHI).dropna()
-        reactive = reactive + phase_reactive(Meter.POWER_L2_ACTIVE, ChargeBig.L2_COS_PHI).reindex(reactive.index).fillna(0)
-        reactive = reactive + phase_reactive(Meter.POWER_L3_ACTIVE, ChargeBig.L3_COS_PHI).reindex(reactive.index).fillna(0)
+        reactive = phase_reactive(EnergyMeter.POWER_L1, ChargeBig.L1_COS_PHI).dropna()
+        for power_col, cos_phi_col in (
+            (EnergyMeter.POWER_L2, ChargeBig.L2_COS_PHI),
+            (EnergyMeter.POWER_L3, ChargeBig.L3_COS_PHI),
+        ):
+            reactive = reactive + phase_reactive(power_col, cos_phi_col).reindex(reactive.index).fillna(0)
         if not reactive.empty:
-            self.data[Meter.POWER_REACTIVE].set(reactive.index[0], reactive)
+            self.data[EnergyMeter.POWER_REACTIVE].set(reactive.index[0], reactive)
 
 
 class ChargeBigStation(EVSE):
