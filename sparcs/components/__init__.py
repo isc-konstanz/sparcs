@@ -39,3 +39,10 @@ from .agriculture import (  # noqa: F401
     AgriculturalField,
     Irrigation,
 )
+
+from . import sunspec  # noqa: F401
+from .sunspec import (  # noqa: F401
+    SunSpecComponent,
+    SunSpecInverter,
+    SunSpecMeter,
+)

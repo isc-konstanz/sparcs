@@ -1,0 +1,77 @@
+# -*- coding: utf-8 -*-
+"""
+sparcs.components.sunspec._component
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
+
+from lories.core import ConfigurationError, Constant
+from lories.typing import Configurations
+
+
+class SunSpecComponent:
+    """
+    Mixin that binds an `ElectricalDevice` vocabulary to a SunSpec device. Subclasses declare
+    the models they accept, the model used when the config names none, and the point name for
+    each constant they can read; every constant left out of `POINTS` stays unbound, to be
+    filled by TOML or by another component.
+
+    Wiring a device needs only the device's model id and, if several instances of that model
+    sit behind one gateway, the instance. Because a binding is written as ordinary channel
+    config, TOML can override `model`, `point`, `instance` or `connector` per channel, or
+    repurpose a channel for another protocol entirely.
+
+    This mixin knows point names and model ids. Everything about Modbus, transports and reads
+    belongs to the `sunspec` connector.
+    """
+
+    MODELS: List[int] = []
+    DEFAULT_MODEL: Optional[int] = None
+    POINTS: Dict[Constant, str] = {}
+
+    model: int
+    instance: int
+
+    _connector_id: str
+
+    def __init_subclass__(cls, **kwargs) -> None:
+        super().__init_subclass__(**kwargs)
+        from sparcs.components.electrical import ElectricalDevice
+
+        if not issubclass(cls, ElectricalDevice):
+            raise TypeError(f"{cls.__name__} mixes in SunSpecComponent without an ElectricalDevice base")
+        mro = cls.__mro__
+        if mro.index(SunSpecComponent) > mro.index(ElectricalDevice):
+            raise TypeError(f"{cls.__name__} must list SunSpecComponent before ElectricalDevice")
+
+    def _configure_bindings(self, configs: Configurations) -> None:
+        super()._configure_bindings(configs)
+        self.model = configs.get_int("model", default=type(self).DEFAULT_MODEL)
+        if self.model not in type(self).MODELS:
+            raise ConfigurationError(
+                f"Invalid SunSpec model '{self.model}' for {type(self).__name__}, expected one of {type(self).MODELS}"
+            )
+        self.instance = configs.get_int("instance", default=1)
+        self._connector_id = configs.get("connector", default="sunspec")
+
+    def _bind(self, constant: Constant) -> Dict[str, Any]:
+        point = self._point(constant)
+        if point is None:
+            return {}
+        return {
+            "point": point,
+            "model": self._model(constant),
+            "instance": self.instance,
+            "connector": self._connector_id,
+        }
+
+    def _point(self, constant: Constant) -> Optional[str]:
+        return type(self).POINTS.get(constant)
+
+    # noinspection PyUnusedLocal
+    def _model(self, constant: Constant) -> int:
+        return self.model
