@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-sparcs.components.sunspec._component
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+sparcs.components.devices.sunspec._binding
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 """
 
@@ -13,7 +13,7 @@ from lories.core import ConfigurationError, Constant
 from lories.typing import Configurations
 
 
-class SunSpecComponent:
+class SunSpecBinding:
     """
     Mixin that binds an `ACComponent` vocabulary to a SunSpec device. Subclasses declare
     the models they accept, the model used when the config names none, and the point name for
@@ -43,10 +43,10 @@ class SunSpecComponent:
         from sparcs.components.binding import BindableComponent
 
         if not issubclass(cls, BindableComponent):
-            raise TypeError(f"{cls.__name__} mixes in SunSpecComponent without a BindableComponent base")
+            raise TypeError(f"{cls.__name__} mixes in SunSpecBinding without a BindableComponent base")
         mro = cls.__mro__
-        if mro.index(SunSpecComponent) > mro.index(BindableComponent):
-            raise TypeError(f"{cls.__name__} must list SunSpecComponent before BindableComponent")
+        if mro.index(SunSpecBinding) > mro.index(BindableComponent):
+            raise TypeError(f"{cls.__name__} must list SunSpecBinding before BindableComponent")
 
     def _configure_bindings(self, configs: Configurations) -> None:
         super()._configure_bindings(configs)

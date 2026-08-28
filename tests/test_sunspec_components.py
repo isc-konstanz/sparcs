@@ -18,7 +18,7 @@ import pytest
 from lories.components.context import registry
 from lories.core import Constant
 from lories.core.configs import ConfigurationError
-from sparcs.components import EnergyMeter, SunSpecComponent, SunSpecInverter, SunSpecMeter
+from sparcs.components import EnergyMeter, SunSpecBinding, SunSpecInverter, SunSpecMeter
 from sparcs.components.electrical import ACComponent
 
 
@@ -150,12 +150,12 @@ def test_bound_constants_are_declared_by_the_device():
 def test_mixin_requires_a_bindable_component_base():
     with pytest.raises(TypeError):
 
-        class Orphan(SunSpecComponent):
+        class Orphan(SunSpecBinding):
             pass
 
 
 def test_mixin_must_precede_the_device_in_the_mro():
     with pytest.raises(TypeError):
 
-        class Backwards(EnergyMeter, SunSpecComponent):
+        class Backwards(EnergyMeter, SunSpecBinding):
             pass

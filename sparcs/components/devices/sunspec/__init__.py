@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-sparcs.components.sunspec
-~~~~~~~~~~~~~~~~~~~~~~~~~
+sparcs.components.devices.sunspec
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 """
 
-from . import _component  # noqa: F401
-from ._component import SunSpecComponent  # noqa: F401
+from . import _binding  # noqa: F401
+from ._binding import SunSpecBinding  # noqa: F401
 
 from . import inverter  # noqa: F401
 from .inverter import SunSpecInverter  # noqa: F401

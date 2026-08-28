@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-sparcs.components.sunspec.meter
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+sparcs.components.devices.sunspec.meter
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 """
@@ -12,12 +12,12 @@ from typing import Optional
 
 from lories.components import register_component_type
 from lories.core import Constant
+from sparcs.components.devices.sunspec._binding import SunSpecBinding
 from sparcs.components.meter import EnergyMeter
-from sparcs.components.sunspec._component import SunSpecComponent
 
 
 @register_component_type("sunspec_meter")
-class SunSpecMeter(SunSpecComponent, EnergyMeter):
+class SunSpecMeter(SunSpecBinding, EnergyMeter):
     """
     An `EnergyMeter` read over SunSpec. The point names are identical across the four meter
     models -- 201 single phase, 202 split phase, 203 wye three phase, 204 delta three phase --
