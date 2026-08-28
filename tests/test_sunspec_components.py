@@ -19,7 +19,7 @@ from lories.components.context import registry
 from lories.core import Constant
 from lories.core.configs import ConfigurationError
 from sparcs.components import EnergyMeter, SunSpecComponent, SunSpecInverter, SunSpecMeter
-from sparcs.components.electrical import ElectricalDevice
+from sparcs.components.electrical import ACComponent
 
 
 def test_component_types_registered():
@@ -142,12 +142,12 @@ def test_bound_constants_are_declared_by_the_device():
     # The protocol layer contributes point names, never vocabulary: every constant
     # it binds must already be declared by the device base or its device class
     declared = {
-        value for cls in (ElectricalDevice, EnergyMeter) for value in vars(cls).values() if isinstance(value, Constant)
+        value for cls in (ACComponent, EnergyMeter) for value in vars(cls).values() if isinstance(value, Constant)
     }
     assert set(SunSpecMeter.POINTS) <= declared
 
 
-def test_mixin_requires_an_electrical_device_base():
+def test_mixin_requires_a_bindable_component_base():
     with pytest.raises(TypeError):
 
         class Orphan(SunSpecComponent):

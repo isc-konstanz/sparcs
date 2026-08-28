@@ -6,12 +6,12 @@ sparcs.components.vehicle.evse
 
 """
 
-from lories.components import Component
 from lories.core import Constant
 from lories.typing import Configurations
+from sparcs.components.binding import BindableComponent
 
 
-class EVSE(Component):
+class EVSE(BindableComponent):
     POWER_MAX = Constant(float, "evse_power_max", "EVSE Power Max", "kW")
     POWER_MIN = Constant(float, "evse_power_min", "EVSE Power Min", "kW")
 

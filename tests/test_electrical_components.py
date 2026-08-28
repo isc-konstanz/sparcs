@@ -3,7 +3,7 @@
 sparcs.tests.test_electrical_components
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Unit tests for the protocol-free device layer: the ``ElectricalDevice`` vocabulary
+Unit tests for the protocol-free device layer: the ``ACComponent`` vocabulary
 and the flag-gated channel groups ``EnergyMeter`` and ``SolarInverter`` add on top.
 Nothing here may know about SunSpec -- the load-bearing assertions are the negative
 ones, which pin that these classes declare channels carrying no ``point``, ``model``,
@@ -13,7 +13,7 @@ ones, which pin that these classes declare channels carrying no ``point``, ``mod
 from __future__ import annotations
 
 from lories.components.context import registry
-from sparcs.components import ElectricalDevice, EnergyMeter
+from sparcs.components import ACComponent, BindableComponent, EnergyMeter
 from sparcs.components.solar import SolarInverter
 
 BINDING_KEYS = ("point", "model", "instance", "connector")
@@ -31,9 +31,10 @@ def test_inverter_is_not_registered_as_inverter():
     assert not registry.has_type("inverter")
 
 
-def test_electrical_device_is_not_registered():
-    # A base, not a device to wire in TOML
-    assert all(registry.from_type(t).type is not ElectricalDevice for t in registry.get_types())
+def test_bases_are_not_registered():
+    # Bases, not devices to wire in TOML
+    for base in (BindableComponent, ACComponent):
+        assert all(registry.from_type(t).type is not base for t in registry.get_types())
 
 
 # ---------------------------------------------------------------- meter
@@ -45,11 +46,11 @@ def test_meter_default_channels(configure_component):
     assert set(channels) == {"power", "current", "voltage", "frequency", "energy_import", "energy_export"}
     power = channels["power"]
     assert power["name"] == "Device 1 Power"
-    assert power["column"] == "dev1_power"
+    assert "column" not in power
     assert power["unit"] == "W"
     assert power["aggregate"] == "mean"
     assert channels["energy_import"]["aggregate"] == "last"
-    assert channels["energy_export"]["column"] == "dev1_energy_export"
+    assert channels["energy_export"]["name"] == "Device 1 Exported Energy"
 
 
 def test_meter_flag_gated_channels(configure_component):
@@ -57,7 +58,7 @@ def test_meter_flag_gated_channels(configure_component):
 
     assert len(channels) == 18
     assert channels["l1_power"]["name"] == "Device 1 Phase 1 Power"
-    assert channels["l12_voltage"]["column"] == "dev1_l12_voltage"
+    assert channels["l12_voltage"]["name"] == "Device 1 Phase 1-2 Voltage"
     assert "power_factor" not in channels
     assert "power_import" not in channels
 
@@ -76,7 +77,7 @@ def test_meter_direction_channels(configure_component):
 
     # No device reports these: they are declared for a processor or another
     # component to fill from the signed power
-    assert channels["power_import"]["column"] == "dev1_power_import"
+    assert channels["power_import"]["name"] == "Device 1 Imported Power"
     assert channels["power_export"]["unit"] == "W"
 
 
@@ -110,7 +111,7 @@ def test_inverter_default_channels(configure_component):
     assert channels["power"]["name"] == "Device 1 Power"
     assert channels["energy"]["aggregate"] == "last"
     assert channels["state"]["type"] is int
-    assert channels["dc_power"]["column"] == "dev1_dc_power"
+    assert channels["dc_power"]["unit"] == "W"
 
 
 def test_inverter_flag_gated_channels(configure_component):
@@ -139,9 +140,20 @@ def test_shared_quantities_are_declared_once():
     # Constants are globally unique on 'context_key', so a quantity both devices bind
     # is declared on the base and is the SAME object on either subclass
     assert EnergyMeter.POWER is SolarInverter.POWER
-    assert EnergyMeter.POWER is ElectricalDevice.POWER
+    assert EnergyMeter.POWER is ACComponent.POWER
     assert EnergyMeter.VOLTAGE_L1 is SolarInverter.VOLTAGE_L1
     assert EnergyMeter.POWER_FACTOR is SolarInverter.POWER_FACTOR
+
+
+def test_shared_quantities_carry_the_electrical_context():
+    assert ACComponent.POWER.id == "electrical_power"
+    assert ACComponent.VOLTAGE_L1.id == "electrical_l1_voltage"
+
+
+def test_columns_default_to_the_channel_key(configure_component):
+    # The SQL logger names the column after the channel key; a shared table pins `column` in TOML
+    channels = configure_component(EnergyMeter, "phases = true\nquality = true\n")
+    assert all("column" not in channel for channel in channels.values())
 
 
 def test_device_specific_quantities_stay_on_their_device():

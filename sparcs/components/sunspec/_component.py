@@ -15,7 +15,7 @@ from lories.typing import Configurations
 
 class SunSpecComponent:
     """
-    Mixin that binds an `ElectricalDevice` vocabulary to a SunSpec device. Subclasses declare
+    Mixin that binds an `ACComponent` vocabulary to a SunSpec device. Subclasses declare
     the models they accept, the model used when the config names none, and the point name for
     each constant they can read; every constant left out of `POINTS` stays unbound, to be
     filled by TOML or by another component.
@@ -29,6 +29,8 @@ class SunSpecComponent:
     belongs to the `sunspec` connector.
     """
 
+    CONNECTOR = "sunspec"
+
     MODELS: List[int] = []
     DEFAULT_MODEL: Optional[int] = None
     POINTS: Dict[Constant, str] = {}
@@ -36,17 +38,15 @@ class SunSpecComponent:
     model: int
     instance: int
 
-    _connector_id: str
-
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
-        from sparcs.components.electrical import ElectricalDevice
+        from sparcs.components.binding import BindableComponent
 
-        if not issubclass(cls, ElectricalDevice):
-            raise TypeError(f"{cls.__name__} mixes in SunSpecComponent without an ElectricalDevice base")
+        if not issubclass(cls, BindableComponent):
+            raise TypeError(f"{cls.__name__} mixes in SunSpecComponent without a BindableComponent base")
         mro = cls.__mro__
-        if mro.index(SunSpecComponent) > mro.index(ElectricalDevice):
-            raise TypeError(f"{cls.__name__} must list SunSpecComponent before ElectricalDevice")
+        if mro.index(SunSpecComponent) > mro.index(BindableComponent):
+            raise TypeError(f"{cls.__name__} must list SunSpecComponent before BindableComponent")
 
     def _configure_bindings(self, configs: Configurations) -> None:
         super()._configure_bindings(configs)
@@ -56,7 +56,6 @@ class SunSpecComponent:
                 f"Invalid SunSpec model '{self.model}' for {type(self).__name__}, expected one of {type(self).MODELS}"
             )
         self.instance = configs.get_int("instance", default=1)
-        self._connector_id = configs.get("connector", default="sunspec")
 
     def _bind(self, constant: Constant) -> Dict[str, Any]:
         point = self._point(constant)
