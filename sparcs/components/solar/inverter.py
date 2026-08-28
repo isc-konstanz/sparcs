@@ -11,16 +11,16 @@ from __future__ import annotations
 from lories.components import register_component_type
 from lories.core import Constant
 from lories.typing import Configurations
-from sparcs.components.electrical import ElectricalDevice
+from sparcs.components.electrical import ACComponent
 
 
 @register_component_type("pv_inverter", "solar_inverter")
-class SolarInverter(ElectricalDevice):
+class SolarInverter(ACComponent):
     """
     A grid-tied PV inverter. Beyond the AC quantities every electrical device reports, it adds
     its energy yield, operating state and cabinet temperature, and two optional groups: the DC
     input channels behind the `dc` flag, and the curtailment channels behind the `control`
-    flag. Per-phase and power-quality groups come from `ElectricalDevice` via the `phases` and
+    flag. Per-phase and power-quality groups come from `ACComponent` via the `phases` and
     `quality` flags.
 
     Registered as `pv_inverter` (alias `solar_inverter`) rather than `inverter`, because

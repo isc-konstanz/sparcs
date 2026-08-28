@@ -11,11 +11,11 @@ from __future__ import annotations
 from lories.components import register_component_type
 from lories.core import Constant
 from lories.typing import Configurations
-from sparcs.components.electrical import ElectricalDevice
+from sparcs.components.electrical import ACComponent
 
 
 @register_component_type("meter")
-class EnergyMeter(ElectricalDevice):
+class EnergyMeter(ACComponent):
     """
     An AC energy meter: a typed alternative to grouping raw meter channels in a generic
     component. Import/export energies are the device's raw lifetime counters; derive interval

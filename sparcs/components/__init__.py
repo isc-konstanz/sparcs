@@ -8,8 +8,11 @@ sparcs.components
 
 from . import weather  # noqa: F401
 
+from . import binding  # noqa: F401
+from .binding import BindableComponent  # noqa: F401
+
 from . import electrical  # noqa: F401
-from .electrical import ElectricalDevice  # noqa: F401
+from .electrical import ACComponent  # noqa: F401
 
 from . import meter  # noqa: F401
 from .meter import EnergyMeter  # noqa: F401
