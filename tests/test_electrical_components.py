@@ -7,7 +7,7 @@ Unit tests for the protocol-free device layer: the ``ACComponent`` vocabulary
 and the flag-gated channel groups ``EnergyMeter`` and ``SolarInverter`` add on top.
 Nothing here may know about SunSpec -- the load-bearing assertions are the negative
 ones, which pin that these classes declare channels carrying no ``point``, ``model``,
-``instance`` or ``connector``. Bindings are tested in ``test_sunspec_components.py``.
+``instance`` or ``connector``. Bindings are tested in ``test_devices_sunspec.py``.
 """
 
 from __future__ import annotations
