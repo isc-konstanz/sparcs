@@ -27,6 +27,12 @@ from .solar import (  # noqa: F401
     SolarSystem,
 )
 
+from . import vehicle  # noqa: F401
+from .vehicle import (  # noqa: F401
+    EVSE,
+    ChargeBig,
+)
+
 from . import agriculture  # noqa: F401
 from .agriculture import (  # noqa: F401
     AgriculturalArea,
