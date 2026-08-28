@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-sparcs.tests.test_sunspec_components
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+sparcs.tests.test_devices_sunspec
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Unit tests for the SunSpec protocol layer: ``SunSpecInverter`` and ``SunSpecMeter``
 bind the vocabulary their device base declares. The device vocabulary itself is
