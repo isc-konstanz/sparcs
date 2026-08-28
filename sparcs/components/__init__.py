@@ -31,10 +31,7 @@ from .solar import (  # noqa: F401
 )
 
 from . import vehicle  # noqa: F401
-from .vehicle import (  # noqa: F401
-    EVSE,
-    ChargeBig,
-)
+from .vehicle import EVSE  # noqa: F401
 
 from . import agriculture  # noqa: F401
 from .agriculture import (  # noqa: F401
@@ -43,9 +40,10 @@ from .agriculture import (  # noqa: F401
     Irrigation,
 )
 
-from . import sunspec  # noqa: F401
-from .sunspec import (  # noqa: F401
-    SunSpecComponent,
+from . import devices  # noqa: F401
+from .devices import (  # noqa: F401
+    ChargeBig,
+    SunSpecBinding,
     SunSpecInverter,
     SunSpecMeter,
 )

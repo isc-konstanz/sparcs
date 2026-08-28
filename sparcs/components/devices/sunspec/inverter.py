@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-sparcs.components.sunspec.inverter
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+sparcs.components.devices.sunspec.inverter
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 
 """
@@ -10,12 +10,12 @@ from __future__ import annotations
 
 from lories.components import register_component_type
 from lories.core import Constant
+from sparcs.components.devices.sunspec._binding import SunSpecBinding
 from sparcs.components.solar.inverter import SolarInverter
-from sparcs.components.sunspec._component import SunSpecComponent
 
 
 @register_component_type("sunspec_inverter")
-class SunSpecInverter(SunSpecComponent, SolarInverter):
+class SunSpecInverter(SunSpecBinding, SolarInverter):
     """
     A `SolarInverter` read over SunSpec. The point names are identical across the three
     inverter models -- 101 single phase, 102 split phase, 103 three phase -- so wiring a device
