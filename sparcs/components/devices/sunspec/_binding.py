@@ -20,9 +20,12 @@ class SunSpecBinding:
     each constant they can read; every constant left out of `POINTS` stays unbound, to be
     filled by TOML or by another component.
 
-    Wiring a device needs only the device's model id and, if several instances of that model
-    sit behind one gateway, the instance. Because a binding is written as ordinary channel
-    config, TOML can override `model`, `point`, `instance` or `connector` per channel, or
+    Wiring a device needs its Modbus unit id, its model id, and, if several instances of that
+    model sit on that one unit, the instance. The unit id is what lets several devices share
+    one connector: the `sunspec` connector owns a transport endpoint and routes each channel to
+    the unit its `device` key names, so an inverter and a meter behind one gateway are two
+    components against one connector. Because a binding is written as ordinary channel config,
+    TOML can override `device`, `model`, `point`, `instance` or `connector` per channel, or
     repurpose a channel for another protocol entirely.
 
     This mixin knows point names and model ids. Everything about Modbus, transports and reads
@@ -35,6 +38,7 @@ class SunSpecBinding:
     DEFAULT_MODEL: Optional[int] = None
     POINTS: Dict[Constant, str] = {}
 
+    device: int
     model: int
     instance: int
 
@@ -50,6 +54,11 @@ class SunSpecBinding:
 
     def _configure_bindings(self, configs: Configurations) -> None:
         super()._configure_bindings(configs)
+        self.device = configs.get_int("device")
+        if self.device is None:
+            raise ConfigurationError(
+                f"{type(self).__name__} requires the SunSpec 'device' unit id its connector addresses it by"
+            )
         self.model = configs.get_int("model", default=type(self).DEFAULT_MODEL)
         if self.model not in type(self).MODELS:
             raise ConfigurationError(
@@ -63,6 +72,7 @@ class SunSpecBinding:
             return {}
         return {
             "point": point,
+            "device": self.device,
             "model": self._model(constant),
             "instance": self.instance,
             "connector": self._connector_id,
