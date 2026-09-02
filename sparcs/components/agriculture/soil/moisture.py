@@ -26,10 +26,10 @@ class SoilMoisture(Component):
     TYPE: str = "soil"
     INCLUDES: List[str] = [SoilModel.TYPE]
 
-    TEMPERATURE = Constant(float, "temp", "Soil Temperature", "°C")
-    WATER_CONTENT = Constant(float, "water_content", "Soil Water Content", "%")
-    WATER_TENSION = Constant(float, "water_tension", "Soil Water Tension", "hPa")
-    WATER_SUPPLY = Constant(float, "water_supply", "Soil Water Supply Coverage", "%")
+    TEMPERATURE = Constant(float, "temp", "Soil Temperature", "°C", context="soil")
+    WATER_CONTENT = Constant(float, "water_content", "Soil Water Content", "%", context="soil")
+    WATER_TENSION = Constant(float, "water_tension", "Soil Water Tension", "hPa", context="soil")
+    WATER_SUPPLY = Constant(float, "water_supply", "Soil Water Supply Coverage", "%", context="soil")
 
     wilting_point: float = DEFAULT_WILTING_POINT
     field_capacity: float = DEFAULT_FIELD_CAPACITY
@@ -52,6 +52,7 @@ class SoilMoisture(Component):
         def add_channel(constant: Constant, **custom) -> None:
             channel = constant.to_dict()
             channel["name"] = constant.name.replace("Soil", self.name, 1)
+            channel["column"] = constant.name.replace("soil", self.key, 1)
             channel["aggregate"] = "mean"
             channel.update(custom)
             self.data.add(**channel)

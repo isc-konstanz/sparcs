@@ -18,8 +18,8 @@ from sparcs.components.agriculture import SoilMoisture
 class Irrigation(Component):
     TYPE = "irrigation"
 
-    STATE = Constant(bool, "state", "Irrigation State", alias="irrigation_state")
-    FLOW = Constant(float, "flow", "Irrigation Flow", alias="irrigation_flow", unit="l/min")
+    STATE = Constant(bool, "state", "Irrigation State", context="irrigation")
+    FLOW = Constant(float, "flow", "Irrigation Flow", context="irrigation", unit="l/min")
 
     soil: Sequence[SoilMoisture]
 
@@ -29,5 +29,13 @@ class Irrigation(Component):
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
-        self.data.add(Irrigation.STATE, aggregate="max")
-        self.data.add(Irrigation.FLOW, aggregate="sum")
+
+        def add_channel(constant: Constant, **custom) -> None:
+            channel = constant.to_dict()
+            channel["name"] = constant.name.replace("Irrigation", self.name, 1)
+            channel["column"] = constant.id.replace("irrigation", self.key, 1)
+            channel.update(custom)
+            self.data.add(**channel)
+
+        add_channel(Irrigation.STATE, aggregate="max")
+        add_channel(Irrigation.FLOW, aggregate="sum")

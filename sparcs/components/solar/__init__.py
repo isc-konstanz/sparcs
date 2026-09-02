@@ -14,3 +14,5 @@ from .inverter import SolarInverter  # noqa: F401
 
 from . import system  # noqa: F401
 from .system import SolarSystem  # noqa: F401
+
+from . import bifacial  # noqa: F401

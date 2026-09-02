@@ -25,7 +25,7 @@ class WeatherFile(Weather):
     def activate(self) -> None:
         super().activate()
         self._data, self._meta = self._read_from_file()
-        self._data.rename(columns={"temp_dew": "dew_point"}, inplace=True)
+        self._data.rename(columns={"temp_dew": Weather.TEMP_DEW_POINT}, inplace=True)
         self.location = self._localize_from_meta(self._meta)
 
     @abstractmethod
