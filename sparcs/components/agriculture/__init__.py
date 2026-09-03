@@ -15,6 +15,14 @@ from .soil import (  # noqa: F401
 from . import irrigation  # noqa: F401
 from .irrigation import Irrigation  # noqa: F401
 
+from . import simulation  # noqa: F401
+from .simulation import (  # noqa: F401
+    Evapotranspiration,
+    FieldSimulation,
+    GroundShading,
+    SoilSimulation,
+)
+
 from . import field  # noqa: F401
 from .field import AgriculturalField  # noqa: F401
 

@@ -1,0 +1,226 @@
+# -*- coding: utf-8 -*-
+"""
+sparcs.components.agriculture.simulation.plot_style
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Shared visual contract for progress-plot PNGs (SoilSimulation, GroundShading):
+fixed width, equal-aspect axes, shared margins, plasma colormap, and timestamp titles.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Optional
+
+from matplotlib.colors import Normalize
+
+import numpy as np
+import pandas as pd
+from lories.typing import Configurations
+
+logger = logging.getLogger(__name__)
+
+# Progress-plot config + render cadence
+
+
+def render_due(last: Optional[pd.Timestamp], now: pd.Timestamp, interval: pd.Timedelta) -> bool:
+    """True when a progress frame is due: none has rendered yet (``last is None``)
+    or at least ``interval`` has elapsed since the last render at ``last``.
+
+    Pure and side-effect-free: each caller owns its own last-timestamp state and
+    performs the render + state update itself.
+    """
+    return last is None or (now - last) >= interval
+
+
+@dataclass
+class PlotConfig:
+    """Progress-plot cadence shared by the field-simulation subcomponents
+    (``SoilSimulation``, ``GroundShading``, ``SoilPredictor``).
+
+    Rendered PNGs persist only to their DB blob channel; there is no filesystem
+    sink. ``interval`` is the minimum time between renders.
+    """
+
+    interval: pd.Timedelta
+
+
+def load_plot_config(configs: Configurations, *, default_interval: str) -> Optional[PlotConfig]:
+    """Read a ``[plot]`` block into a :class:`PlotConfig`, or ``None`` when
+    plotting is disabled (``enabled = false``).
+
+    ``enabled`` and ``interval`` cascade from a field-level ``[plot]`` block via
+    ``FieldSimulation._build_defaults`` and are overridable per subcomponent;
+    ``default_interval`` is the per-component final fallback. An ``int``/``float``
+    ``interval`` is read as seconds, a string/``Timedelta`` as a duration.
+    """
+    plot = configs.get_member("plot", defaults={}, ensure_exists=True)
+    if not plot.get_bool("enabled", default=True):
+        return None
+    interval = plot.get("interval", default=default_interval)
+    if isinstance(interval, (int, float)):
+        interval = pd.Timedelta(seconds=float(interval))
+    else:
+        interval = pd.Timedelta(interval)
+    return PlotConfig(interval=interval)
+
+
+# Consecutive render failures after which a component disables its plotting
+# for the rest of the run (issue 27/W2.9). One transient matplotlib error
+# must not kill plotting until restart; a persistent one must not log forever.
+PLOT_DISABLE_AFTER: int = 3
+
+
+def count_render_failure(
+    component_logger: logging.Logger,
+    name: str,
+    strikes: int,
+    *,
+    what: str = "progress-plot",
+) -> tuple[int, bool]:
+    """Count one render failure toward the shared N-strikes policy and log it
+    (call from inside the except block -- both messages carry the traceback).
+    Returns ``(new_strikes, disable)``; the SITE owns the actual disable
+    (``self._plot_config = None``) and the reset-to-0 on a successful render.
+    The failed render is skipped for this tick either way."""
+    strikes += 1
+    if strikes >= PLOT_DISABLE_AFTER:
+        component_logger.exception(
+            "%s: %s render failed (%d consecutive); disabling plotting for the rest of the run.",
+            name,
+            what,
+            strikes,
+        )
+        return strikes, True
+    component_logger.exception(
+        "%s: %s render failed (strike %d of %d); skipping the rest of this tick's rendering.",
+        name,
+        what,
+        strikes,
+        PLOT_DISABLE_AFTER,
+    )
+    return strikes, False
+
+
+def set_strike_channel(component, key: str, strikes: int) -> None:
+    """Best-effort write of the strike count to the component's in-memory
+    channel (registered logger-off; surfaces in the Dash Data accordion).
+    A no-op when data/channel is absent -- bare test instances drive the real
+    render paths with fake or missing data access."""
+    try:
+        component.data[key].set(pd.Timestamp.now(tz="UTC"), float(strikes))
+    except Exception:  # noqa: BLE001
+        logger.debug("strike channel '%s' unavailable; count=%d kept in memory.", key, strikes)
+
+
+# Style constants
+
+FIG_WIDTH_IN: float = 8.0  # inches; 960 px at DPI=120
+DPI: int = 120
+
+# Fixed inch margins so axes sit at the same position across all renders;
+# ``right`` reserves space for the colorbar.
+MARGIN = {
+    "left": 0.9,
+    "right": 1.2,
+    "bottom": 0.55,
+    "top": 0.45,
+}
+
+AXES_WIDTH_IN: float = FIG_WIDTH_IN - MARGIN["left"] - MARGIN["right"]
+VERTICAL_CHROME_IN: float = MARGIN["top"] + MARGIN["bottom"]  # title + xlabel inches
+
+GRID_ALPHA: float = 0.3
+COLORMAP: str = "plasma"
+CBAR_SHRINK: float = 0.8
+
+AXIS_LABEL_X: str = "x [m]"
+AXIS_LABEL_Y: str = "y [m]"
+
+TIMESTAMP_FORMAT: str = "%Y-%m-%d %H:%M"
+
+
+# Helpers
+
+
+def compute_fig_size(x_extent: float, y_extent: float) -> tuple[float, float]:
+    """Figure ``(width_in, height_in)`` preserving the data aspect ratio with fixed width."""
+    if x_extent <= 0:
+        x_extent = 1.0
+    if y_extent <= 0:
+        y_extent = 1.0
+    axes_h_in = AXES_WIDTH_IN * y_extent / x_extent
+    return FIG_WIDTH_IN, axes_h_in + VERTICAL_CHROME_IN
+
+
+def apply_subplots_adjust(fig) -> None:
+    """Convert inch margins to figure-relative fractions and call ``subplots_adjust``."""
+    w, h = fig.get_size_inches()
+    fig.subplots_adjust(
+        left=MARGIN["left"] / w,
+        right=1.0 - MARGIN["right"] / w,
+        bottom=MARGIN["bottom"] / h,
+        top=1.0 - MARGIN["top"] / h,
+    )
+
+
+def apply_axes_style(ax) -> None:
+    """Bracketed-unit labels, light grid, equal aspect (shared on both plots)."""
+    ax.set_xlabel(AXIS_LABEL_X)
+    ax.set_ylabel(AXIS_LABEL_Y)
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True, alpha=GRID_ALPHA)
+
+
+def _localize_timestamp(ts: pd.Timestamp, tz) -> pd.Timestamp:
+    """Return ``ts`` in the site timezone ``tz``. A naive ``ts`` is assumed UTC;
+    ``tz=None`` returns ``ts`` unchanged (naive stays naive → no offset shown)."""
+    if tz is None:
+        return ts
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    return ts.tz_convert(tz)
+
+
+def _offset_suffix(ts: pd.Timestamp) -> str:
+    """`` +HH:MM`` for a tz-aware ``ts`` (colon-form offset), or ``""`` when naive."""
+    raw = ts.strftime("%z")  # "+0200" / "-0500", or "" when naive
+    return f" {raw[:3]}:{raw[3:]}" if raw else ""
+
+
+def format_progress_title(label: str, ts: pd.Timestamp, *, tz=None) -> str:
+    """``"<label> — YYYY-MM-DD HH:MM[ +HH:MM]"`` — the shared title format.
+
+    ``tz`` (an IANA name or ``tzinfo``, from ``location.timezone``) renders the
+    timestamp in site-local time with a colon-form offset; a naive ``ts`` is
+    assumed UTC. ``tz=None`` keeps ``ts`` as-is with no offset."""
+    ts = _localize_timestamp(ts, tz)
+    return f"{label} — {ts.strftime(TIMESTAMP_FORMAT)}{_offset_suffix(ts)}"
+
+
+class SmoothstepNorm(Normalize):
+    """Smoothstep colormap norm ``f(x) = 3x² - 2x³``: stretches mid-range, compresses extremes.
+
+    Inverse ``g(y) = 0.5 - sin(arcsin(1 - 2y) / 3)`` keeps colorbar ticks in physical Se units.
+    """
+
+    def __call__(self, value, clip=None):
+        v_min = float(self.vmin)
+        v_max = float(self.vmax)
+        denom = max(v_max - v_min, 1e-12)
+        v = (np.asarray(value, dtype=float) - v_min) / denom
+        v = np.clip(v, 0.0, 1.0)
+        return 3.0 * v * v - 2.0 * v * v * v
+
+    def inverse(self, value):
+        v_min = float(self.vmin)
+        v_max = float(self.vmax)
+        y = np.clip(np.asarray(value, dtype=float), 0.0, 1.0)
+        x = 0.5 - np.sin(np.arcsin(1.0 - 2.0 * y) / 3.0)
+        return x * (v_max - v_min) + v_min
+
+
+def saturation_norm(vmin: float = 0.0, vmax: float = 1.0) -> Normalize:
+    """Return a fresh :class:`SmoothstepNorm` for soil-saturation plots."""
+    return SmoothstepNorm(vmin=vmin, vmax=vmax)

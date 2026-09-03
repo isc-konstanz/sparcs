@@ -6,69 +6,56 @@ sparcs.components.solar.inverter
 
 """
 
-# from lories.components import Component
-# from lories.core import Constant
-from sparcs.components import Meter
+from __future__ import annotations
+
+from lories.components import register_component_type
+from lories.core import Constant
+from lories.typing import Configurations
+from sparcs.components.electrical import ACComponent
 
 
-class SolarInverter(Meter):
-    pass
-    # POWER_ACTIVE = Constant(float, "active_power", "Active Power", "W")
-    # POWER_L1_ACTIVE = Constant(float, "l1_active_power", "Phase 1 Active Power", "W")
-    # POWER_L2_ACTIVE = Constant(float, "l2_active_power", "Phase 2 Active Power", "W")
-    # POWER_L3_ACTIVE = Constant(float, "l3_active_power", "Phase 3 Active Power", "W")
-    #
-    # POWER_REACTIVE = Constant(float, "reactive_power", "Reactive Power", "W")
-    # POWER_L1_REACTIVE = Constant(float, "l1_reactive_power", "Phase 1 Reactive Power", "W")
-    # POWER_L2_REACTIVE = Constant(float, "l2_reactive_power", "Phase 2 Reactive Power", "W")
-    # POWER_L3_REACTIVE = Constant(float, "l3_reactive_power", "Phase 3 Reactive Power", "W")
-    #
-    # POWER_APPARENT = Constant(float, "apparent_power", "Apparent Power", "W")
-    # POWER_L1_APPARENT = Constant(float, "l1_apparent_power", "Phase 1 Apparent Power", "W")
-    # POWER_L2_APPARENT = Constant(float, "l2_apparent_power", "Phase 2 Apparent Power", "W")
-    # POWER_L3_APPARENT = Constant(float, "l3_apparent_power", "Phase 3 Apparent Power", "W")
-    #
-    # POWER_IMPORT = Constant(float, "import_power", "Imported Power", "W")
-    # POWER_L1_IMPORT = Constant(float, "l1_import_power", "Phase 1 Imported Power", "W")
-    # POWER_L2_IMPORT = Constant(float, "l2_import_power", "Phase 2 Imported Power", "W")
-    # POWER_L3_IMPORT = Constant(float, "l3_import_power", "Phase 3 Imported Power", "W")
-    #
-    # POWER_EXPORT = Constant(float, "export_power", "Exported Power", "W")
-    # POWER_L1_EXPORT = Constant(float, "l1_export_power", "Phase 1 Exported Power", "W")
-    # POWER_L2_EXPORT = Constant(float, "l2_export_power", "Phase 2 Exported Power", "W")
-    # POWER_L3_EXPORT = Constant(float, "l3_export_power", "Phase 3 Exported Power", "W")
-    #
-    # ENERGY_ACTIVE = Constant(float, "Active Energy", "kWh")
-    # ENERGY_L1_ACTIVE = Constant(float, "Phase 1 Active Energy", "kWh")
-    # ENERGY_L2_ACTIVE = Constant(float, "Phase 2 Active Energy", "kWh")
-    # ENERGY_L3_ACTIVE = Constant(float, "Phase 3 Active Energy", "kWh")
-    #
-    # ENERGY_REACTIVE = Constant(float, "Reactive Energy", "kWh")
-    # ENERGY_L1_REACTIVE = Constant(float, "Phase 1 Reactive Energy", "kWh")
-    # ENERGY_L2_REACTIVE = Constant(float, "Phase 2 Reactive Energy", "kWh")
-    # ENERGY_L3_REACTIVE = Constant(float, "Phase 3 Reactive Energy", "kWh")
-    #
-    # ENERGY_APPARENT = Constant(float, "Total Apparent Energy", "kWh")
-    # ENERGY_L1_APPARENT = Constant(float, "Phase 1 Apparent Energy", "kWh")
-    # ENERGY_L2_APPARENT = Constant(float, "Phase 2 Apparent Energy", "kWh")
-    # ENERGY_L3_APPARENT = Constant(float, "Phase 3 Apparent Energy", "kWh")
-    #
-    # ENERGY_IMPORT = Constant(float, "Imported Energy", "kWh")
-    # ENERGY_L1_IMPORT = Constant(float, "Phase 1 Imported Energy", "kWh")
-    # ENERGY_L2_IMPORT = Constant(float, "Phase 2 Imported Energy", "kWh")
-    # ENERGY_L3_IMPORT = Constant(float, "Phase 3 Imported Energy", "kWh")
-    #
-    # ENERGY_EXPORT = Constant(float, "Exported Energy", "kWh")
-    # ENERGY_L1_EXPORT = Constant(float, "Phase 1 Exported Energy", "kWh")
-    # ENERGY_L2_EXPORT = Constant(float, "Phase 2 Exported Energy", "kWh")
-    # ENERGY_L3_EXPORT = Constant(float, "Phase 3 Exported Energy", "kWh")
-    #
-    # VOLTAGE_L1 = Constant(float, "l1_voltage", "Phase 1 Voltage", "V")
-    # VOLTAGE_L2 = Constant(float, "l2_voltage", "Phase 2 Voltage", "V")
-    # VOLTAGE_L3 = Constant(float, "l3_voltage", "Phase 3 Voltage", "V")
-    #
-    # CURRENT_L1 = Constant(float, "l1_current", "Phase 1 Current", "A")
-    # CURRENT_L2 = Constant(float, "l2_current", "Phase 2 Current", "A")
-    # CURRENT_L3 = Constant(float, "l3_current", "Phase 3 Current", "A")
-    #
-    # FREQUENCY = Constant(float, "frequency", "Frequency", "Hz")
+@register_component_type("pv_inverter", "solar_inverter")
+class SolarInverter(ACComponent):
+    """
+    A grid-tied PV inverter. Beyond the AC quantities every electrical device reports, it adds
+    its energy yield, operating state and cabinet temperature, and two optional groups: the DC
+    input channels behind the `dc` flag, and the curtailment channels behind the `control`
+    flag. Per-phase and power-quality groups come from `ACComponent` via the `phases` and
+    `quality` flags.
+
+    Registered as `pv_inverter` (alias `solar_inverter`) rather than `inverter`, because
+    `[inverter]` inside a PV system config already means that system's pvlib inverter
+    parameters, and both would otherwise take a `model` key with incompatible meanings.
+
+    Channels are declared unbound: wire them in TOML, or use `SunSpecInverter` to have the
+    SunSpec point names, model id and connector filled in.
+    """
+
+    ENERGY = Constant(float, "energy", "Energy Yield", "Wh", context="inverter", aggregate="last")
+    STATE = Constant(int, "state", "State", context="inverter", aggregate="last")
+    TEMPERATURE = Constant(float, "temperature", "Temperature", "°C", context="inverter", aggregate="mean")
+
+    POWER_DC = Constant(float, "dc_power", "DC Power", "W", context="inverter", aggregate="mean")
+    VOLTAGE_DC = Constant(float, "dc_voltage", "DC Voltage", "V", context="inverter", aggregate="mean")
+    CURRENT_DC = Constant(float, "dc_current", "DC Current", "A", context="inverter", aggregate="mean")
+
+    POWER_LIMIT = Constant(float, "power_limit", "Power Limit", "%", context="inverter", aggregate="last")
+    POWER_LIMIT_ENABLED = Constant(
+        int, "power_limit_enabled", "Power Limit Enabled", context="inverter", aggregate="last"
+    )
+
+    def _add_core_channels(self, configs: Configurations) -> None:
+        super()._add_core_channels(configs)
+        self._add_channel(SolarInverter.ENERGY)
+        self._add_channel(SolarInverter.STATE)
+        self._add_channel(SolarInverter.TEMPERATURE)
+
+    def _add_optional_channels(self, configs: Configurations) -> None:
+        if configs.get_bool("dc", default=True):
+            self._add_channel(SolarInverter.POWER_DC)
+            self._add_channel(SolarInverter.VOLTAGE_DC)
+            self._add_channel(SolarInverter.CURRENT_DC)
+
+        if configs.get_bool("control", default=False):
+            self._add_channel(SolarInverter.POWER_LIMIT)
+            self._add_channel(SolarInverter.POWER_LIMIT_ENABLED)

@@ -30,7 +30,7 @@ import pandas as pd
 from lories.components import Component
 from lories.core import ConfigurationError, Configurations
 from lories.typing import ContextArgument
-from sparcs.components.solar.bifacial import irradiance, temperature
+from sparcs.components.solar.bifacial import temperature
 from sparcs.components.solar.db import ModuleDatabase
 
 
@@ -454,12 +454,12 @@ class SolarArray(Component, pv.pvsystem.Array):
                 param_set = self.mount.racking_model.lower()
                 if param_set in ["open_rack", "close_mount", "insulated_back"]:
                     param_set += f"_{self.module_type}"
-                if param_set in temperature.TEMPERATURE_MODEL_PARAMETERS["sapm"]:
-                    params.update(temperature._temperature_model_params("sapm", param_set))
+                if param_set in pv.temperature.TEMPERATURE_MODEL_PARAMETERS["sapm"]:
+                    params.update(pv.temperature._temperature_model_params("sapm", param_set))
                 elif "freestanding" in param_set:
-                    params.update(temperature._temperature_model_params("pvsyst", "freestanding"))
+                    params.update(pv.temperature._temperature_model_params("pvsyst", "freestanding"))
                 elif "insulated" in param_set:  # after SAPM to avoid confusing keys
-                    params.update(temperature._temperature_model_params("pvsyst", "insulated"))
+                    params.update(pv.temperature._temperature_model_params("pvsyst", "insulated"))
 
         if len(params) == 0 and len(self.module_parameters) > 0:
             if "noct" in self.module_parameters.keys():
@@ -471,6 +471,8 @@ class SolarArray(Component, pv.pvsystem.Array):
         return params
 
     def _infer_transposition_model_params(self, configs: Configurations) -> Optional[Dict[str, Any]]:
+        if not self.has_rows():
+            return {}
         transposition = configs.get_member("transposition", defaults={})
         transposition_file = os.path.join(configs.dirs.conf, self.key.replace("array", "transposition") + ".conf")
         if not os.path.isfile(transposition_file):
@@ -654,15 +656,15 @@ class SolarArray(Component, pv.pvsystem.Array):
         if airmass is None:
             airmass = atmosphere.get_relative_airmass(solar_zenith)
 
-        orientation = self.mount.get_orientation(solar_zenith, solar_azimuth)
+        # orientation = self.mount.get_orientation(solar_zenith, solar_azimuth)
 
         model = re.sub("[^A-Za-z0-9]+", "", model).lower()
         if model in ["solarfactor", "pvfactor"]:
             # return irradiance.get_pvfactors_irradiance()
-            raise ValueError(f"Not yet implemented pvfactor bifacial irradiance model")
+            raise ValueError("Not yet implemented pvfactor bifacial irradiance model")
         elif model == "raytracing":
             # return irradiance.get_ray_tracing_irradiance()
-            raise ValueError(f"Not yet implemented raytracing bifacial irradiance model")
+            raise ValueError("Not yet implemented raytracing bifacial irradiance model")
 
         return super().get_irradiance(
             solar_zenith,

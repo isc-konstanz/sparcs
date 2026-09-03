@@ -15,7 +15,7 @@ from lories.components import Component
 from lories.core import Constant
 from lories.data import ChannelState
 from lories.typing import Configurations
-from sparcs.components.agriculture.soil import Genuchten, SoilModel
+from sparcs.components.agriculture.soil import SoilModel, create_soil_model
 
 DEFAULT_WILTING_POINT: float = 4.2
 DEFAULT_FIELD_CAPACITY: float = 1.8
@@ -39,20 +39,27 @@ class SoilMoisture(Component):
 
     depth: float
 
-    def __init__(self, context: Context, configs: Configurations, key="soil", **kwargs) -> None:  # noqa
+    def __init__(self, context: Component, configs: Configurations, key="soil", **kwargs) -> None:
         super().__init__(context, configs, key=key, **kwargs)
-        self.model = None
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
-        self.model = Genuchten(**configs["model"])
+        # Build the retention/conductivity model via the shared factory so
+        # ``[model] type = "bc"`` (Brooks–Corey) and other alternatives
+        # plug in with the same parameter block. ``type`` defaults to
+        # van Genuchten for backwards compatibility.
+        model_params = dict(configs["model"])
+        model_kind = model_params.pop("type", None)
+        self.model = create_soil_model(model_kind, **model_params)
 
+        # Both depth and x_offset are in centimetres; x_offset is signed lateral
+        # distance from the bay-center axis (positive = right of center).
         self.depth = configs.get_float("depth")
+        self.x_offset = configs.get_float("x_offset", default=0.0)
 
         def add_channel(constant: Constant, **custom) -> None:
             channel = constant.to_dict()
             channel["name"] = constant.name.replace("Soil", self.name, 1)
-            channel["column"] = constant.name.replace("soil", self.key, 1)
             channel["aggregate"] = "mean"
             channel.update(custom)
             self.data.add(**channel)
@@ -68,9 +75,14 @@ class SoilMoisture(Component):
         wilting_point = configs.get("wilting_point", default=SoilMoisture.wilting_point)
         field_capacity = configs.get("field_capacity", default=SoilMoisture.field_capacity)
 
-        self.wilting_point = self.model.water_content(self.model.pf_to_pressure(wilting_point))
-        self.field_capacity = self.model.water_content(self.model.pf_to_pressure(field_capacity))
+        self.wilting_point = self.model.theta_from_psi(self.model.psi_from_pf(wilting_point))
+        self.field_capacity = self.model.theta_from_psi(self.model.psi_from_pf(field_capacity))
         self.water_capacity_available = self.field_capacity - self.wilting_point
+
+    @property
+    def has_measured_tension(self) -> bool:
+        """True when the water_tension channel is backed by a connector."""
+        return self.data.water_tension.has_connector()
 
     # noinspection SpellCheckingInspection
     def activate(self) -> None:
@@ -86,7 +98,7 @@ class SoilMoisture(Component):
             water_content = data.dropna(axis="columns").mean(axis="columns") / 100
             if len(water_content) == 1:
                 water_content = water_content.iloc[0]
-            water_tension = self.model.water_tension(water_content)
+            water_tension = self.model.psi_from_theta(water_content)
             self.data[SoilMoisture.WATER_TENSION].set(timestamp, water_tension)
         else:
             self.data[SoilMoisture.WATER_TENSION].state = ChannelState.NOT_AVAILABLE
@@ -97,7 +109,7 @@ class SoilMoisture(Component):
             water_tension = data.dropna(axis="columns").mean(axis="columns")
             if len(water_tension) == 1:
                 water_tension = water_tension.iloc[0]
-            water_content = self.model.water_content(water_tension)
+            water_content = self.model.theta_from_psi(water_tension)
             water_supply = (water_content - self.wilting_point) / self.water_capacity_available
             if water_supply < 0:
                 water_supply = 0
