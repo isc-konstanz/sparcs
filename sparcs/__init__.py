@@ -15,7 +15,6 @@ del _version
 
 from .location import Location  # noqa: F401
 
-from . import components  # noqa: F401
 from .components import (  # noqa: F401
     SolarArray,
     SolarSystem,
@@ -24,7 +23,6 @@ from .components import (  # noqa: F401
     ElectricalEnergyStorage,
     ThermalEnergyStorage,
 )
-
 
 from . import system  # noqa: F401
 from .system import System  # noqa: F401
