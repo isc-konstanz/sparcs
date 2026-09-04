@@ -11,8 +11,8 @@ from __future__ import annotations
 from typing import Optional
 
 from lories.components import register_component_type
+from lories.connectors.sunspec import SunSpecBinding
 from lories.core import Constant
-from sparcs.components.devices.sunspec._binding import SunSpecBinding
 from sparcs.components.meter import EnergyMeter
 
 
@@ -35,6 +35,8 @@ class SunSpecMeter(SunSpecBinding, EnergyMeter):
     }
 
     POINTS = {
+        # Model 20x defines no sign for 'W': the CT orientation decides, so a site that is
+        # wired against the load reference sets scale = -1 on the channel in TOML
         EnergyMeter.POWER: "W",
         EnergyMeter.CURRENT: "A",
         EnergyMeter.VOLTAGE: "PhV",

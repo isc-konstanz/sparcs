@@ -9,8 +9,8 @@ sparcs.components.devices.sunspec.inverter
 from __future__ import annotations
 
 from lories.components import register_component_type
+from lories.connectors.sunspec import SunSpecBinding
 from lories.core import Constant
-from sparcs.components.devices.sunspec._binding import SunSpecBinding
 from sparcs.components.solar.inverter import SolarInverter
 
 
@@ -30,6 +30,7 @@ class SunSpecInverter(SunSpecBinding, SolarInverter):
     CONTROLS_MODEL = 123
 
     POINTS = {
+        # Model 10x 'W' is the AC output power, positive while producing (generator reference)
         SolarInverter.POWER: "W",
         SolarInverter.CURRENT: "A",
         SolarInverter.FREQUENCY: "Hz",

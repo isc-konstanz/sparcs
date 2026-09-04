@@ -19,7 +19,7 @@ def configure_component(monkeypatch, tmp_path):
 
     Full component construction needs an application context, so this runs
     ``configure()`` on a ``__new__``-bypassed instance with the lories base
-    ``configure()`` no-op'ed and name/key/data patched. The recorded
+    ``configure()`` no-op'ed and id/name/key/data patched. The recorded
     ``data.add`` calls are the assertion surface: the whole inheritance
     chain still runs, only lories' own ``Component.configure`` is stubbed.
     """
@@ -37,6 +37,7 @@ def configure_component(monkeypatch, tmp_path):
                 calls.append(channel)
 
         monkeypatch.setattr(Component, "configure", lambda self, c: None)
+        monkeypatch.setattr(component_class, "id", property(lambda self: "sys.dev1"), raising=False)
         monkeypatch.setattr(component_class, "name", property(lambda self: "Device 1"), raising=False)
         monkeypatch.setattr(component_class, "key", property(lambda self: "dev1"), raising=False)
         monkeypatch.setattr(component_class, "data", property(lambda self: _Data()), raising=False)

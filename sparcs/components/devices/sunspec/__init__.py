@@ -6,8 +6,7 @@ sparcs.components.devices.sunspec
 
 """
 
-from . import _binding  # noqa: F401
-from ._binding import SunSpecBinding  # noqa: F401
+from lories.connectors.sunspec import SunSpecBinding  # noqa: F401
 
 from . import inverter  # noqa: F401
 from .inverter import SunSpecInverter  # noqa: F401

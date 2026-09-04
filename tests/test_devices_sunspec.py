@@ -11,10 +11,13 @@ three irregular cases the standard forces (the immediate-controls model, model 2
 line-to-line point names, and the meter/inverter reactive-power spelling).
 
 ``device`` and ``instance`` are different axes and are asserted separately: ``device``
-selects the Modbus unit, ``instance`` selects a repeated model within one unit.
+selects the Modbus unit, ``instance`` selects a repeated model within one unit. The
+``connector`` id has no family default any more and is required on every bound device.
 """
 
 from __future__ import annotations
+
+from typing import Optional
 
 import pytest
 
@@ -30,10 +33,18 @@ METER_UNIT = 127
 
 @pytest.fixture
 def configure_device(configure_component):
-    """``configure_component`` with the required SunSpec unit id supplied."""
+    """``configure_component`` with the required SunSpec unit id and connector id supplied."""
 
-    def _configure(component_class, toml_text: str = "", device: int = INVERTER_UNIT) -> dict:
-        return configure_component(component_class, f"device = {device}\n{toml_text}")
+    def _configure(
+        component_class,
+        toml_text: str = "",
+        device: int = INVERTER_UNIT,
+        connector: Optional[str] = "sunspec",
+    ) -> dict:
+        wiring = f"device = {device}\n"
+        if connector is not None:
+            wiring += f'connector = "{connector}"\n'
+        return configure_component(component_class, wiring + toml_text)
 
     return _configure
 
@@ -146,11 +157,13 @@ def test_meter_rejects_invalid_model(configure_device):
 # ---------------------------------------------------------------- wiring
 
 
-def test_connector_defaults_to_sunspec_and_is_overridable(configure_device):
-    default = configure_device(SunSpecMeter, "")
-    assert default["power"]["connector"] == "sunspec"
+def test_connector_is_required_and_the_message_names_the_key(configure_device):
+    with pytest.raises(ConfigurationError, match="connector"):
+        configure_device(SunSpecMeter, connector=None)
 
-    named = configure_device(SunSpecMeter, 'connector = "grid_gateway"\n')
+
+def test_connector_id_is_bound_to_every_point_carrying_channel(configure_device):
+    named = configure_device(SunSpecMeter, connector="grid_gateway")
     assert named["power"]["connector"] == "grid_gateway"
 
 
@@ -173,8 +186,8 @@ def test_devices_on_one_connector_address_different_units(configure_device):
 
 
 def test_device_unit_id_is_required(configure_component):
-    with pytest.raises(ConfigurationError):
-        configure_component(SunSpecMeter, "model = 203\n")
+    with pytest.raises(ConfigurationError, match="device"):
+        configure_component(SunSpecMeter, 'model = 203\nconnector = "sunspec"\n')
 
 
 def test_bound_constants_are_declared_by_the_device():
