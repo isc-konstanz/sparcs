@@ -8,9 +8,9 @@ sparcs.components.electrical
 
 from __future__ import annotations
 
+from lories.components.binding import BindableComponent
 from lories.core import Constant
 from lories.typing import Configurations
-from sparcs.components.binding import BindableComponent
 
 
 class ACComponent(BindableComponent):

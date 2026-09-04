@@ -27,8 +27,13 @@ class SolarInverter(ACComponent):
     `[inverter]` inside a PV system config already means that system's pvlib inverter
     parameters, and both would otherwise take a `model` key with incompatible meanings.
 
-    Channels are declared unbound: wire them in TOML, or use `SunSpecInverter` to have the
-    SunSpec point names, model id and connector filled in.
+    Signs follow a generator reference: `power` and `dc_power` are positive while the
+    inverter delivers to the AC side, and `energy` is the lifetime yield counter. Currents
+    are unsigned RMS magnitudes. Per-phase powers are not part of this vocabulary; only
+    per-phase currents and voltages are, from `ACComponent`.
+
+    Channels are declared unbound: wire them in TOML, or use `SunSpecInverter` or
+    `OpenEMSInverter` to have the point names, addresses and connector filled in.
     """
 
     ENERGY = Constant(float, "energy", "Energy Yield", "Wh", context="inverter", aggregate="last")

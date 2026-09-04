@@ -24,8 +24,16 @@ class EnergyMeter(ACComponent):
     `directions` flag adds `power_import`/`power_export`, which no meter reports directly and
     which are there for another component or a processor to fill from the signed power.
 
-    Channels are declared unbound: wire them in TOML, or use `SunSpecMeter` to have the
-    SunSpec point names, model id and connector filled in.
+    Signs follow a load reference, whatever the meter's role: `power` is positive when energy
+    flows from the source side through the meter toward the load side. A grid meter reads
+    positive while buying and negative while feeding in; a meter on a PV feeder reads negative
+    while the PV produces. The role is metadata, never a sign flip, so `energy_import` and
+    `energy_export` count in the same directions their names give the power. Per-phase powers
+    follow the total, currents are unsigned RMS magnitudes, and reactive power follows the
+    active-power reference with positive meaning inductive.
+
+    Channels are declared unbound: wire them in TOML, or use `SunSpecMeter` or `OpenEMSMeter`
+    to have the point names, addresses and connector filled in.
     """
 
     VOLTAGE = Constant(float, "voltage", "Voltage", "V", context="meter", aggregate="mean")

@@ -27,12 +27,13 @@ class ChargeBig(EnergyMeter):
     the channel set is declared here instead of through the `phases`/`quality` flags; `power`,
     `current` and `reactive_power` are virtual and summed from the phases on arrival.
 
-    The connector is referenced by the id `opcua`: declare `[connectors.opcua]` with the
-    server's host on this component or on a parent. `settings = "ns=1"` is the family default
-    for a locally declared connector.
+    The connector is required and must be an OPC UA one: set `connector` to the id of an
+    `[connectors.<id>]` block declared on this component or on a parent, e.g.
+    `connector = "opcua"` next to `[connectors.opcua]` carrying the server's host.
+    `settings = "ns=1"` is the family default for a locally declared connector.
     """
 
-    CONNECTOR = "opcua"
+    CONNECTOR_TYPES = ("opcua",)
 
     SETPOINT = Constant(float, "setpoint", "Setpoint Current", "A", aggregate="mean")
     SETPOINT_MAX = Constant(float, "setpoint_max", "Setpoint Current Maximum", "A", aggregate="mean")
@@ -180,7 +181,7 @@ class ChargeBigStation(EVSE):
     own; the id still resolves through the upward lookup.
     """
 
-    CONNECTOR = "opcua"
+    CONNECTOR_TYPES = ("opcua",)
 
     STATE = Constant(float, "state", "State", context="chargebig", aggregate="mean")
     LIMIT = Constant(float, "limit", "Current Limit", "A", context="chargebig", aggregate="mean")

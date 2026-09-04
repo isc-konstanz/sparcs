@@ -8,8 +8,7 @@ sparcs.components
 
 from . import weather  # noqa: F401
 
-from . import binding  # noqa: F401
-from .binding import BindableComponent  # noqa: F401
+from lories.components.binding import BindableComponent  # noqa: F401
 
 from . import electrical  # noqa: F401
 from .electrical import ACComponent  # noqa: F401
@@ -43,6 +42,9 @@ from .agriculture import (  # noqa: F401
 from . import devices  # noqa: F401
 from .devices import (  # noqa: F401
     ChargeBig,
+    OpenEMSBinding,
+    OpenEMSInverter,
+    OpenEMSMeter,
     SunSpecBinding,
     SunSpecInverter,
     SunSpecMeter,
