@@ -3,9 +3,10 @@
 tests.test_charge_big_connector_binding
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The chargeBIG component references its OPC UA connector by id; the framework builds
-the connector from the ``[connectors.<id>]`` section of the component configuration.
-No network access: configuring an OPC UA connector only constructs the client object.
+The chargeBIG component references its OPC UA connector by id only; the connector is
+declared once at system level (``[connectors.<id>]`` in system.conf, next to the other
+connectors) and built by the framework. No network access: configuring an OPC UA
+connector only constructs the client object.
 """
 
 import sys
@@ -21,16 +22,16 @@ name = "System"
 latitude = 47.67
 longitude = 9.15
 timezone = "Europe/Berlin"
+
+[connectors.opcua]
+host = "10.1.20.12"
+settings = "ns=1"
 """
 
 CHARGE_BIG_CONF = """
 name = "Charge Big"
 type = "charge_big"
 connector = "opcua"
-
-[connectors.opcua]
-host = "10.1.20.12"
-settings = "ns=1"
 
 [stations]
 count = 2
@@ -67,7 +68,7 @@ def _opcua_connectors(app):
 
 def test_connector_is_built_from_the_connectors_section(app):
     connectors = _opcua_connectors(app)
-    assert [c.id for c in connectors] == ["system.charge_big.opcua"]
+    assert [c.id for c in connectors] == ["system.opcua"]
     connector = connectors[0]
     assert connector._host == "10.1.20.12"
     assert connector._settings == ["ns=1"]
