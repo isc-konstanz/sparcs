@@ -24,7 +24,8 @@ from lories.core import ConfigurationError, Constant
 from lories.core.typing import Configurations, ContextArgument
 from sparcs.components.solar.array import SolarArray
 from sparcs.components.solar.db import InverterDatabase
-from sparcs.components.solar.model import SolarModel, DEFAULTS as MODEL_DEFAULTS
+from sparcs.components.solar.model import DEFAULTS as MODEL_DEFAULTS
+from sparcs.components.solar.model import SolarModel
 
 
 @register_component_type("pv", "solar")
@@ -102,7 +103,7 @@ class SolarSystem(Component, PVSystem):
             name=f"{self.name} Array",
             includes=SolarArray.INCLUDES,
         ):
-            model_defaults = {"transposition_model":MODEL_DEFAULTS["transposition_model"]}
+            model_defaults = {"transposition_model": MODEL_DEFAULTS["transposition_model"]}
             model = configs.get_member("model", defaults=model_defaults)
             transposition_model = re.sub("[^A-Za-z0-9]+", "", model.get("transposition_model")).lower()
             if array.has_rows() and transposition_model in ["viewfactor", "solarfactor", "pvfactor", "raytracing"]:

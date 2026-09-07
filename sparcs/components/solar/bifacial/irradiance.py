@@ -13,8 +13,6 @@ from pvlib.irradiance import get_extra_radiation, get_total_irradiance  # noqa: 
 
 import numpy as np
 import pandas as pd
-from lories.simulation.progress import Progress
-from sparcs.components.solar.bifacial import ray_tracing
 
 logger = logging.getLogger(__name__)
 

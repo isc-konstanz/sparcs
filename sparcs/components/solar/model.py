@@ -147,8 +147,8 @@ class SolarModel(Configurator, ModelChain):
             if is_bifacial:
 
                 def _agg_bifacial_power(dc_front, dc_back, losses_parameters):
-                    dc_back["p_mp"] *= (1 - losses_parameters.get("mismatch_bifaciality", 7) / 100)
-                    return _agg_dc_dfs(dc_front,  dc_back)
+                    dc_back["p_mp"] *= 1 - losses_parameters.get("mismatch_bifaciality", 7) / 100
+                    return _agg_dc_dfs(dc_front, dc_back)
 
                 def _prepare_bifacial_poa_back(irrad, module_parameters):
                     return irrad * module_parameters["module_bifaciality"]
@@ -291,7 +291,7 @@ class SolarModel(Configurator, ModelChain):
         losses = self.system.pvwatts_losses(self.results.solar_position)
 
         if isinstance(self.results.dc, tuple):
-            self.results.losses = tuple((100 - l) / 100.0 for l in losses)
+            self.results.losses = tuple((100 - loss) / 100.0 for loss in losses)
             for dc, losses in zip(self.results.dc, losses):
                 dc[:] = dc.mul(losses, axis="index")
             if any(a.is_bifacial() for a in self.system.arrays):
