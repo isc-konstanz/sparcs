@@ -9,9 +9,7 @@ sparcs.devices.charge_big
 import numpy as np
 import pandas as pd
 from lories.components import register_component_type
-from lories.connectors.opcua import OpcUaConnector
-from lories.core import Constant
-from lories.data import Channels
+from lories.core import ConfigurationError, Constant
 from lories.typing import Configurations, ContextArgument
 from sparcs.components import Meter
 from sparcs.components.vehicle import EVSE
@@ -34,19 +32,13 @@ class ChargeBig(Meter):
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
 
-        connector_configs = configs.get_member(
-            "connector",
-            defaults={
-                "settings": "ns=1",
-            },
-        )
-        connector = OpcUaConnector(key="opcua", name=f"{self.name} OPC UA", context=self, configs=connector_configs)
-        connector.configure(connector_configs)
-        self.connectors.add(connector)
+        connector = configs.get("connector")
+        if connector is None:
+            raise ConfigurationError(f"Missing 'connector' for {type(self).__name__} '{self.id}'")
 
         def add_channel(constant: Constant, address: str, aggregate: str = "mean", **custom) -> None:
             channel = constant.to_dict()
-            channel["connector"] = connector.id
+            channel["connector"] = connector
             channel["address"] = address
             channel["aggregate"] = aggregate
             channel.update(custom)
@@ -80,7 +72,6 @@ class ChargeBig(Meter):
         add_virtual_channel(ChargeBig.SETPOINT_MAX)
 
         defaults = ChargeBigStation._build_defaults(configs, strict=True)
-        defaults[self.data.TYPE][Channels.TYPE]["connector"] = connector.id
         stations = configs.get_member("stations", defaults=defaults)
         mapping = stations.get("mapping", default={})
         for station_id in range(stations.get_int("count")):
@@ -95,8 +86,8 @@ class ChargeBig(Meter):
                 configs=station_configs,
                 station_index=station_id,
                 station_id=mapped_id,
+                connector=connector,
             )
-            station.configure(station_configs)
 
             self.components.add(station)
 
@@ -117,8 +108,12 @@ class ChargeBig(Meter):
         self.data.register(
             self._on_reactive_power_received,
             [
-                self.data[Meter.POWER_L1_ACTIVE], self.data[Meter.POWER_L2_ACTIVE], self.data[Meter.POWER_L3_ACTIVE],
-                self.data[ChargeBig.L1_COS_PHI], self.data[ChargeBig.L2_COS_PHI], self.data[ChargeBig.L3_COS_PHI],
+                self.data[Meter.POWER_L1_ACTIVE],
+                self.data[Meter.POWER_L2_ACTIVE],
+                self.data[Meter.POWER_L3_ACTIVE],
+                self.data[ChargeBig.L1_COS_PHI],
+                self.data[ChargeBig.L2_COS_PHI],
+                self.data[ChargeBig.L3_COS_PHI],
             ],
             how="any",
             unique=False,
@@ -145,8 +140,12 @@ class ChargeBig(Meter):
             return power * np.sqrt(1 - cos_phi**2) / cos_phi
 
         reactive = phase_reactive(Meter.POWER_L1_ACTIVE, ChargeBig.L1_COS_PHI).dropna()
-        reactive = reactive + phase_reactive(Meter.POWER_L2_ACTIVE, ChargeBig.L2_COS_PHI).reindex(reactive.index).fillna(0)
-        reactive = reactive + phase_reactive(Meter.POWER_L3_ACTIVE, ChargeBig.L3_COS_PHI).reindex(reactive.index).fillna(0)
+        reactive = reactive + phase_reactive(Meter.POWER_L2_ACTIVE, ChargeBig.L2_COS_PHI).reindex(
+            reactive.index
+        ).fillna(0)
+        reactive = reactive + phase_reactive(Meter.POWER_L3_ACTIVE, ChargeBig.L3_COS_PHI).reindex(
+            reactive.index
+        ).fillna(0)
         if not reactive.empty:
             self.data[Meter.POWER_REACTIVE].set(reactive.index[0], reactive)
 
@@ -156,6 +155,7 @@ class ChargeBigStation(EVSE):
     LIMIT = Constant(float, "limit", "Current Limit", "A", alias="chargebig_limit")
 
     station_id: int
+    connector: str
 
     def __init__(
         self,
@@ -163,17 +163,20 @@ class ChargeBigStation(EVSE):
         configs: Configurations,
         station_index: int,  # table column
         station_id: int,  # physical id
+        connector: str,
         **kwargs,
     ) -> None:
         super().__init__(context=context, configs=configs, **kwargs)
         self.station_index = station_index
         self.station_id = station_id
+        self.connector = connector
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
 
         def add_channel(constant: Constant, address: str, aggregate: str = "mean", **custom) -> None:
             channel = constant.to_dict()
+            channel["connector"] = self.connector
             channel["station_id"] = self.station_index
             channel["address"] = address
             channel["aggregate"] = aggregate
