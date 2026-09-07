@@ -52,6 +52,11 @@ dev = [
     "ruff"
 ]
 
+[tool.pytest.ini_options]
+markers = [
+    "slow: heavy or integration tests (deselect with '-m \"not slow\"')",
+]
+
 [tool.setuptools.package-data]
 sparcs = []
 
