@@ -36,7 +36,7 @@ def pde_core_factory(tmp_path_factory):
         ensure_mesh,
     )
 
-    def make_core(subdir: str, dt: str = "30s") -> SoilPDECore:
+    def make_core(subdir: str, dt: str = "30s", **ode_values) -> SoilPDECore:
         tmp_path = tmp_path_factory.mktemp(subdir)
 
         def _configs(**values) -> Configurations:
@@ -63,6 +63,7 @@ def pde_core_factory(tmp_path_factory):
             _configs(
                 dt=dt,
                 dt_min="1s",
+                **ode_values,
             )
         )
         ensure_mesh(mesh_config)

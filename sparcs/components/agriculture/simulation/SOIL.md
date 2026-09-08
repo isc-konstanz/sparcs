@@ -159,6 +159,9 @@ inherits FiPy's default zero-gradient Neumann condition (no matric
 gradient across the bottom), while the gravity divergence carries
 water out at a rate `≈ K(Se_bottom) · ρ_w` per unit bottom area. This
 reproduces the classical *free-drainage* bottom BC used in HYDRUS-1D.
+The gravity vector is zeroed on every other exterior face: FiPy's face
+divergence sums exterior faces too, and would otherwise feed `K(Se_top)`
+in through the surface.
 
 ### 5.2 Lateral edges: no flux
 
