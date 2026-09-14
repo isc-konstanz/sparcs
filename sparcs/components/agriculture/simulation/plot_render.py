@@ -83,6 +83,7 @@ def render_rel_sat_png(
     sim_t: pd.Timestamp,
     *,
     title: str = "Relative saturation",
+    tz=None,
 ) -> bytes:
     """Render ``rel_sat_values`` (one value per FiPy cell) onto ``fig``/``ax`` and return PNG bytes."""
     x, y = mesh.cellCenters
@@ -99,8 +100,47 @@ def render_rel_sat_png(
     ax.contourf(xi, yi, zi, levels=15, cmap=plot_style.COLORMAP, norm=norm)
     ax.contour(xi, yi, zi, levels=15, linewidths=0.5, colors="k")
     plot_style.apply_axes_style(ax)
-    ax.set_title(plot_style.format_progress_title(title, sim_t))
+    ax.set_title(plot_style.format_progress_title(title, sim_t, tz=tz))
 
     buf = io.BytesIO()
-    fig.savefig(buf, dpi=120, format="png")
+    fig.savefig(buf, dpi=plot_style.DPI, format="png")
     return buf.getvalue()
+
+
+class RenderSession:
+    """Lazy holder of one component's fig/ax/norm triple for saturation
+    renders: ``init_rel_sat_figure`` runs on the first ``render()`` and the
+    triple is reused across calls (``render_rel_sat_png`` clears the axes per
+    render). Shared by ``SoilSimulation._render_progress`` and
+    ``SoilPredictor._render_snapshot_png`` in place of their hand-rolled
+    ``_plot_fig``/``_plot_ax``/``_plot_norm`` attribute triples.
+    """
+
+    def __init__(self, width_m: float, height_m: float) -> None:
+        self._width_m = width_m
+        self._height_m = height_m
+        self._fig: Any = None
+        self._ax: Any = None
+        self._norm: Any = None
+
+    def render(
+        self,
+        mesh: Any,
+        rel_sat_values: np.ndarray,
+        sim_t: pd.Timestamp,
+        *,
+        title: str = "Relative saturation",
+        tz=None,
+    ) -> bytes:
+        if self._fig is None:
+            self._fig, self._ax, self._norm = init_rel_sat_figure(self._width_m, self._height_m)
+        return render_rel_sat_png(
+            self._fig,
+            self._ax,
+            self._norm,
+            mesh,
+            rel_sat_values,
+            sim_t,
+            title=title,
+            tz=tz,
+        )

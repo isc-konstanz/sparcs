@@ -43,6 +43,12 @@ def test_anchor_is_off_by_default():
     assert cfg.staleness == pd.Timedelta("6h")
 
 
+def test_min_tension_floor_is_gone():
+    """B10 deleted the dead-sensor floor: the parsed config must not carry the
+    field at all, so no code path can silently re-reject a 0 hPa reading."""
+    assert not hasattr(_parse_anchor_config(_Cfg({})), "min_tension_hpa")
+
+
 def test_allowlist_and_overrides_parse():
     cfg = _parse_anchor_config(
         _Cfg({"enabled": True, "sensors": ["soil_3", "soil_4"], "sigma_sys": 0.1, "r_vertical": 0.15})

@@ -40,7 +40,11 @@ except ImportError as e:  # pragma: no cover - friendly bail-out
         "  pip install 'dash>=2.16' dash-bootstrap-components plotly\n"
         f"(import failed: {e})\n"
     )
-    sys.exit(1)
+    # Exit only when run as a script: an importer (pytest.importorskip) must see
+    # the ImportError -- a module-level SystemExit aborts pytest collection.
+    if __name__ == "__main__":
+        sys.exit(1)
+    raise
 
 import soil_tuning_auth
 import sparcs
@@ -55,6 +59,7 @@ from sparcs.components.agriculture.simulation._anchor import (
     AnchorConfig,
     AnchorSensor,
     anchor_update,
+    latest_reading_at,
 )
 from sparcs.components.agriculture.simulation._soil import (
     SE_MAX,
@@ -415,16 +420,9 @@ def _anchor_replay_step(pde: SoilPDECore, t_now: pd.Timestamp, last_anchored: di
         return
 
     def read(sensor: AnchorSensor):
-        series = _W_ANCHOR_HISTORY.get(sensor.key)
-        if series is None or len(series) == 0:
-            return None, float("nan")
-        prior = series.loc[:t_now]
-        if len(prior) == 0:
-            return None, float("nan")
-        value = float(prior.iloc[-1])
-        if not np.isfinite(value):
-            return None, float("nan")
-        return prior.index[-1], value
+        # Same contemporaneous lookup the live tick uses (shared _anchor helper): the
+        # latest reading at or before t_now, so a held-out sensor scores identically.
+        return latest_reading_at(_W_ANCHOR_HISTORY.get(sensor.key), t_now)
 
     result = anchor_update(
         np.asarray(pde.rel_sat.value),
@@ -683,8 +681,8 @@ def _sample_probe_row(
         se = float(pde.sample(probe))
         # Key by channel_id (stable) rather than the collision-prone probe.name.
         row[f"{probe.channel_id}__se"] = se
-        # ψ is negative (0 at saturation); psi_from_se returns magnitude, so flip.
-        row[f"{probe.channel_id}__tension"] = -abs(float(pde.soil_model.psi_from_se(se)))
+        # psi_from_se is the signed matric potential (negative, 0 at saturation).
+        row[f"{probe.channel_id}__tension"] = float(pde.soil_model.psi_from_se(se))
     return row
 
 
@@ -726,12 +724,17 @@ def _walk_components(root) -> list:
         if children:
             try:
                 stack.extend(list(children.values()))
-            except Exception:
-                # Some contexts expose iteration differently: be liberal.
+            except (AttributeError, TypeError):
+                # Not a mapping / no .values() -- some contexts expose iteration
+                # differently: be liberal. (Real lories contexts yield string
+                # KEYS here, which callers' isinstance filters drop harmlessly.)
                 try:
                     stack.extend(list(children))
-                except Exception:
-                    pass
+                except Exception:  # noqa: BLE001
+                    log.warning(
+                        "could not iterate the children of %s; skipping its subtree in the component walk.",
+                        getattr(c, "key", repr(c)),
+                    )
     return out
 
 

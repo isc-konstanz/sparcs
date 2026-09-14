@@ -92,6 +92,8 @@ def test_reading_newer_than_last_anchors():
 
 def test_nan_and_missing_readings_are_skipped():
     assert _run({"s30": (NOW, float("nan"))}) is None
+    assert _run({"s30": (NOW, float("inf"))}) is None
+    assert _run({"s30": (NOW, float("-inf"))}) is None
     assert _run({"s30": (None, 300.0)}) is None
     assert _run({}) is None  # no reading at all
 
@@ -126,6 +128,15 @@ def test_per_sensor_radii_override_changes_reach():
     wide = _run({"s30": (NOW, 300.0)}, cfg=_cfg(sensors={"s30": SensorOverrides(r_vertical=0.5)}))
     assert np.isclose(narrow.se_new[1], 0.6)  # 30 cm below is outside r_v = 0.1
     assert not np.isclose(wide.se_new[1], 0.6)  # inside r_v = 0.5 -> pulled
+
+
+def test_zero_tension_reading_anchors():
+    """A 0 hPa reading (e.g. saturated soil, or historically a disconnected
+    tensiometer) is a valid finite observation; there is no floor rejecting it, so
+    it assimilates like any other reading."""
+    assert _run({"s30": (NOW, 0.0)}).anchored_at["s30"] == NOW
+    assert _run({"s30": (NOW, -0.3)}).anchored_at["s30"] == NOW  # signed, still ~0
+    assert _run({"s30": (NOW, 300.0)}) is not None
 
 
 def test_per_sensor_staleness_override_gates_independently():

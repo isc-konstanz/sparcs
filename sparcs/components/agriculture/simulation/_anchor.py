@@ -272,6 +272,28 @@ class AnchorResult:
     innovations: dict[str, float]
 
 
+def latest_reading_at(series: Any, now: Any) -> tuple[Any, float]:
+    """The tension reading contemporaneous with ``now``: the latest ``(timestamp,
+    value)`` in ``series`` at or before ``now``, or ``(None, nan)`` when the series
+    is empty, has nothing at/before ``now``, or that value is non-finite.
+
+    The single lookup both anchor backends share -- the live tick and the offline
+    soil_tuning worker each range-read a per-sensor tension ``series`` and call this
+    per step, so a reading is assimilated at its own time, not wherever the frontier
+    happens to be. ``series`` is a pandas Series indexed by timestamp; kept
+    duck-typed so this core stays free of a pandas import.
+    """
+    if series is None or len(series) == 0:
+        return None, float("nan")
+    prior = series.loc[:now]
+    if len(prior) == 0:
+        return None, float("nan")
+    value = float(prior.iloc[-1])
+    if not np.isfinite(value):
+        return None, float("nan")
+    return prior.index[-1], value
+
+
 def _nearest_cell(cell_centers: np.ndarray, x_m: float, y_m: float) -> int:
     dx = cell_centers[0] - x_m
     dy = cell_centers[1] - y_m
@@ -293,11 +315,15 @@ def anchor_update(
 ) -> AnchorResult | None:
     """Gather fresh sensor readings and return the corrected field, or ``None``.
 
-    For each sensor, ``read_tension(sensor)`` yields ``(timestamp, tension_hpa)``
-    (the live channel value, or the offline history lookup). A reading anchors only
-    if it is present and finite, strictly newer than ``last_anchored[key]``, and
-    within that sensor's staleness tolerance of ``now`` -- the event-driven cadence
-    that stops a stale or frozen sensor from dragging the field. Each qualifying
+    For each sensor, ``read_tension(sensor)`` yields ``(timestamp, tension_hpa)`` --
+    the reading contemporaneous with ``now``, i.e. the latest at or before it, from
+    both backends' per-tick ranged read. A reading anchors only if it is present and
+    finite, strictly newer than ``last_anchored[key]``, and within that sensor's
+    staleness tolerance of ``now`` -- the event-driven cadence that stops a stale or
+    frozen reading from dragging the field. Because the reading is looked up at/before
+    ``now`` it is assimilated at its own timestamp, never back-dated onto a different
+    step. Each
+    qualifying
     reading carries its own localization radii into the blend. If no sensor
     qualifies the step is a no-op (``None``); otherwise the readings are blended in one
     precision-weighted :func:`anchor_field` call. ``sensors`` is the set to use,

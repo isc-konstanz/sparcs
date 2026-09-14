@@ -46,7 +46,7 @@ class AgriculturalField(Component):
         defaults = Component._build_defaults(configs, includes=["model"], strict=True)
 
         if configs.has_member(Irrigation.TYPE, includes=True):
-            irrigation = Irrigation(self, configs.get_member(Irrigation.TYPE, defaults=defaults), self.soil)
+            irrigation = Irrigation(self, configs.get_member(Irrigation.TYPE, defaults=defaults))
             self.components.add(irrigation)
         else:
             irrigation = None
@@ -87,7 +87,7 @@ class AgriculturalField(Component):
     def _water_supply_callback(self, data: pd.DataFrame) -> None:
         water_supply = data[[c for c in data.columns if SoilMoisture.WATER_SUPPLY in c]]
         if not water_supply.empty:
-            water_supply.ffill().dropna(axis="index", how="any", inplace=True)
+            water_supply = water_supply.ffill().dropna(axis="index", how="any")
             water_supply_mean = water_supply.apply(AgriculturalField._water_supply_mean_geometric, axis="columns")
             if len(water_supply_mean) == 1:
                 water_supply_mean = water_supply_mean.iloc[0]
@@ -117,4 +117,4 @@ class AgriculturalField(Component):
     ) -> pd.DataFrame:
         if not self.has_simulation():
             return pd.DataFrame()
-        return self.simulation.simulate(weather, prior=prior, **kwargs)
+        return self.simulation.simulate(weather, start=start, end=end, prior=prior, **kwargs)

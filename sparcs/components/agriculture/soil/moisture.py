@@ -39,9 +39,8 @@ class SoilMoisture(Component):
 
     depth: float
 
-    def __init__(self, context: Context, configs: Configurations, key="soil", **kwargs) -> None:  # noqa
+    def __init__(self, context: Component, configs: Configurations, key="soil", **kwargs) -> None:
         super().__init__(context, configs, key=key, **kwargs)
-        self.model = None
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)

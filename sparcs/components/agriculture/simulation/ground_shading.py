@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-sparcs.components.agriculture.ground_shading
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+sparcs.components.agriculture.simulation.ground_shading
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Per-segment ground shading from a PV array using ``solarfactors``.
 Publishes a shade factor in ``[0, 1]`` (1 = open sky) and time-mean
@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import io
 import logging
-import os
-import threading
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -82,6 +80,8 @@ from lories.typing import Configurations
 
 from . import plot_style
 
+logger = logging.getLogger(__name__)
+
 # 1. Constants
 
 # 7 rows (3 on each side of the centre) gives the middle row representative inter-row shading.
@@ -92,6 +92,9 @@ _ZENITH_DAYTIME_LIMIT = 89.0
 
 # Outer-edge clamp for ground segment x-coordinates [m].
 _GROUND_X_CLAMP = 100.0
+
+# Default cadence for [plot] progress-image snapshots, absent a [plot] interval override.
+_DEFAULT_PLOT_INTERVAL: str = "1h"
 
 # Geometry modes selected via ``mode = ...`` in the [ground_shading] block.
 MODE_AS_IS = "as_is"  # fixed-tilt rows; supports `mirrored`
@@ -187,28 +190,6 @@ def _open_sky_ghi(pv_df: pd.DataFrame) -> np.ndarray:
 
 
 # 3. Internal types
-
-
-@dataclass
-class PlotConfig:
-    """Plot output settings.
-
-    ``interval``: minimum time between renders.
-    ``live``: overwrite a single ``ground_shading.png``.
-    ``save``: archive one timestamped PNG per render.
-    ``show``: pop a matplotlib window (main thread only).
-    """
-
-    def __init__(self, configs: Configurations, default_dir: str):
-        interval = configs.get("interval", default="1h")
-        if isinstance(interval, (int, float)):
-            self.interval: pd.Timedelta = pd.Timedelta(seconds=float(interval))
-        else:
-            self.interval: pd.Timedelta = pd.Timedelta(interval)
-        self.live: bool = configs.get_bool("live", default=True)
-        self.save: bool = configs.get_bool("save", default=False)
-        self.show: bool = configs.get_bool("show", default=False)
-        self.dir: str = configs.get("dir", default=default_dir)
 
 
 @dataclass
@@ -385,12 +366,13 @@ class GroundShading(Component):
     # Soil mesh top-segment x-ranges in pvfactors coords; None if no mesh is wired.
     _segment_ranges: Optional[dict[str, tuple[float, float]]] = None
 
-    # --- Plot state ----------------------------------------------------------
-    _plot_progress: bool = False
-    _plot_config: Optional[PlotConfig] = None
+    # --- Plot state (_plot_config is None when plotting is disabled) ----------
+    _plot_config: Optional[plot_style.PlotConfig] = None
     _plot_fig: Any = None
     _plot_axes: Any = None
     _last_plot_ts: Optional[pd.Timestamp] = None
+    # Consecutive render failures toward plot_style.PLOT_DISABLE_AFTER (W2.9).
+    _plot_strikes: int = 0
     # Last sun-up PV-row geometry; reused for night structure-only frames.
     _last_pv_rows: list
 
@@ -434,23 +416,18 @@ class GroundShading(Component):
         self._plot_y_min = (-mesh.height - 0.5) if mesh is not None else -1.0
 
     def _register_channels(self) -> None:
-        """Register the bulk SHADING_FACTOR channel."""
+        """Register the bulk SHADING_FACTOR channel plus the in-memory
+        plot_strikes strike counter."""
         for c in self.CHANNELS:
             self.data.add(c, aggregate="mean", logger={"enabled": False})
+        # In-memory strike counter (W2.9): registered or it surfaces nowhere.
+        self.data.add("plot_strikes", type=float, name="Plot Strikes", aggregate="last", logger={"enabled": False})
 
     def _configure_plot(self, configs: Configurations) -> None:
         """Read the ``[plot]`` block and register SHADING_PROGRESS_IMAGE when enabled."""
-        self._plot_progress = configs.get_bool("plot_progress", default=True)
-        if not self._plot_progress:
+        self._plot_config = plot_style.load_plot_config(configs, default_interval=_DEFAULT_PLOT_INTERVAL)
+        if self._plot_config is None:
             return
-
-        default_dir = str(configs.dirs.data.joinpath("ground_shading"))
-        self._plot_config = PlotConfig(
-            configs.get_member("plot", defaults={}, ensure_exists=True),
-            default_dir=default_dir,
-        )
-        if self._plot_config.save or self._plot_config.live:
-            os.makedirs(self._plot_config.dir, exist_ok=True)
         self.data.add(
             GroundShading.SHADING_PROGRESS_IMAGE,
             aggregate="last",
@@ -660,11 +637,10 @@ class GroundShading(Component):
                 per_setup_pv_rows.append(list(report["pv_rows"].values))
         except Exception:  # noqa: BLE001
             # pvfactors/numpy>=2 compat: collapsed zero-area surfaces can raise
-            # inhomogeneous-shape ValueError. Fall back to open-sky; retry next tick.
-            logging.warning(
-                "%s: pvfactors raised; falling back to open-sky for this "
-                "tick. Underlying cause is usually a pvfactors/numpy>=2 "
-                "compat bug; pin numpy<2 to restore real shading.",
+            # inhomogeneous-shape ValueError even with the import-time patch
+            # above. Fall back to open-sky; retry next tick.
+            logger.warning(
+                "%s: pvfactors raised; falling back to open-sky for this tick.",
                 self.name,
                 exc_info=True,
             )
@@ -719,6 +695,10 @@ class GroundShading(Component):
             ghi_vals: list[float] = []
             for t, ground in enumerate(combined_per_t):
                 qinc = _qinc_in_range(ground, x0, x1)
+                if not np.isfinite(qinc):
+                    # A stray non-finite qinc (pvfactors edge case) must not
+                    # poison the time means for the whole segment.
+                    continue
                 ghi_vals.append(qinc)
                 ref = ghi_open[t]
                 if ref <= 0:
@@ -759,6 +739,12 @@ class GroundShading(Component):
         if df.empty:
             return df
         df = df[df["solar_zenith"] < _ZENITH_DAYTIME_LIMIT]
+        # Lightless rows carry no shading information, and the Perez
+        # transposition is undefined at DHI=0 (sky-clearness epsilon is 0/0:
+        # pvlib returns NaN and solarfactors' ``poa_sky_diffuse == 0``
+        # luminance guard misses NaN) -- one such twilight row poisons the
+        # whole chunk's per-segment GHI mean with NaN.
+        df = df[(df["dni"] > 0) | (df["dhi"] > 0)]
         if df.empty:
             return df
 
@@ -827,10 +813,11 @@ class GroundShading(Component):
             return []
         rows: list[tuple] = []
         for setup in self._pv_setups:
-            # Match pvfactors' geometry: the drawn lean follows the signed
-            # rotation, which negates the stored surface_tilt when the array is
-            # not "pointing right". Without this the night render disagrees with
-            # the daytime pvfactors render for some axis_azimuth (e.g. 180).
+            # Match pvfactors' drawn geometry: rotation = tilt when "pointing
+            # right" draws "/" (high edge right), while a positive lean in the
+            # endpoint math below draws "\" (high edge left) -- so the sign
+            # flips when pointing right. Without this the night render disagrees
+            # with the daytime pvfactors render for some axis_azimuth (e.g. 180).
             lean = (
                 -setup.surface_tilt
                 if _pvfactors_is_pointing_right(setup.surface_azimuth, setup.axis_azimuth)
@@ -851,18 +838,23 @@ class GroundShading(Component):
         return rows
 
     def _publish_per_segment_ghi(self, ts: pd.Timestamp, seg_ghi: dict[str, float]) -> None:
-        """Publish per-segment GHI [W/m²] to SEG_GHI; non-finite values become NaN with a warning."""
+        """Publish per-segment GHI [W/m²] to SEG_GHI; non-finite values become 0.0 with a warning.
+
+        The placeholder must be 0.0, not NaN: a NaN in a VALID-state channel
+        write raises ResourceError in lories (Channel._is_empty), which kills
+        the tick and stalls the frontier on the same chunk forever.
+        """
         cleaned = {}
         missing = []
         for name, v in seg_ghi.items():
             if v is not None and np.isfinite(v):
                 cleaned[name] = float(v)
             else:
-                cleaned[name] = float("nan")
+                cleaned[name] = 0.0
                 missing.append(name)
         if missing:
-            logging.warning(
-                "%s: SEG_GHI has no value for segment(s) %s at %s; writing NaN placeholder.",
+            logger.warning(
+                "%s: SEG_GHI has no value for segment(s) %s at %s; writing 0.0 placeholder.",
                 self.name,
                 sorted(missing),
                 ts,
@@ -909,36 +901,29 @@ class GroundShading(Component):
         """Throttle renders by PlotConfig.interval and forward to _render_progress.
         ``sun_state`` is ``(solar_zenith, solar_azimuth, axis_azimuth)`` for shadow projection.
         """
-        if not self._plot_progress or self._plot_config is None:
+        if self._plot_config is None:
             return
-        if self._last_plot_ts is not None and (ts - self._last_plot_ts) < self._plot_config.interval:
+        if not plot_style.render_due(self._last_plot_ts, ts, self._plot_config.interval):
             return
         self._last_plot_ts = ts
         try:
             self._render_progress(ts, ground, pv_rows, sun_state)
         except Exception:  # noqa: BLE001
-            logging.exception("%s: progress-plot render failed; disabling.", self.name)
-            self._plot_progress = False
+            self._plot_strikes, disable = plot_style.count_render_failure(logger, self.name, self._plot_strikes)
+            plot_style.set_strike_channel(self, "plot_strikes", self._plot_strikes)
+            if disable:
+                self._plot_config = None
+            return
+        if self._plot_strikes:
+            self._plot_strikes = 0
+            plot_style.set_strike_channel(self, "plot_strikes", 0)
 
     def _init_progress_figure(self) -> None:
         """Create the matplotlib figure once; reuse across renders.
-        Forces Agg backend on worker threads (interactive backends require the main thread).
+        The evaluate() call runs on the field tick's worker thread, so render headless.
         """
-        on_main_thread = threading.current_thread() is threading.main_thread()
-        if not on_main_thread:
-            if self._plot_config.show:
-                logging.warning(
-                    "%s: progress plot 'show' disabled; runs on a worker "
-                    "thread (matplotlib GUI requires the main thread). Use "
-                    "'live = true' to view ground_shading.png in a browser.",
-                    self.name,
-                )
-                self._plot_config.show = False
-            if matplotlib.get_backend().lower() not in ("agg", "module://matplotlib_inline.backend_inline"):
-                matplotlib.use("Agg", force=True)
-
-        if self._plot_config.show:
-            plt.ion()
+        if matplotlib.get_backend().lower() not in ("agg", "module://matplotlib_inline.backend_inline"):
+            matplotlib.use("Agg", force=True)
         x_extent = 2.0 * self._plot_x_half
         y_extent = self._plot_y_max - self._plot_y_min
         fig, ax = plt.subplots(
@@ -962,7 +947,7 @@ class GroundShading(Component):
         sun_state: tuple[float, float, Optional[float]],
     ) -> None:
         """Draw the 2-D scene: ground coloured by qinc, PV rows in black, shadow projection lines.
-        Persists PNG to SHADING_PROGRESS_IMAGE and optionally to disk per PlotConfig.
+        Persists the PNG to the SHADING_PROGRESS_IMAGE DB blob channel.
         """
         if self._plot_fig is None:
             self._init_progress_figure()
@@ -1073,29 +1058,11 @@ class GroundShading(Component):
         ax.set_ylim(self._plot_y_min, self._plot_y_max)
 
         plot_style.apply_axes_style(ax)
-        ax.set_title(plot_style.format_progress_title("Ground shading", ts, suffix=f"mode: {self._mode}"))
-
-        if self._plot_config.show:
-            try:
-                self._plot_fig.canvas.draw_idle()
-                plt.pause(0.001)
-            except Exception:  # noqa: BLE001
-                pass
+        timezone = getattr(getattr(self.context, "location", None), "timezone", None)
+        ax.set_title(plot_style.format_progress_title("Ground shading", ts, tz=timezone))
 
         buf = io.BytesIO()
-        self._plot_fig.savefig(buf, dpi=120, format="png")
+        self._plot_fig.savefig(buf, dpi=plot_style.DPI, format="png")
         png_bytes = buf.getvalue()
 
         self.data[GroundShading.SHADING_PROGRESS_IMAGE].set(ts, png_bytes)
-
-        if self._plot_config.live:
-            target = os.path.join(self._plot_config.dir, "ground_shading.png")
-            tmp = target + ".tmp"
-            with open(tmp, "wb") as f:
-                f.write(png_bytes)
-            os.replace(tmp, target)
-
-        if self._plot_config.save:
-            fname = ts.strftime("%Y%m%dT%H%M%S") + ".png"
-            with open(os.path.join(self._plot_config.dir, fname), "wb") as f:
-                f.write(png_bytes)

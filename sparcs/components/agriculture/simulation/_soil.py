@@ -16,10 +16,21 @@ from __future__ import annotations
 import io
 import logging
 import os
-from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+import warnings
+from dataclasses import dataclass, field, fields
+from typing import Any, Callable, Collection, Optional
 
 import gmsh
+
+# FiPy 4.0.2 imports the numpy-2-deprecated `numpy.core` in its numerix module;
+# silence that import-time DeprecationWarning before importing fipy (E402-ignored
+# per file). No fixed FiPy release exists yet.
+warnings.filterwarnings(
+    "ignore",
+    message=r"numpy\.core is deprecated",
+    category=DeprecationWarning,
+)
+
 from fipy import CellVariable, DiffusionTerm, FaceVariable, ImplicitSourceTerm, TransientTerm
 from fipy.meshes import Gmsh2D
 from fipy.solvers import LinearGMRESSolver
@@ -28,6 +39,7 @@ from fipy.tools import serialComm
 import numpy as np
 import pandas as pd
 from lories import Component
+from lories.components.weather import Weather
 from lories.typing import Configurations
 from lories.util import to_timedelta
 from sparcs.components.agriculture.soil import (
@@ -37,7 +49,8 @@ from sparcs.components.agriculture.soil import (
 )
 
 logging.getLogger("fipy").setLevel(logging.WARNING)
-np.seterr(all="ignore")
+
+logger = logging.getLogger(__name__)
 
 RHO_W: float = 1000.0  # kg/m³
 SE_MIN: float = 1e-6  # effective-saturation floor for source clipping
@@ -45,6 +58,223 @@ SE_MAX: float = 0.999  # effective-saturation ceiling for source clipping
 # Floor on (SE_MAX - Se) when linearizing the implicit irrigation intake;
 # bounds the penalty coefficient B when the strip is already at saturation.
 IRR_HEADROOM_EPS: float = 1e-4
+
+
+# -- config-key linting (issue 18-w1-7) --------------------------------------
+#
+# Shared keys/members every component's own top-level block may carry
+# regardless of which component reads it: `id`/`type`/`key`/`name` are read
+# off the raw block by `_Registrator._build_id`/`_build_key`/`_build_name`
+# BEFORE `configure()` ever runs (lories/_core/_registrator.py:40-86);
+# `Configurations.enabled` reads `enabled`/`disabled` (configurations.py:
+# 296-297); `Component._at_configure`/`_on_configure` load the `data`/
+# `components`/`connectors`/`converters` members (lories/components/
+# component.py:45-62). `logger` is also a bare top-level connector-id string
+# some components read directly (e.g. SoilPredictor's OWN [soil_predictor]
+# `.logger`, soil_predictor.py) and `connector` its per-channel equivalent --
+# both common enough across the chain's three sections to list once here
+# instead of three times.
+FRAMEWORK_ALLOWED_KEYS: frozenset[str] = frozenset(
+    {
+        "id",
+        "type",
+        "enabled",
+        "disabled",
+        "key",
+        "name",
+        "logger",
+        "connector",
+        "data",
+        "components",
+        "connectors",
+        "converters",
+    }
+)
+
+# Per-section allowlists: the framework set above PLUS what that component's
+# OWN configure() reads (top-level scalars and member/sub-table names alike
+# -- has_member() counts a bare bool as a member too, so the scan never
+# distinguishes scalar vs. member, only key NAME). Kept next to the shared
+# helper (not scattered per component module) so the three call sites and
+# their allowlists stay in one auditable place.
+
+# [soil_predictor] (soil_predictor.py): horizon/interval/offset/combo_cap/
+# grid_mode/parallel/max_workers/max_windows/threshold_hpa/decision_probes
+# top-level; plot/state/drip/windows/pde/ponding/feddes members.
+SOIL_PREDICTOR_ALLOWED_KEYS: frozenset[str] = FRAMEWORK_ALLOWED_KEYS | frozenset(
+    {
+        "horizon",
+        "interval",
+        "offset",
+        "combo_cap",
+        "grid_mode",
+        "parallel",
+        "max_workers",
+        "max_windows",
+        "threshold_hpa",
+        "decision_probes",
+        "plot",
+        "state",
+        "drip",
+        "windows",
+        "pde",
+        "ponding",
+        "feddes",
+    }
+)
+
+# [soil_simulation] (soil.py): total_drip_line_length_m/plot_structure/
+# discover_sensor_probes top-level; mesh/model/pde/ponding/feddes/anchor/
+# plot/probes members. `drip` (and `mesh`) are parsed by the PARENT
+# FieldSimulation (base.py), not soil.py itself -- allowlisted anyway since
+# they are real keys on the SAME configs object the child scans (get_member
+# mutates in place; base.py's eager mesh/model/pde/drip parses already
+# materialize those members before SoilSimulation.configure() ever runs).
+# `testing` is consumed by the standalone soil_tuning.py replay/calibration
+# harness (documented in soil_tuning.md), never by SoilSimulation.configure()
+# -- allowlisted so that tool's own block never produces a false
+# unknown-key warning.
+SOIL_SIMULATION_ALLOWED_KEYS: frozenset[str] = FRAMEWORK_ALLOWED_KEYS | frozenset(
+    {
+        "total_drip_line_length_m",
+        "plot_structure",
+        "discover_sensor_probes",
+        "mesh",
+        "model",
+        "pde",
+        "ponding",
+        "feddes",
+        "anchor",
+        "plot",
+        "probes",
+        "drip",
+        "testing",
+    }
+)
+
+# [field_simulation] (base.py): lai_type/roughness/plant_height/ndvi/
+# bare_lai/bare_roughness/bare_plant_height/bare_ndvi/bay_width/
+# intake_delay/interval/offset top-level; model/plot/soil_simulation/
+# soil_predictor/ground_shading/evapotranspiration members.
+FIELD_SIMULATION_ALLOWED_KEYS: frozenset[str] = FRAMEWORK_ALLOWED_KEYS | frozenset(
+    {
+        "lai_type",
+        "roughness",
+        "plant_height",
+        "ndvi",
+        "bare_lai",
+        "bare_roughness",
+        "bare_plant_height",
+        "bare_ndvi",
+        "bay_width",
+        "intake_delay",
+        "interval",
+        "offset",
+        "model",
+        "plot",
+        "soil_simulation",
+        "soil_predictor",
+        "ground_shading",
+        "evapotranspiration",
+    }
+)
+
+
+def warn_unknown_keys(configs: Configurations, known: Collection[str], section_name: str) -> None:
+    """Warn (never raise) once per unrecognized TOP-LEVEL key in ``configs``.
+
+    Call this at the TOP of ``configure()``, right after
+    ``super().configure(configs)`` and before any local ``get_member(...)``
+    call on ``configs`` itself. ``Configurations.__iter__``
+    (configurations.py:182) yields every key already in the backing dict --
+    inline TOML sub-tables included -- but a ``.d``-file-only member (e.g.
+    ``field_simulation.d/soil_predictor.conf`` with no inline
+    ``[soil_predictor]`` table in the parent file) is not one of those keys
+    until something calls ``get_member(key, ..., ensure_exists=True)``, which
+    adds it via ``_add_member``/``self[key] = ...``
+    (configurations.py:335-369). Scanning first means the check reads exactly
+    what was declared on disk, not keys configure() itself would go on to
+    materialize (several of which -- ``mesh``/``model``/``pde``/``drip``/
+    ``plot`` in this chain -- get added with ``ensure_exists=True`` even when
+    the operator never wrote the block).
+
+    ``known`` is indifferent to scalar-vs-member: ``has_member`` counts a
+    bare ``True``/``False`` value as a member too (configurations.py:
+    311-319), so this checks by key NAME only.
+    """
+    for key in configs:
+        if key not in known:
+            logger.warning(
+                "[%s] config key '%s' is not read by any parser; check for a typo or a stale/dead key.",
+                section_name,
+                key,
+            )
+
+
+def design_flow_lpm(nozzle_count: int, nozzle_flow_lph: float) -> float:
+    """Whole-field design flow [l/min] from the drip layout: nozzle output x count.
+
+    The single source for the drip-derived flow, shared by the live sim (which
+    feeds it when the physical meter is unavailable) and the predictor's
+    ``_derive_flow_m3s`` (which normalizes it per out-of-plane metre). Same
+    l/min unit the physical flow meter reports.
+    """
+    return nozzle_count * nozzle_flow_lph / 60.0
+
+
+def flow_m3s_per_m(flow_lpm: float, total_drip_line_length_m: float) -> float:
+    """Whole-field flow [l/min] normalized to m³/s per out-of-plane metre of row.
+
+    The single source for the 60_000.0 l/min -> m³/s conversion combined with
+    the total-drip-line-length spread (see ``SoilSimulation.configure``'s
+    ``total_drip_line_length_m`` docstring): ``SoilSimulation._compute_flux_rates``
+    feeds the metered flow through this, and ``SoilPredictor._derive_flow_m3s``
+    feeds the layout-derived ``design_flow_lpm`` through the SAME expression, so
+    the two normalization sites can never diverge.
+    """
+    return flow_lpm / (60_000.0 * total_drip_line_length_m)
+
+
+# Shared drip-layout defaults; a [soil_simulation.drip] block that's present but
+# omits a key falls back to these, and so does an absent [soil_predictor.drip]
+# key with no sim DripConfig to inherit from (see DripConfig, SoilPredictor's
+# per-key override). A meaningful state-driven feed needs the sim's block set
+# explicitly (see DripConfig.explicit) -- these keep the arithmetic
+# well-defined, not correct for any real field.
+_DEFAULT_NOZZLE_COUNT: int = 1
+_DEFAULT_NOZZLE_FLOW_LPH: float = 1.0
+
+
+@dataclass
+class DripConfig:
+    """Whole-field drip layout parsed ONCE from ``[soil_simulation.drip]``:
+    ``nozzle_count`` x ``nozzle_flow_lph``, and whether the block was
+    configured explicitly (not defaulted).
+
+    ``design_flow_lpm`` is derived at construction via the shared
+    :func:`design_flow_lpm` helper. ``explicit`` gates the live sim's
+    state-driven fallback feed (``FieldSimulation._validate_irrigation_input``
+    requires it before trusting the on/off state channel) -- a bare state
+    channel with no explicit block would otherwise silently roll at the
+    1-nozzle x 1-l/h placeholder.
+
+    ``SoilPredictor``'s own ``[soil_predictor.drip]`` is a PER-KEY override
+    against an already-resolved ``DripConfig``'s fields (same key-level-merge
+    idiom as ``PondingConfig``/``FeddesConfig``'s ``base`` parameter), rather
+    than a ``base`` parameter on this constructor: the sim's own
+    ``[soil_simulation.drip]`` is always a fresh whole-block parse against the
+    hardcoded nozzle defaults above, never inherited from anything.
+    """
+
+    def __init__(self, soil_block: Configurations):
+        # has_member() BEFORE get_member(..., ensure_exists=True) materializes
+        # the block -- checking after would always read True here (the same
+        # gotcha the pre-refactor base.py call site carried).
+        self.explicit: bool = soil_block.has_member("drip")
+        drip_block = soil_block.get_member("drip", defaults={}, ensure_exists=True)
+        self.nozzle_count: int = drip_block.get_int("nozzle_count", default=_DEFAULT_NOZZLE_COUNT)
+        self.nozzle_flow_lph: float = drip_block.get_float("nozzle_flow_lph", default=_DEFAULT_NOZZLE_FLOW_LPH)
+        self.design_flow_lpm: float = design_flow_lpm(self.nozzle_count, self.nozzle_flow_lph)
 
 
 @dataclass
@@ -146,7 +376,49 @@ class FluxRates:
     rain_flux: float
 
 
-_DEFAULT_BAY_WIDTH: float = 10.0
+def segment_flux_dicts(
+    seg_et: dict[str, pd.DataFrame],
+    ts: pd.Timestamp,
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Per-segment ET flux dicts at ``ts``: negative ET (radiative cooling) is
+    clipped to zero and zero-flux segments are skipped, so ``FluxRates`` only
+    carries segments that actually pull water. Shared by the predictor's roll
+    loop and the sim's ``_compute_flux_rates`` (which passes its frame's last
+    timestamp).
+    """
+    seg_evap: dict[str, float] = {}
+    seg_transp: dict[str, float] = {}
+    for name, frame in seg_et.items():
+        if ts not in frame.index:
+            continue
+        evap = max(0.0, float(frame.loc[ts, "evap"]))
+        transp = max(0.0, float(frame.loc[ts, "transp"]))
+        if evap > 0.0:
+            seg_evap[name] = evap
+        if transp > 0.0:
+            seg_transp[name] = transp
+    return seg_evap, seg_transp
+
+
+def rain_flux(et_data: pd.DataFrame, ts: pd.Timestamp, elapsed_s: float) -> float:
+    """Rain flux density [kg/(m²·s)] for the interval ending at ``ts``:
+    ``precip_mm / elapsed_s`` distributes the precipitation mass-conservatively
+    over the interval; missing column / missing row / NaN / non-positive
+    precipitation all mean "no rain".
+    """
+    col = Weather.PRECIPITATION
+    if elapsed_s <= 0 or col not in et_data.columns or ts not in et_data.index:
+        return 0.0
+    precip = et_data.loc[ts, col]
+    if pd.isna(precip) or precip <= 0:
+        return 0.0
+    return float(precip) / elapsed_s  # mm/s == kg/(m²·s)
+
+
+# Shared with FieldSimulation._bay_width's default (base.py) so the standalone
+# and in-context mesh parses agree on one fallback: 3.5 m is real rig bay
+# geometry, not an invented standalone default (was 10.0; see B6).
+_DEFAULT_BAY_WIDTH: float = 3.5
 
 
 @dataclass
@@ -299,27 +571,44 @@ class FeddesConfig:
     # below ω_c total uptake = T_pot · ω / ω_c.
     omega_c: float = 1.0
 
-    def __init__(self, configs: Optional[Configurations] = None):
+    @classmethod
+    def from_configs(cls, configs: Configurations, base: Optional[FeddesConfig] = None) -> FeddesConfig:
+        """Single parse site for every field: read ``configs`` against the
+        dataclass field default, or against ``base.<field>`` when ``base`` is
+        given — a key-level merge for a predictor overriding only some of the
+        sim's fields (see ``apply_surface_forcing``); an explicit key in
+        ``configs`` always wins over ``base``. ``root_distribution`` keeps its
+        ``.strip().lower()`` normalization on both the default and base paths.
+        """
+        self = cls()
+        for f in fields(cls):
+            default = f.default if base is None else getattr(base, f.name)
+            if f.type == "bool":
+                value = configs.get_bool(f.name, default=default)
+            elif f.type == "float":
+                value = float(configs.get(f.name, default=default))
+            elif f.type == "str":
+                value = str(configs.get(f.name, default=default))
+            else:
+                raise TypeError(f"FeddesConfig.from_configs: unmapped field type {f.type!r} for {f.name!r}")
+            if f.name == "root_distribution":
+                value = value.strip().lower()
+            setattr(self, f.name, value)
+        return self
+
+    def __init__(self, configs: Optional[Configurations] = None, base: Optional[FeddesConfig] = None):
+        # Shim only -- no parse logic of its own. configs=None ignores base and
+        # returns the plain field defaults (does NOT go through from_configs);
+        # otherwise delegate to the single parse site and copy its resolved
+        # fields onto self (the shim takes no field kwargs, so it cannot just
+        # return from_configs' result).
         if configs is None:
-            self.enabled = False
-            self.anaerobic = False
-            self.p0_pf = 0.0
-            self.p1_pf = 1.0
-            self.p2_pf = 3.0
-            self.p3_pf = 4.2
-            self.root_distribution = "uniform"
-            self.root_decay_length = 0.3
-            self.omega_c = 1.0
+            for f in fields(self):
+                setattr(self, f.name, f.default)
             return
-        self.enabled = configs.get_bool("enabled", default=False)
-        self.anaerobic = configs.get_bool("anaerobic", default=False)
-        self.p0_pf = float(configs.get("p0_pf", default=0.0))
-        self.p1_pf = float(configs.get("p1_pf", default=1.0))
-        self.p2_pf = float(configs.get("p2_pf", default=3.0))
-        self.p3_pf = float(configs.get("p3_pf", default=4.2))
-        self.root_distribution = str(configs.get("root_distribution", default="uniform")).strip().lower()
-        self.root_decay_length = float(configs.get("root_decay_length", default=0.3))
-        self.omega_c = float(configs.get("omega_c", default=1.0))
+        resolved = FeddesConfig.from_configs(configs, base=base)
+        for f in fields(self):
+            setattr(self, f.name, getattr(resolved, f.name))
 
 
 def _alpha_feddes_per_cell(
@@ -369,22 +658,58 @@ class PondingConfig:
     (the drip emitter physically ponds; discarding the excess was a numerics
     bug). ``watering_h_max_mm`` bounds that pond separately — an emitter
     basin holds far more water column over its narrow strip than sheet
-    ponding does on open ground — and defaults to ``h_max_mm`` when unset.
+    ponding does on open ground — and defaults to ``h_max_mm`` when unset
+    (with no ``base``; see ``base`` below).
+
+    ``base``, when supplied, becomes the per-key parse default instead of the
+    hardcoded defaults (a key-level merge rather than whole-block replacement)
+    and ``watering_h_max_mm`` then defaults to ``base.watering_h_max_mm``
+    instead of the just-parsed ``h_max_mm``.
     """
 
     enabled: bool = False
     h_max_mm: float = 5.0  # max rain-ponding depth before overflow [mm]
     watering_h_max_mm: float = 5.0  # max emitter-pond depth on the watering strip [mm]
 
-    def __init__(self, configs: Optional[Configurations] = None):
+    @classmethod
+    def from_configs(cls, configs: Configurations, base: Optional[PondingConfig] = None) -> PondingConfig:
+        """Single parse site for every field: read ``configs`` against the
+        dataclass field default, or against ``base.<field>`` when ``base`` is
+        given. ``watering_h_max_mm`` keeps its dynamic base=None default: it
+        follows the just-resolved ``h_max_mm`` rather than its own field
+        default, so field declaration order (``enabled``, ``h_max_mm``,
+        ``watering_h_max_mm``) matters — ``h_max_mm`` resolves first. With
+        ``base`` given, that coupling does not apply — the default is
+        ``base``'s own resolved ``watering_h_max_mm``.
+        """
+        self = cls()
+        for f in fields(cls):
+            if base is not None:
+                default = getattr(base, f.name)
+            elif f.name == "watering_h_max_mm":
+                default = self.h_max_mm
+            else:
+                default = f.default
+            if f.type == "bool":
+                value = configs.get_bool(f.name, default=default)
+            elif f.type == "float":
+                value = float(configs.get(f.name, default=default))
+            elif f.type == "str":
+                value = str(configs.get(f.name, default=default))
+            else:
+                raise TypeError(f"PondingConfig.from_configs: unmapped field type {f.type!r} for {f.name!r}")
+            setattr(self, f.name, value)
+        return self
+
+    def __init__(self, configs: Optional[Configurations] = None, base: Optional[PondingConfig] = None):
+        # Shim only -- no parse logic of its own; see FeddesConfig.__init__.
         if configs is None:
-            self.enabled = False
-            self.h_max_mm = 5.0
-            self.watering_h_max_mm = 5.0
+            for f in fields(self):
+                setattr(self, f.name, f.default)
             return
-        self.enabled = configs.get_bool("enabled", default=False)
-        self.h_max_mm = float(configs.get("h_max_mm", default=5.0))
-        self.watering_h_max_mm = float(configs.get("watering_h_max_mm", default=self.h_max_mm))
+        resolved = PondingConfig.from_configs(configs, base=base)
+        for f in fields(self):
+            setattr(self, f.name, getattr(resolved, f.name))
 
 
 @dataclass
@@ -434,15 +759,12 @@ class PDEConfig:
         else:
             self.cold_start = to_timedelta("3h")
 
-        feddes_block: Optional[Configurations] = None
-        if hasattr(configs, "has_member") and configs.has_member("feddes"):
-            feddes_block = configs.get_member("feddes", defaults={})
-        self.feddes: FeddesConfig = FeddesConfig(feddes_block)
-
-        ponding_block: Optional[Configurations] = None
-        if hasattr(configs, "has_member") and configs.has_member("ponding"):
-            ponding_block = configs.get_member("ponding", defaults={})
-        self.ponding: PondingConfig = PondingConfig(ponding_block)
+        # Surface-forcing configs (ponding, feddes) are sibling blocks of [pde] at
+        # the soil-component level, NOT nested under [pde] -- so a whole-block [pde]
+        # override cannot silently drop them. They default here and are populated
+        # from the component's [ponding]/[feddes] blocks via apply_surface_forcing.
+        self.feddes: FeddesConfig = FeddesConfig(None)
+        self.ponding: PondingConfig = PondingConfig(None)
 
     def build_model(self) -> SoilModel:
         """Instantiate the configured :class:`SoilModel` via the factory."""
@@ -458,6 +780,88 @@ class PDEConfig:
         return create_soil_model(self.model, **kwargs)
 
 
+def apply_surface_forcing(
+    ode_config: PDEConfig,
+    configs: Optional[Configurations],
+    ponding_base: Optional[PondingConfig] = None,
+    feddes_base: Optional[FeddesConfig] = None,
+) -> PDEConfig:
+    """Populate ``ode_config.ponding`` / ``.feddes`` from a soil component's
+    sibling ``[ponding]`` / ``[feddes]`` blocks (peers of ``[pde]``, not nested).
+
+    A block that is absent leaves the current value untouched, so the caller can
+    seed inherited defaults first (e.g. a predictor seeding the live sim's forcing)
+    and let the component's own block override. Keeping ponding and feddes out of
+    ``[pde]`` means a whole-block ``[pde]`` override can never silently drop them.
+
+    ``ponding_base`` / ``feddes_base``, when given, become the per-key parse
+    defaults for a present block -- a key-level merge instead of a whole-block
+    replacement against hardcoded defaults, so a predictor overriding only some
+    keys does not silently reset the rest. Sim-block parses pass neither (fresh
+    parse against the hardcoded defaults, unchanged).
+    """
+    if configs is not None and hasattr(configs, "has_member"):
+        if configs.has_member("ponding"):
+            ode_config.ponding = PondingConfig(configs.get_member("ponding", defaults={}), base=ponding_base)
+        if configs.has_member("feddes"):
+            ode_config.feddes = FeddesConfig(configs.get_member("feddes", defaults={}), base=feddes_base)
+    return ode_config
+
+
+def resolve_pde_config(
+    component_block: Configurations,
+    model_block: Configurations,
+    inherit_forcing_from: Optional[PDEConfig] = None,
+) -> PDEConfig:
+    """Build a component's ``PDEConfig`` and populate its surface forcing in one place.
+
+    Collapses the construct-then-``apply_surface_forcing`` sequence duplicated
+    across ``SoilSimulation.configure`` (site a), ``FieldSimulation.configure``'s
+    eager ``_soil_pde_config`` parse (site b), and
+    ``SoilPredictor._resolve_ode_config``'s own-``[pde]`` branch (site c) into
+    one canonical resolution, so the three sites can never resolve
+    ``[pde]``/``[model]``/forcing differently.
+
+    ``component_block.get_member("pde", defaults={}, ensure_exists=True)`` parses
+    against the component's own ``[pde]`` block -- a no-op merge when the block
+    already exists; harmlessly materializes an empty one when absent.
+
+    When ``inherit_forcing_from`` is given (site c inheriting the live sim's
+    forcing), ``cfg.ponding``/``cfg.feddes`` are seeded to
+    ``inherit_forcing_from``'s SAME objects (``is`` identity) BEFORE
+    ``apply_surface_forcing`` runs, and that call passes
+    ``ponding_base``/``feddes_base=inherit_forcing_from.ponding``/``.feddes`` so a
+    present sibling block key-merges against the sim's resolved values instead
+    of the hardcoded ``PondingConfig``/``FeddesConfig`` defaults.
+
+    The seed-before-apply ORDER is mandatory, not cosmetic: reversing it --
+    seeding AFTER calling ``apply_surface_forcing`` -- would let the plain
+    identity assignment clobber ``apply_surface_forcing``'s merge result
+    whenever the component states its OWN explicit ``[ponding]``/``[feddes]``
+    override, silently discarding that override in favour of the sim's object.
+    Seeding first means ``apply_surface_forcing``'s own-block branch (when
+    present) always has the last word; the seed only supplies the correct
+    fallback ``cfg.ponding``/``.feddes`` for the absent-block case, where
+    ``apply_surface_forcing`` is a no-op.
+
+    Sites with no ``inherit_forcing_from`` (sites a/b, fresh-parse semantics)
+    call plain ``apply_surface_forcing(cfg, component_block)``.
+    """
+    cfg = PDEConfig(component_block.get_member("pde", defaults={}, ensure_exists=True), model_configs=model_block)
+    if inherit_forcing_from is not None:
+        cfg.ponding = inherit_forcing_from.ponding
+        cfg.feddes = inherit_forcing_from.feddes
+        apply_surface_forcing(
+            cfg,
+            component_block,
+            ponding_base=inherit_forcing_from.ponding,
+            feddes_base=inherit_forcing_from.feddes,
+        )
+    else:
+        apply_surface_forcing(cfg, component_block)
+    return cfg
+
+
 # eq=False: identity equality avoids ambiguous numpy array comparisons.
 @dataclass(eq=False)
 class ProbeSpec:
@@ -471,20 +875,6 @@ class ProbeSpec:
     channel_id: str
     cell_indices: np.ndarray
     weights: np.ndarray
-
-
-@dataclass
-class PlotConfig:
-    def __init__(self, configs: Configurations, default_dir: str):
-        interval = configs.get("interval", default="5min")
-        if isinstance(interval, (int, float)):
-            self.interval: pd.Timedelta = pd.Timedelta(seconds=float(interval))
-        else:
-            self.interval: pd.Timedelta = pd.Timedelta(interval)
-        self.live: bool = configs.get_bool("live", default=True)
-        self.save: bool = configs.get_bool("save", default=False)
-        self.show: bool = configs.get_bool("show", default=False)
-        self.dir: str = configs.get("dir", default=default_dir)
 
 
 class SoilPDECore:
@@ -514,7 +904,6 @@ class SoilPDECore:
     plant_volume: float
 
     theta_diff: float  # θ_s - θ_r
-    irrigation_factor: float  # 1 / vol_watering [1/m³]
     rain_face_len: float  # Σ face_len over open-sky [m]
 
     _feddes_se_p2: Optional[float]
@@ -572,6 +961,12 @@ class SoilPDECore:
         # Richards' equation in Se form:
         #   (θs-θr) ∂Se/∂t = ∇·[K · |dh/dSe| ∇Se] + ∂K/∂y + source
         # Free-drainage BC emerges from FiPy's zero-gradient Neumann + gravity divergence.
+        # The divergence also sums exterior faces (face K = cell K): that drains
+        # K(Se_bottom) out of the bottom, but would feed K(Se_top) IN through the
+        # top faces. Keep gravity on the bottom face only.
+        g_values = np.array(g_faces.value, dtype=float)
+        g_values[:, np.asarray(mesh.exteriorFaces) & ~np.asarray(mesh.physicalFaces["GroundBottomSegment"])] = 0.0
+        g_faces.setValue(g_values)
         gravity_flux = g_faces * kf.faceValue
         gravity_div = gravity_flux.divergence
         richards = TransientTerm(coeff=self.ode_config.theta_s - self.ode_config.theta_r) == (
@@ -581,14 +976,16 @@ class SoilPDECore:
         ic_wt = self.ode_config.ic_water_table_depth
         if ic_wt is not None:
             rel_sat.setValue(self._hydrostatic_ic_array(ic_wt))
-            logging.info(
+            logger.info(
                 "SoilPDECore: hydrostatic IC (water table at %.2f m below surface) Se min=%.3f max=%.3f",
                 ic_wt,
                 float(np.min(rel_sat.value)),
                 float(np.max(rel_sat.value)),
             )
         else:
-            rel_sat.setValue(float(self.ode_config.ic_se))
+            # Clamp the unvalidated config value: an ic_se of exactly 0/1 sits on
+            # the retention curve's singularities before any post-sweep clipping.
+            rel_sat.setValue(float(np.clip(self.ode_config.ic_se, SE_MIN, SE_MAX)))
         rel_sat.updateOld()
 
         self.rel_sat = rel_sat
@@ -631,8 +1028,6 @@ class SoilPDECore:
         self.plant_volume = float(cell_volumes[self.plant_cells].sum())
 
         self.theta_diff = self.ode_config.theta_s - self.ode_config.theta_r
-        watering_vol = self.segment_cell_volume.get("WateringTopSegment", 0.0)
-        self.irrigation_factor = 1.0 / watering_vol if watering_vol > 0 else 0.0
 
         # Per-segment fraction of rain reaching the soil (1 = fully open, 0 = under modules).
         self.rain_open_fraction = self._compute_rain_open_fractions(names)
@@ -706,7 +1101,7 @@ class SoilPDECore:
             self._feddes_se_p1 = None
 
         if not (self._feddes_se_p2 > self._feddes_se_p3):
-            logging.warning(
+            logger.warning(
                 "Feddes pF thresholds map to non-monotone Se (P2 → Se=%.3f, "
                 "P3 → Se=%.3f). Check pF ordering; dry ramp will be disabled.",
                 self._feddes_se_p2,
@@ -736,7 +1131,7 @@ class SoilPDECore:
             raw = np.exp(-depth_m / L)
         else:
             if shape != "uniform":
-                logging.warning(
+                logger.warning(
                     "FeddesConfig.root_distribution=%r unknown; falling back to 'uniform'.",
                     shape,
                 )
@@ -971,10 +1366,13 @@ class SoilPDECore:
         sweeps = 0
         for k in range(max_sweeps):
             try:
-                res = eq.sweep(dt=dt, var=rel_sat, solver=self._solver)
+                # Scope FP-warning suppression to the solve: GMRES matmul on
+                # near-singular saturation matrices is the known noise source.
+                with np.errstate(all="ignore"):
+                    res = eq.sweep(dt=dt, var=rel_sat, solver=self._solver)
             except Exception as e:  # noqa: BLE001  (scipy/FiPy raise a zoo of types)
                 if log_name is not None:
-                    logging.warning(
+                    logger.warning(
                         "%s: PDE sweep raised at dt=%.2fs (sweep %d): %s: %s",
                         log_name,
                         float(dt),
@@ -1001,7 +1399,7 @@ class SoilPDECore:
         finite = bool(np.all(np.isfinite(se)))
         if not finite:
             if log_name is not None:
-                logging.warning(
+                logger.warning(
                     "%s: PDE produced non-finite Se at dt=%.2fs after %d sweeps; state not committed.",
                     log_name,
                     float(dt),
@@ -1018,7 +1416,7 @@ class SoilPDECore:
             rel_sat.setValue(np.clip(se, SE_MIN, SE_MAX))
 
         if not converged and log_name is not None:
-            logging.warning(
+            logger.warning(
                 "%s: PDE non-converged at dt=%.2fs in %d sweeps (final |Δθ|=%.2e, residual=%.2e, tol_th=%.0e).",
                 log_name,
                 float(dt),
@@ -1093,7 +1491,7 @@ class SoilPDECore:
                 if not result.finite or result.error is not None:
                     self.set_state(snap)
                     out.skipped_s += attempted
-                    logging.warning(
+                    logger.warning(
                         "%s: substep skipped at dt_min=%gs (%s); state held for %.1fs of the window.",
                         log_name or "SoilPDECore",
                         dt_min,
@@ -1152,7 +1550,8 @@ class SoilPDECore:
 
     def save_state_blob(self) -> bytes:
         buf = io.BytesIO()
-        surface_names = np.array(list(self.surface_h.keys()), dtype=object)
+        # Fixed-width unicode (not object) dtype, so the blob needs no pickle.
+        surface_names = np.array(list(self.surface_h.keys()), dtype=np.str_)
         surface_values = np.array([self.surface_h[k] for k in surface_names], dtype=float)
         np.savez(
             buf,
@@ -1165,9 +1564,22 @@ class SoilPDECore:
 
     def load_state_blob(self, raw: bytes) -> None:
         buf = io.BytesIO(raw)
+        # allow_pickle stays for legacy blobs whose surface_names were saved
+        # with object dtype; new blobs are pickle-free.
         arrays = np.load(buf, allow_pickle=True)
-        self.rel_sat.setValue(arrays["rel_sat"])
-        self.rel_sat._old.setValue(arrays["rel_sat_old"])
+        rel_sat = np.asarray(arrays["rel_sat"])
+        expected = np.asarray(self.rel_sat.value).shape
+        if rel_sat.shape != expected:
+            raise ValueError(
+                f"soil state blob carries {rel_sat.shape} cells but the mesh has {expected}; "
+                "stale blob from a different mesh configuration"
+            )
+        self.rel_sat.setValue(rel_sat)
+        # Legacy blobs (pre soil-refactor B3) wrote ONLY `rel_sat` via
+        # `np.savez(buf, rel_sat=rel_sat)` -- no `rel_sat_old`, no surface fields.
+        # Fall back to `rel_sat` itself so those pre-fix debug blobs stay loadable.
+        rel_sat_old = arrays["rel_sat_old"] if "rel_sat_old" in arrays.files else rel_sat
+        self.rel_sat._old.setValue(rel_sat_old)
         if "surface_names" in arrays.files and "surface_h" in arrays.files:
             names = arrays["surface_names"]
             values = arrays["surface_h"]
@@ -1212,40 +1624,12 @@ class SoilBase(Component):
         return self._pde.soil_model
 
     @property
-    def _segment_cells(self) -> dict[str, np.ndarray]:
-        return self._pde.segment_cells
-
-    @property
     def _segment_face_len(self) -> dict[str, float]:
         return self._pde.segment_face_len
 
     @property
-    def _segment_cell_volume(self) -> dict[str, float]:
-        return self._pde.segment_cell_volume
-
-    @property
     def _top_segment_names(self) -> list[str]:
         return self._pde.top_segment_names
-
-    @property
-    def _open_sky_segment_names(self) -> list[str]:
-        return self._pde.open_sky_segment_names
-
-    @property
-    def _plant_cells(self) -> np.ndarray:
-        return self._pde.plant_cells
-
-    @property
-    def _plant_volume(self) -> float:
-        return self._pde.plant_volume
-
-    @property
-    def _theta_diff(self) -> float:
-        return self._pde.theta_diff
-
-    @property
-    def _irrigation_factor(self) -> float:
-        return self._pde.irrigation_factor
 
     @property
     def _rain_face_len(self) -> float:
@@ -1253,6 +1637,25 @@ class SoilBase(Component):
 
     def _total_water(self) -> float:
         return self._pde.total_water()
+
+    # -- shared publish-side conversion ---------------------------------------
+
+    def _tension_from_se(self, values: float | Collection[float] | np.ndarray) -> float | list[float]:
+        """Publish-side Se -> water tension conversion shared by the sim's
+        per-probe publish and the predictor's trajectory conversion: scalar
+        in -> ``float`` out, sequence/ndarray in -> ``list[float]`` out.
+
+        The published value is the signed matric potential (negative hPa; 0
+        at saturation, more negative as the soil dries) -- the tensiometer /
+        DB convention. That sign convention is enforced by
+        ``SoilModel.psi_from_se`` itself, not here; this seam owns only the
+        publish-side shape coercion. The PDE core (``sample``, anchoring,
+        ``total_water``) stays in Se.
+        """
+        if np.ndim(values) == 0:
+            return float(self._soil_model.psi_from_se(values))
+        result = self._soil_model.psi_from_se(np.asarray(values, dtype=float))
+        return [float(v) for v in result]
 
     # -- shared diagnostic math -----------------------------------------------
 
@@ -1323,13 +1726,13 @@ class SoilBase(Component):
 
         kg_per_s_to_kg_per_h = 3600.0
         return {
-            "water_top_out": e_flux_mean * kg_per_s_to_kg_per_h,
-            "water_transpiration": t_flux_mean * kg_per_s_to_kg_per_h,
-            "water_top_in": top_in * kg_per_s_to_kg_per_h,
-            "water_bottom": bottom * kg_per_s_to_kg_per_h,
-            "water_runoff": runoff_rate * kg_per_s_to_kg_per_h,
-            "water_demand_unmet": unmet_rate * kg_per_s_to_kg_per_h,
-            "water_balance_residual": balance_residual * kg_per_s_to_kg_per_h,
+            "top_out": e_flux_mean * kg_per_s_to_kg_per_h,
+            "transpiration": t_flux_mean * kg_per_s_to_kg_per_h,
+            "top_in": top_in * kg_per_s_to_kg_per_h,
+            "bottom_out": bottom * kg_per_s_to_kg_per_h,
+            "runoff": runoff_rate * kg_per_s_to_kg_per_h,
+            "demand_unmet": unmet_rate * kg_per_s_to_kg_per_h,
+            "balance_residual": balance_residual * kg_per_s_to_kg_per_h,
         }
 
 
@@ -1347,107 +1750,120 @@ def create_mesh(mesh_config: MeshConfig) -> None:
     watering_width = mesh_config.watering_width
     d_x = mesh_config.dx
 
-    gmsh.initialize()
-    gmsh.model.add("soil")
-
-    # check parameters validity
+    # check parameters validity (before gmsh.initialize, so a bad config never
+    # leaves the gmsh library initialized)
     if width < plant_width + 2 * d_x:
         raise ValueError("Invalid parameters: width must be at least plant_width + 2 * d_x")
     if height <= 0:
         raise ValueError("Invalid parameters: height must be positive")
     if height <= plant_height:
         raise ValueError("Invalid parameters: height must be greater than plant_height")
-    if ((width - plant_width) / 2) % d_x != 0 and (width - plant_width) / (2 * d_x) > 0:
+    # Tolerance-based multiple check: a float modulo (`% d_x`) spuriously rejects
+    # valid widths (e.g. 0.3 % 0.1 != 0 in binary floats).
+    half_width = (width - plant_width) / 2
+    surface_count = round(half_width / d_x)
+    if surface_count < 1 or abs(half_width - surface_count * d_x) > 1e-9 * max(1.0, half_width):
         raise ValueError("Invalid parameters: (width - plant_width) must be a multiple of 2 * d_x")
 
-    surface_count = int((width - plant_width) / (2 * d_x))
+    gmsh.initialize()
+    try:
+        gmsh.model.add("soil")
 
-    lines_tl = []
-    lines_tr = []
+        lines_tl = []
+        lines_tr = []
 
-    # Top left
-    point_sim_tl = gmsh.model.geo.addPoint(0.0, 0.0, 0.0, dl)
-    point_prev = point_sim_tl
-    offset = d_x
-    for i in range(surface_count):
-        point = gmsh.model.geo.addPoint(offset + d_x * i, 0.0, 0.0, dl)
-        line = gmsh.model.geo.addLine(point_prev, point)
-        lines_tl.append(line)
+        # Top left
+        point_sim_tl = gmsh.model.geo.addPoint(0.0, 0.0, 0.0, dl)
+        point_prev = point_sim_tl
+        offset = d_x
+        for i in range(surface_count):
+            point = gmsh.model.geo.addPoint(offset + d_x * i, 0.0, 0.0, dl)
+            line = gmsh.model.geo.addLine(point_prev, point)
+            lines_tl.append(line)
+            gmsh.model.geo.synchronize()
+            gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line]), f"LeftTopSegment_{i}")
+            point_prev = point
+
+        # Plant
+        point_plant_tl = point_prev
+        point_watering_tl = gmsh.model.geo.addPoint(
+            d_x * surface_count + plant_width / 2 - watering_width / 2, 0.0, 0.0, dl
+        )
+        point_watering_tr = gmsh.model.geo.addPoint(
+            d_x * surface_count + plant_width / 2 + watering_width / 2, 0.0, 0.0, dl
+        )
+        point_plant_tr = gmsh.model.geo.addPoint(d_x * surface_count + plant_width, 0.0, 0.0, dl)
+        point_plant_bl = gmsh.model.geo.addPoint(d_x * surface_count, -plant_height, 0.0, dl)
+        point_plant_br = gmsh.model.geo.addPoint(d_x * surface_count + plant_width, -plant_height, 0.0, dl)
+
+        line_plant_top_1 = gmsh.model.geo.addLine(point_plant_tl, point_watering_tl)
+        line_plant_top_2 = gmsh.model.geo.addLine(point_watering_tl, point_watering_tr)
+        line_plant_top_3 = gmsh.model.geo.addLine(point_watering_tr, point_plant_tr)
+        line_plant_right = gmsh.model.geo.addLine(point_plant_tr, point_plant_br)
+        line_plant_bottom = gmsh.model.geo.addLine(point_plant_br, point_plant_bl)
+        line_plant_left = gmsh.model.geo.addLine(point_plant_bl, point_plant_tl)
+
+        loop_plant = gmsh.model.geo.addCurveLoop(
+            [
+                line_plant_top_1,
+                line_plant_top_2,
+                line_plant_top_3,
+                line_plant_right,
+                line_plant_bottom,
+                line_plant_left,
+            ]
+        )
+        surface_plant = gmsh.model.geo.addPlaneSurface([loop_plant])
         gmsh.model.geo.synchronize()
-        gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line]), f"LeftTopSegment_{i}")
-        point_prev = point
+        gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line_plant_top_1]), "PlantTopLeftSegment")
+        gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line_plant_top_2]), "WateringTopSegment")
+        gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line_plant_top_3]), "PlantTopRightSegment")
+        gmsh.model.setPhysicalName(2, gmsh.model.addPhysicalGroup(2, [surface_plant]), "PlantSurface")
 
-    # Plant
-    point_plant_tl = point_prev
-    point_watering_tl = gmsh.model.geo.addPoint(
-        d_x * surface_count + plant_width / 2 - watering_width / 2, 0.0, 0.0, dl
-    )
-    point_watering_tr = gmsh.model.geo.addPoint(
-        d_x * surface_count + plant_width / 2 + watering_width / 2, 0.0, 0.0, dl
-    )
-    point_plant_tr = gmsh.model.geo.addPoint(d_x * surface_count + plant_width, 0.0, 0.0, dl)
-    point_plant_bl = gmsh.model.geo.addPoint(d_x * surface_count, -plant_height, 0.0, dl)
-    point_plant_br = gmsh.model.geo.addPoint(d_x * surface_count + plant_width, -plant_height, 0.0, dl)
+        # Top right
+        point_prev = point_plant_tr
+        offset = d_x * surface_count + plant_width + d_x
+        for i in range(surface_count):
+            point = gmsh.model.geo.addPoint(offset + d_x * i, 0.0, 0.0, dl)
+            line = gmsh.model.geo.addLine(point_prev, point)
+            lines_tr.append(line)
+            gmsh.model.geo.synchronize()
+            gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line]), f"RightTopSegment_{i}")
+            point_prev = point
+        upper_right_point = point_prev
 
-    line_plant_top_1 = gmsh.model.geo.addLine(point_plant_tl, point_watering_tl)
-    line_plant_top_2 = gmsh.model.geo.addLine(point_watering_tl, point_watering_tr)
-    line_plant_top_3 = gmsh.model.geo.addLine(point_watering_tr, point_plant_tr)
-    line_plant_right = gmsh.model.geo.addLine(point_plant_tr, point_plant_br)
-    line_plant_bottom = gmsh.model.geo.addLine(point_plant_br, point_plant_bl)
-    line_plant_left = gmsh.model.geo.addLine(point_plant_bl, point_plant_tl)
+        # Ground layer
+        point_sim_bl = gmsh.model.geo.addPoint(0.0, -height, 0.0, dl)
+        point_sim_br = gmsh.model.geo.addPoint(width, -height, 0.0, dl)
 
-    loop_plant = gmsh.model.geo.addCurveLoop(
-        [line_plant_top_1, line_plant_top_2, line_plant_top_3, line_plant_right, line_plant_bottom, line_plant_left]
-    )
-    surface_plant = gmsh.model.geo.addPlaneSurface([loop_plant])
-    gmsh.model.geo.synchronize()
-    gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line_plant_top_1]), "PlantTopLeftSegment")
-    gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line_plant_top_2]), "WateringTopSegment")
-    gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line_plant_top_3]), "PlantTopRightSegment")
-    gmsh.model.setPhysicalName(2, gmsh.model.addPhysicalGroup(2, [surface_plant]), "PlantSurface")
+        line_sim_right = gmsh.model.geo.addLine(upper_right_point, point_sim_br)
+        line_sim_bottom = gmsh.model.geo.addLine(point_sim_br, point_sim_bl)
+        line_sim_left = gmsh.model.geo.addLine(point_sim_bl, point_sim_tl)
 
-    # Top right
-    point_prev = point_plant_tr
-    offset = d_x * surface_count + plant_width + d_x
-    for i in range(surface_count):
-        point = gmsh.model.geo.addPoint(offset + d_x * i, 0.0, 0.0, dl)
-        line = gmsh.model.geo.addLine(point_prev, point)
-        lines_tr.append(line)
+        loop_sim = gmsh.model.geo.addCurveLoop(
+            [
+                *lines_tl,
+                -line_plant_left,
+                -line_plant_bottom,
+                -line_plant_right,
+                *lines_tr,
+                line_sim_right,
+                line_sim_bottom,
+                line_sim_left,
+            ]
+        )
+        surface_sim = gmsh.model.geo.addPlaneSurface([loop_sim])
         gmsh.model.geo.synchronize()
-        gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line]), f"RightTopSegment_{i}")
-        point_prev = point
-    upper_right_point = point_prev
+        gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line_sim_bottom]), "GroundBottomSegment")
+        gmsh.model.setPhysicalName(2, gmsh.model.addPhysicalGroup(2, [surface_sim]), "GroundSurface")
 
-    # Ground layer
-    point_sim_bl = gmsh.model.geo.addPoint(0.0, -height, 0.0, dl)
-    point_sim_br = gmsh.model.geo.addPoint(width, -height, 0.0, dl)
+        gmsh.model.geo.synchronize()
+        gmsh.model.mesh.generate(2)
+        gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
 
-    line_sim_right = gmsh.model.geo.addLine(upper_right_point, point_sim_br)
-    line_sim_bottom = gmsh.model.geo.addLine(point_sim_br, point_sim_bl)
-    line_sim_left = gmsh.model.geo.addLine(point_sim_bl, point_sim_tl)
-
-    loop_sim = gmsh.model.geo.addCurveLoop(
-        [
-            *lines_tl,
-            -line_plant_left,
-            -line_plant_bottom,
-            -line_plant_right,
-            *lines_tr,
-            line_sim_right,
-            line_sim_bottom,
-            line_sim_left,
-        ]
-    )
-    surface_sim = gmsh.model.geo.addPlaneSurface([loop_sim])
-    gmsh.model.geo.synchronize()
-    gmsh.model.setPhysicalName(1, gmsh.model.addPhysicalGroup(1, [line_sim_bottom]), "GroundBottomSegment")
-    gmsh.model.setPhysicalName(2, gmsh.model.addPhysicalGroup(2, [surface_sim]), "GroundSurface")
-
-    gmsh.model.geo.synchronize()
-    gmsh.model.mesh.generate(2)
-    gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
-
-    gmsh.write(mesh_config.filename)
+        gmsh.write(mesh_config.filename)
+    finally:
+        gmsh.finalize()
 
 
 def ensure_mesh(mesh_config: MeshConfig) -> None:

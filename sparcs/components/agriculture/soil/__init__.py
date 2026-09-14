@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-sparcs.components.irrigation.soil
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+sparcs.components.agriculture.soil
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-
+Soil moisture sensing and retention models.
 """
 
 from . import models  # noqa: F401
