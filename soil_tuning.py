@@ -868,6 +868,21 @@ def _load_history(
                 irrigation = _irrigation_series_from_frame(flow_df)
         except Exception:
             log.exception("irrigation logger read failed; assuming zero flow")
+        if irrigation.empty or not (irrigation != 0.0).any():
+            # No metered rows (unlogged or broken meter): use the live tick's
+            # fallback chain -- ranged connector read of the meter, else the
+            # on/off state x the [drip] design flow, else 0 -- aligned on the
+            # forcing index, so the replay waters when the field did.
+            try:
+                fallback = field_sim._irrigation_flow_lpm(start, end, et_data.index)
+                if (fallback != 0.0).any():
+                    irrigation = fallback
+                    log.info(
+                        "irrigation from the live fallback chain (meter, else state x design flow): %d watering rows",
+                        int((fallback > 0.0).sum()),
+                    )
+            except Exception:
+                log.exception("irrigation fallback read failed; assuming zero flow")
 
     initial_blob: Optional[bytes] = None
     try:
