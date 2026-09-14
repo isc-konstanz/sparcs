@@ -284,10 +284,11 @@ def test_collapsed_segment_bounds_fall_back_to_independent_rolls(
     must instead fall back to independent per-candidate rolls, so a two-window
     watering candidate still matches its independent roll (and actually ponds)."""
     horizon_start = pd.Timestamp("2026-07-03 08:00", tz="Europe/Berlin")
-    # Grid points at 0/10/20/25 min. Windows at 8:12 and 8:18 BOTH floor to 8:10 ->
-    # collapsed segment bounds -> fallback. Non-overlapping pulses (8:12-8:17, 8:18-8:23).
+    # Grid points at 0/10/20/23 min. Windows at 8:12 and 8:18 BOTH floor to 8:10 ->
+    # collapsed segment bounds -> fallback. Non-overlapping pulses (8:12-8:17, 8:18-8:23);
+    # the horizon ends with the last pulse so the strip pond has not infiltrated yet.
     idx = pd.DatetimeIndex(
-        [horizon_start + pd.Timedelta(minutes=m) for m in (0, 10, 20, 25)],
+        [horizon_start + pd.Timedelta(minutes=m) for m in (0, 10, 20, 23)],
         name="timestamp",
     )
     horizon_end = idx[-1]

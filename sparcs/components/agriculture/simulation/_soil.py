@@ -961,6 +961,12 @@ class SoilPDECore:
         # Richards' equation in Se form:
         #   (θs-θr) ∂Se/∂t = ∇·[K · |dh/dSe| ∇Se] + ∂K/∂y + source
         # Free-drainage BC emerges from FiPy's zero-gradient Neumann + gravity divergence.
+        # The divergence also sums exterior faces (face K = cell K): that drains
+        # K(Se_bottom) out of the bottom, but would feed K(Se_top) IN through the
+        # top faces. Keep gravity on the bottom face only.
+        g_values = np.array(g_faces.value, dtype=float)
+        g_values[:, np.asarray(mesh.exteriorFaces) & ~np.asarray(mesh.physicalFaces["GroundBottomSegment"])] = 0.0
+        g_faces.setValue(g_values)
         gravity_flux = g_faces * kf.faceValue
         gravity_div = gravity_flux.divergence
         richards = TransientTerm(coeff=self.ode_config.theta_s - self.ode_config.theta_r) == (
