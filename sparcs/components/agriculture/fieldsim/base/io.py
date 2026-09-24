@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-sparcs.components.agriculture.fieldsim.io
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+sparcs.components.agriculture.fieldsim.base.io
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The one protocol between the tick sequence and the outside world. Eight
 methods, one channel-backed implementation in ``components.ChannelIO``, and a
@@ -15,7 +15,7 @@ from typing import Mapping, Protocol
 
 import pandas as pd
 
-from .state import Plan, SoilState, StepResult
+from ..core.state import Plan, SoilState, StepResult
 
 
 class FieldIO(Protocol):

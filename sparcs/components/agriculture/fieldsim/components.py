@@ -26,14 +26,14 @@ import pandas as pd
 from lories.components import Component
 from lories.core import Configurations
 
-from .assimilator import Assimilator
-from .chain import WeatherChain
-from .config import FieldConfig
-from .engine import SoilEngine
-from .planner import IrrigationPlanner
-from .runner import FieldRunner
-from .scheduler import TickScheduler
-from .state import Plan, SoilState, StepResult
+from .base.runner import FieldRunner
+from .base.scheduler import TickScheduler
+from .core.assimilator import Assimilator
+from .core.chain import WeatherChain
+from .core.config import FieldConfig
+from .core.engine import SoilEngine
+from .core.planner import IrrigationPlanner
+from .core.state import Plan, SoilState, StepResult
 
 
 class SoilSimulation(Component):

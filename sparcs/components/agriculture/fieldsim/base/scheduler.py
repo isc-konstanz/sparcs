@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-sparcs.components.agriculture.fieldsim.scheduler
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+sparcs.components.agriculture.fieldsim.base.scheduler
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The tick thread and nothing else: slot alignment, intake delay, stall and
 failure counters, watchdog, clean stop. Calls ``FieldRunner.run_tick`` and
@@ -15,7 +15,7 @@ import datetime as dt
 import logging
 import threading
 
-from .config import FieldConfig
+from ..core.config import FieldConfig
 from .runner import FieldRunner
 
 logger = logging.getLogger(__name__)
