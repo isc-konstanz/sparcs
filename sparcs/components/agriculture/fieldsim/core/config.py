@@ -23,6 +23,9 @@ import datetime as dt
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
+from .plots import PlotConfig
+from .shading import ShadingConfig
+
 
 @dataclass(frozen=True)
 class SoilConfig:
@@ -84,6 +87,8 @@ class FieldConfig:
 
     soil: SoilConfig
     planner: PlannerConfig | None
+    shading: ShadingConfig = field(default_factory=ShadingConfig)
+    plots: PlotConfig | None = None
     lai_type: str = "grass"
     roughness: float = 0.002
     plant_height: float = 0.1
@@ -96,7 +101,6 @@ class FieldConfig:
     interval: dt.timedelta = dt.timedelta(minutes=30)
     offset: dt.timedelta = dt.timedelta(0)
     intake_delay: dt.timedelta = dt.timedelta(minutes=30)
-    shading_enabled: bool = True
     extra: Mapping[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -109,6 +113,7 @@ class FieldConfig:
             {
               "lai_type": ..., "interval": ..., "intake_delay": ...,
               "model": {...},                       # field-level, optional
+              "ground_shading": {...}, "evapotranspiration": {...},
               "soil_simulation": {"mesh": {...}, "pde": {...}, "model": {...}, ...},
               "soil_predictor":  {"windows": {...}, ...},   # optional
             }

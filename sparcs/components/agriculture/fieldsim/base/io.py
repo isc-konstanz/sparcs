@@ -3,7 +3,7 @@
 sparcs.components.agriculture.fieldsim.base.io
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The one protocol between the tick sequence and the outside world. Eight
+The one protocol between the tick sequence and the outside world. Nine
 methods, one channel-backed implementation in ``components.ChannelIO``, and a
 thirty-line fake in tests.
 """
@@ -15,7 +15,7 @@ from typing import Mapping, Protocol
 
 import pandas as pd
 
-from ..core.state import Plan, SoilState, StepResult
+from ..core.state import ChainResult, Plan, SoilState, StepResult
 
 
 class FieldIO(Protocol):
@@ -40,6 +40,11 @@ class FieldIO(Protocol):
         ...
 
     def save_state(self, state: SoilState) -> None: ...
+
+    def publish_chain(self, now: dt.datetime, result: ChainResult) -> None:
+        """Shading factors, ET intermediates and the shading image for one
+        weather chunk, onto the ground_shading / evapotranspiration channels."""
+        ...
 
     def publish(self, now: dt.datetime, result: StepResult, probe_tension: Mapping[str, float]) -> None:
         """Mass-balance, walk and probe channels for one advanced row."""

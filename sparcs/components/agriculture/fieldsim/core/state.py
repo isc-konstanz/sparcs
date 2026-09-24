@@ -4,8 +4,8 @@ sparcs.components.agriculture.fieldsim.core.state
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Value objects that cross the seams: ``SoilState`` in and out of the engine,
-``Forcing`` from the weather chain into the engine, ``StepResult`` out of one
-advance, ``Plan`` out of the planner. All immutable, all FiPy-free, all
+``Forcing`` and ``ChainResult`` out of the weather chain, ``StepResult`` out of
+one advance, ``Plan`` out of the planner. All immutable, all FiPy-free, all
 picklable.
 """
 
@@ -55,6 +55,18 @@ class Forcing:
     @property
     def end(self) -> dt.datetime:
         return self.start + dt.timedelta(seconds=self.dt_s)
+
+
+@dataclass(frozen=True)
+class ChainResult:
+    """Outputs of one ``WeatherChain.forcing_series`` call, published once
+    per weather chunk: shading factors and open-sky irradiance per row, the
+    ET intermediates and per-segment ET per row, and the shading progress
+    image when one was due."""
+
+    shading: pd.DataFrame
+    evapotranspiration: pd.DataFrame
+    image: bytes | None = None
 
 
 @dataclass(frozen=True)

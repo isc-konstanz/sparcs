@@ -70,7 +70,8 @@ class FieldRunner:
                 logger.warning("no valid weather for %s..%s, skipping chunk", chunk_start, chunk_end)
                 continue
             irrigation = self.io.read_irrigation_lpm(chunk_start, chunk_end)
-            forcing = self.chain.forcing_series(weather, irrigation)
+            forcing, chain_result = self.chain.forcing_series(weather, irrigation)
+            self.io.publish_chain(chunk_end, chain_result)
             if self.assimilator.enabled:
                 self.assimilator.ingest(self.io.read_tension_history(chunk_start, chunk_end))
             for step in forcing:
@@ -102,7 +103,7 @@ class FieldRunner:
         if forecast.empty:
             logger.warning("empty forecast, planner skipped")
             return
-        horizon = self.chain.forcing_series(forecast, pd.Series(0.0, index=forecast.index))
+        horizon, _ = self.chain.forcing_series(forecast, pd.Series(0.0, index=forecast.index))
         plan = self.planner.plan(self.state, horizon)
         self.io.write_plan(plan)
         self._last_planned = now.date()

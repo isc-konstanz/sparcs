@@ -8,10 +8,12 @@ Skeleton of the target architecture for the soil-simulation chain
 
 Three layers, one dependency direction, lories -> application -> core:
 
-    core/        config, state, engine, chain, assimilator, planner
+    core/        config, state, engine, shading, evapotranspiration, plots,
+                 chain, assimilator, planner
                  pure Python + FiPy. No lories, no channels, no threads, no I/O.
     base/        io (the FieldIO protocol), runner, scheduler
-    components   FieldSimulation, SoilSimulation, SoilPredictor, ChannelIO:
+    components   FieldSimulation, GroundShading, Evapotranspiration,
+                 SoilSimulation, SoilPredictor, ChannelIO:
                  the lories layer, the only module that imports lories.
 
 This package is NOT wired into ``sparcs.components.agriculture`` and registers
