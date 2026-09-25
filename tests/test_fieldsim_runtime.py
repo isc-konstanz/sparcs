@@ -24,6 +24,7 @@ from sparcs.components.agriculture.fieldsim.runtime.memory import FrameInputs, R
 from sparcs.components.agriculture.fieldsim.runtime.ports import InputKey
 from sparcs.components.agriculture.fieldsim.runtime.runner import FieldRunner
 from sparcs.components.agriculture.fieldsim.runtime.scenario import ScenarioRunner
+from sparcs.components.agriculture.fieldsim.runtime.scheduler import TickScheduler
 
 UTC = dt.timezone.utc
 
@@ -214,3 +215,38 @@ def test_day_chunks_cover_span_without_gaps(hours):
     assert chunks[0][0] == start and chunks[-1][1] == end
     assert all(a[1] == b[0] for a, b in zip(chunks, chunks[1:]))
     assert all((b - a) <= dt.timedelta(days=1) for a, b in chunks)
+
+
+# --------------------------------------------------------------------------- scheduler slots
+
+
+@pytest.mark.parametrize(
+    "now, interval, offset, expected",
+    [
+        ("2026-09-20 12:05", 30, 20, "2026-09-20 12:20"),
+        ("2026-09-20 12:20", 30, 20, "2026-09-20 12:50"),  # strictly after
+        ("2026-09-20 12:49:59", 30, 20, "2026-09-20 12:50"),
+        ("2026-09-20 23:55", 60, 0, "2026-09-21 00:00"),
+    ],
+)
+def test_next_slot_is_absolute_wall_clock_alignment(now, interval, offset, expected):
+    setup = FieldSetup(
+        field=FieldConfig.from_dict({"interval": interval, "offset": offset}),
+        soil=SoilConfig.from_dict({"mesh": {}}),
+        shading=None,
+    )
+    sched = TickScheduler(setup, runner=None, tz=UTC)
+    got = sched.next_slot(pd.Timestamp(now, tz=UTC))
+    assert got == pd.Timestamp(expected, tz=UTC)
+    assert 0.0 <= (got - pd.Timestamp(now, tz=UTC)).total_seconds() <= interval * 60
+
+
+def test_next_slot_honours_local_timezone():
+    setup = FieldSetup(
+        field=FieldConfig.from_dict({"interval": 60, "offset": 0}),
+        soil=SoilConfig.from_dict({"mesh": {}}),
+        shading=None,
+    )
+    berlin = TickScheduler(setup, runner=None, tz="Europe/Berlin")
+    got = berlin.next_slot(dt.datetime(2026, 9, 20, 10, 30, tzinfo=UTC))  # 12:30 local
+    assert got == pd.Timestamp("2026-09-20 13:00", tz="Europe/Berlin")

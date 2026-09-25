@@ -14,6 +14,9 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import threading
+from typing import Any
+
+import pandas as pd
 
 from ..core.config import FieldSetup
 from .runner import FieldRunner
@@ -25,9 +28,10 @@ FAILURE_ESCALATE_AT = 2
 
 
 class TickScheduler:
-    def __init__(self, setup: FieldSetup, runner: FieldRunner) -> None:
+    def __init__(self, setup: FieldSetup, runner: FieldRunner, tz: Any = dt.timezone.utc) -> None:
         self.setup = setup
         self.runner = runner
+        self.tz = tz  # the field's timezone: slots align to local wall-clock, as today
         self._interrupt = threading.Event()
         self._thread: threading.Thread | None = None
         self.stalled_ticks = 0
@@ -66,6 +70,18 @@ class TickScheduler:
         log = logger.error if self.stalled_ticks == STALL_ERROR_TICKS else logger.warning
         log("simulation stalled for %d ticks", self.stalled_ticks)
 
+    def next_slot(self, now: dt.datetime) -> pd.Timestamp:
+        """First aligned slot strictly after ``now``: absolute alignment
+        (floor to ``interval`` in ``tz``, plus ``offset``), so restarts never
+        shift the schedule. Same expression as the live ``_schedule.slot_ceil``."""
+        field = self.setup.field
+        ts = pd.Timestamp(now)
+        ts = ts.tz_localize(self.tz) if ts.tzinfo is None else ts.tz_convert(self.tz)
+        slot = ts.floor(f"{field.interval}min") + pd.Timedelta(minutes=field.offset)
+        while slot <= ts:
+            slot += pd.Timedelta(minutes=field.interval)
+        return slot
+
     def _seconds_to_next_slot(self) -> float:
-        """Wall-clock alignment to ``interval`` + ``offset`` (today ``_schedule``)."""
-        raise NotImplementedError
+        now = dt.datetime.now(dt.timezone.utc)
+        return max(0.0, (self.next_slot(now) - pd.Timestamp(now)).total_seconds())
