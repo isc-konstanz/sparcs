@@ -360,7 +360,7 @@ class FieldConfig(Config):
     bay_width = Parameter(type=float, default=3.5, min=0.0, desc="Distance between PV rows (m)")
     interval = Parameter(type=int, default=60, min=1, desc="Tick cadence, wall-clock aligned (minutes)")
     offset = Parameter(type=int, default=0, min=0, desc="Tick offset within the interval (minutes)")
-    intake_delay = DurationParameter(default="30min", desc="How far behind now the frontier may advance")
+    intake_delay = DurationParameter(default="0min", desc="How far behind now the frontier may advance")
 
     def _on_configure(self, configs: Configurations) -> None:
         if not 0 <= self.offset < self.interval:

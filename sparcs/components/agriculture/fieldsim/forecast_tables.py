@@ -26,6 +26,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Callable
 
 import pandas as pd
+from lories.core import ConfigurationError, ConfigurationUnavailableError
 from lories.typing import Configurations
 
 from .core.pde import ProbeSpec
@@ -203,6 +204,9 @@ class ForecastTablePublisher:
         grouping (``table.py``) raises ``ResourceError`` if any resource in a
         keyed-table write is missing a declared surrogate attribute.
 
+        Two probes sharing one ``soil_id`` raise: their forecast rows would
+        upsert onto the same key and clobber each other.
+
         A probe with no configured ``soil_id`` is warned (not raised, matching
         ``soil.py``) and gets no ``soil_id`` kwarg at all -- the detail write
         then fails at the next ``connector.write()`` for this table (caught by
@@ -218,6 +222,7 @@ class ForecastTablePublisher:
         field_id = channels_cfg.get("field_id", default=None)
 
         identities: dict[str, dict[str, Any]] = {}
+        seen: dict[Any, str] = {}
         for probe in probes:
             identity: dict[str, Any] = {}
             if field_id is not None:
@@ -233,6 +238,11 @@ class ForecastTablePublisher:
                     probe.channel_id,
                 )
             else:
+                if soil_id in seen:
+                    raise ConfigurationError(
+                        f"{p.name}: duplicate soil_id {soil_id!r} on probes '{seen[soil_id]}' and '{probe.channel_id}'"
+                    )
+                seen[soil_id] = probe.channel_id
                 identity["soil_id"] = soil_id
             identities[probe.channel_id] = identity
         return identities
@@ -652,6 +662,24 @@ class ForecastTablePublisher:
         )
 
     # --- Connector resolution ------------------------------------------------
+
+    def validate_logger_connector(self) -> None:
+        """Refuse to start when ``logger`` names a connector that can never write."""
+        p = self._predictor
+        if p._logger_id is None:
+            return
+        connector = self.resolve_logger_connector(p._logger_id)
+        if connector is None:
+            raise ConfigurationUnavailableError(
+                f"{p.name}: [soil_predictor] logger = '{p._logger_id}' resolves to no connector; "
+                "every forecast-table write would be skipped. Point it at a declared "
+                "[connectors.<id>] or remove the key to disable the direct writes."
+            )
+        if not callable(getattr(connector, "write", None)):
+            raise ConfigurationUnavailableError(
+                f"{p.name}: [soil_predictor] logger = '{p._logger_id}' resolves to "
+                f"{type(connector).__name__}, which has no write(); forecast tables need a writing connector."
+            )
 
     def resolve_logger_connector(self, logger_id: str) -> "Optional[Any]":
         """Resolve the connector for the header/detail direct-writes.

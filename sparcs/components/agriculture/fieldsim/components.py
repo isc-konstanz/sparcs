@@ -268,6 +268,10 @@ class SoilPredictor(ChannelNamespace):
     def tables(self) -> ForecastTablePublisher:
         return ForecastTablePublisher(self)
 
+    def activate(self) -> None:
+        super().activate()
+        self.tables().validate_logger_connector()
+
     def register_forecast_tables(self, soil_configs: Configurations, probes: list) -> None:
         """Register the four persisted forecast tables' channels."""
         if self._logger_id is None:
@@ -370,8 +374,15 @@ class ChannelInputs:
             if k not in _OPTIONAL_WEATHER_KEYS and (k not in frame.columns or frame[k].isna().all())
         ]
         if missing:
+            if missing != self._last_invalid_weather_columns:
+                logger.warning(
+                    "%s: weather chunk dropped, required column(s) missing or all-NaN: %s",
+                    getattr(self.field, "name", "fieldsim"),
+                    ", ".join(missing),
+                )
             self._last_invalid_weather_columns = missing
             return False
+        self._last_invalid_weather_columns = []
         return True
 
     # -- IRRIGATION ----------------------------------------------------------
@@ -941,4 +952,6 @@ _SOIL_DIAGNOSTIC_CHANNELS = (
     SoilSimulation.WATER_BALANCE_RESIDUAL,
     SoilSimulation.WALK_SKIPPED_S,
     SoilSimulation.WALK_RETRIES,
+    SoilSimulation.WEATHER_STALL,
+    SoilSimulation.TICK_FAILURES,
 )

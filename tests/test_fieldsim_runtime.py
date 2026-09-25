@@ -127,11 +127,11 @@ class _FlakyRecorder(Recorder):
         super().step(result)
 
 
-def _setup(planner=True) -> FieldSetup:
+def _setup(planner=True, intake_delay="0min") -> FieldSetup:
     soil = SoilConfig.from_dict({"mesh": {}})
     soil.probe_specs = (_Probe("soil_30cm"),)
     return FieldSetup(
-        field=FieldConfig.from_dict({"interval": 360, "intake_delay": "0min"}),
+        field=FieldConfig.from_dict({"interval": 360, "intake_delay": intake_delay}),
         soil=soil,
         shading=None,
         planner=PlannerConfig.from_dict({"horizon": "6h"}) if planner else None,
@@ -285,18 +285,72 @@ def test_restore_is_applied_on_the_next_tick():
     assert [s.state.at.hour for s in rec.steps] == [21, 22]
 
 
-def test_restore_older_than_the_frontier_is_dropped(caplog):
+@pytest.mark.parametrize("hour", [8, 12], ids=["older", "at-the-frontier"])
+def test_restore_not_newer_than_the_frontier_is_dropped(caplog, hour):
     setup = _setup(planner=False)
     rec = Recorder()
     runner = _runner(setup, {InputKey.WEATHER: _weather("2026-09-20", "2026-09-21")}, rec)
     runner.run_tick(dt.datetime(2026, 9, 20, 12, tzinfo=UTC))
-    runner.restore(_state_at(dt.datetime(2026, 9, 20, 8, tzinfo=UTC)))
+    runner.restore(_state_at(dt.datetime(2026, 9, 20, hour, tzinfo=UTC)))
     rec.steps.clear()
 
     with caplog.at_level(logging.INFO, logger=RUNNER_LOGGER):
         assert runner.run_tick(dt.datetime(2026, 9, 20, 13, tzinfo=UTC)) is True
     assert [s.state.at.hour for s in rec.steps] == [13]
     assert sum("not newer than the frontier" in r.message for r in caplog.records) == 1
+
+
+def test_only_the_newest_queued_restore_is_applied():
+    """Two blobs arrive between ticks (the listener fires per read); the tick
+    resumes from the newest, never replays the superseded one."""
+    setup = _setup(planner=False)
+    rec = Recorder()
+    runner = _runner(setup, {InputKey.WEATHER: _weather("2026-09-20", "2026-09-21")}, rec)
+    runner.run_tick(dt.datetime(2026, 9, 20, 12, tzinfo=UTC))
+    runner.restore(_state_at(dt.datetime(2026, 9, 20, 16, tzinfo=UTC)))
+    runner.restore(_state_at(dt.datetime(2026, 9, 20, 20, tzinfo=UTC)))
+    rec.steps.clear()
+
+    assert runner.run_tick(dt.datetime(2026, 9, 20, 22, tzinfo=UTC)) is True
+    assert [s.state.at.hour for s in rec.steps] == [21, 22]
+
+
+def test_intake_delay_holds_the_frontier_back():
+    """Every tick advances only to ``now - intake_delay``, so a source that
+    back-fills its latest rows is never overtaken."""
+    setup = _setup(planner=False, intake_delay="30min")
+    rec = Recorder()
+    runner = _runner(setup, {InputKey.WEATHER: _weather("2026-09-20", "2026-09-21")}, rec)
+
+    assert runner.run_tick(dt.datetime(2026, 9, 20, 12, tzinfo=UTC)) is True
+    assert rec.steps[-1].state.at == dt.datetime(2026, 9, 20, 11, tzinfo=UTC)
+
+
+def test_a_noop_tick_does_not_count_as_a_weather_stall():
+    """The frontier has caught up to the cutoff: no chunk is read, so the
+    stall tally must stay where it was."""
+    setup = _setup(planner=False)
+    runner = _runner(setup, {InputKey.WEATHER: _weather("2026-09-20", "2026-09-21")}, Recorder())
+    now = dt.datetime(2026, 9, 20, 12, tzinfo=UTC)
+
+    assert runner.run_tick(now) is True
+    assert runner.run_tick(now) is False
+    assert runner.weather_stall_ticks == 0.0
+
+
+def test_every_stalled_tick_warns_and_the_crossing_errors_once(caplog):
+    """A dead weather feed from a cold start: one WARNING per stalled tick and a
+    single ERROR at the crossing, never a raise."""
+    setup = _setup(planner=False)
+    runner = _runner(setup, {}, Recorder())
+
+    with caplog.at_level(logging.WARNING, logger=RUNNER_LOGGER):
+        for hour in (10, 11, 12, 13):
+            assert runner.run_tick(dt.datetime(2026, 9, 20, hour, tzinfo=UTC)) is False
+
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 4
+    assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 1
+    assert runner.weather_stall_ticks == 4.0
 
 
 def test_stall_and_failure_tallies_reach_the_diagnostics():

@@ -24,6 +24,8 @@ from .state import ChainResult, Forcing
 
 logger = logging.getLogger(__name__)
 
+STRIP_FLUX_WARN_MM_H = 500.0
+
 _LAI_BY_TYPE: dict[str, list[float]] = {
     "fao": [3.0] * 12,
     "grass": [0.2, 0.2, 0.2, 0.3, 0.6, 0.8, 0.9, 1.2, 1.4, 1.2, 0.8, 0.6],
@@ -102,6 +104,7 @@ class WeatherChain:
         self._top_segment_names = tuple(top_segment_names)
         self._segment_face_length = dict(segment_face_length or {})
         self._last_plot: Optional[pd.Timestamp] = None
+        self._strip_flux_warned = False
         self._vegetation_placeholder_warned = False
         self._weather_default_warned: set[str] = set()
 
@@ -214,6 +217,23 @@ class WeatherChain:
             )
         return seg_props
 
+    def _warn_absurd_strip_flux(self, flow_m3s: float) -> None:
+        """Warn once when the strip flux is far beyond drip rates (a unit or length error)."""
+        watering_width = self.setup.soil.mesh.watering_width
+        if self._strip_flux_warned or flow_m3s <= 0.0 or watering_width <= 0.0:
+            return
+        strip_mm_h = flow_m3s / watering_width * 3.6e6
+        if strip_mm_h > STRIP_FLUX_WARN_MM_H:
+            self._strip_flux_warned = True
+            logger.warning(
+                "irrigation strip flux %.0f mm/h exceeds %.0f mm/h. Check the irrigation_flow values "
+                "(must be true l/min, whole-field total) and total_drip_line_length_m "
+                "(%.1f m; must be n_rows * row_length).",
+                strip_mm_h,
+                STRIP_FLUX_WARN_MM_H,
+                self.setup.soil.total_drip_line_length_m,
+            )
+
     def _forcings(
         self,
         weather: pd.DataFrame,
@@ -238,12 +258,14 @@ class WeatherChain:
             dt_s = first_dt_s if previous is None else (ts - previous).total_seconds()
             previous = ts
             seg_evap, seg_transp = segment_flux_dicts(seg_et, ts)
+            flow_m3s = flow_m3s_per_m(float(irrigation.loc[ts]), total_drip_line_length_m)
+            self._warn_absurd_strip_flux(flow_m3s)
             forcings.append(
                 Forcing(
                     at=ts.to_pydatetime(),
                     dt_s=dt_s,
                     rain_flux=rain_flux(weather, ts, dt_s),
-                    flow_m3s=flow_m3s_per_m(float(irrigation.loc[ts]), total_drip_line_length_m),
+                    flow_m3s=flow_m3s,
                     seg_evap=seg_evap,
                     seg_transp=seg_transp,
                 )

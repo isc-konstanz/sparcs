@@ -32,7 +32,6 @@ from sparcs.components.agriculture.fieldsim.core.pde import (  # noqa: E402
     SolveResult,
     ensure_mesh,
 )
-from sparcs.components.agriculture.simulation.soil_predictor import SoilPredictor  # noqa: E402
 
 WATERING = "WateringTopSegment"
 
@@ -221,33 +220,6 @@ def test_state_blob_roundtrip_and_pre_pond_compat(tmp_path):
     fresh = _build_core(tmp_path)
     fresh.load_state_blob(old_blob)
     assert fresh.surface_h[WATERING] == 0.0
-
-
-def test_predict_state_blob_roundtrips_through_encode_state_and_preserves_ponds(tmp_path):
-    """B3: ``soil_predictor.py``'s ``_maybe_snapshot`` captures
-    ``self._pde.save_state_blob()`` bytes for the state sink, and
-    ``_publish_results`` runs that value through ``SoilPredictor._encode_state``
-    (now a passthrough) before publishing to the ``predict_state`` channel --
-    exercise that exact composition directly rather than re-deriving it.
-
-    Pre-fix, ``_encode_state`` wrote ``np.savez(buf, rel_sat=rel_sat)`` from a
-    bare rel_sat array; feeding it a ``save_state_blob()`` blob instead -- as
-    this composition now does -- produced a 0-d byte-string array under the
-    ``rel_sat`` key, which ``load_state_blob`` rejects with a shape-mismatch
-    ``ValueError``. This pins that the published ``predict_state`` bytes are
-    the real ``save_state_blob()`` output, unmodified, and round-trip through
-    ``load_state_blob`` with the pond intact -- the pond ``snapshot()``/
-    ``set_state`` would otherwise drop."""
-    core = _build_core(tmp_path)
-    core.walk_window(rates=_irrigation(EXTREME_FLOW), window_s=120.0)
-    assert core.surface_h[WATERING] > 0.0
-
-    predict_state_blob = SoilPredictor._encode_state(core.save_state_blob())
-
-    fresh = _build_core(tmp_path)
-    fresh.load_state_blob(predict_state_blob)
-    assert fresh.surface_h == core.surface_h
-    np.testing.assert_allclose(np.asarray(fresh.rel_sat.value), np.asarray(core.rel_sat.value))
 
 
 def test_load_state_blob_legacy_rel_sat_only_blob_falls_back(tmp_path):

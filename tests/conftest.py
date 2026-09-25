@@ -2,16 +2,11 @@
 """sparcs.tests.conftest
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-Shared fixtures for the solver-backed predictor tests: the standard
-small-mesh ``SoilPDECore`` recipe and the bare-PDE ``SoilPredictor``
-factory that ``test_soil_predictor_ladder_rollout.py`` and
-``test_soil_predictor_zero_window.py`` previously copy-pasted.
+Shared fixtures for the solver-backed fieldsim tests: the standard
+small-mesh ``SoilPDECore`` recipe, a watering-strip probe, and the bare
+``RolloutEngine`` factory the ladder/zero-window roll-out pins share.
 
-Deliberately minimal: the other ``object.__new__`` helpers --
-predict_wiring's stub-collaborator factory, the gate/bare/equivalence
-predictors -- are each file's pin mechanism and stay local to their files.
-
-Heavy imports (FiPy via ``_soil``) happen inside the fixtures, not at
+Heavy imports (FiPy via ``core.pde``) happen inside the fixtures, not at
 module level, so collecting or running the fast tests stays light.
 """
 
@@ -96,26 +91,19 @@ def strip_probe_factory():
 
 
 @pytest.fixture
-def bare_pde_predictor():
-    """Bare SoilPredictor exposing only what the roll-out mechanics touch --
-    same ``object.__new__`` pattern as
-    ``test_soil_predictor_scheduling_gate.py``'s ``_make_gate_only_predictor``.
-    Callers assign ``_windows``/``_window_durations`` after construction."""
-    from sparcs.components.agriculture.simulation.soil_predictor import SoilPredictor
+def rollout_engine_factory():
+    """Bare ``RolloutEngine`` over a core/probe pair, carrying only the loose
+    fields the roll-out methods read."""
+    from sparcs.components.agriculture.fieldsim.core.rollout import RolloutEngine
 
-    def make_predictor(
+    def make_engine(
         core,
         probes,
         flow_m3s: float,
         grid_mode: str = "fill_order",
-        name: str = "bare_pde_predictor",
-    ) -> SoilPredictor:
-        predictor = object.__new__(SoilPredictor)
-        predictor._name = name
-        predictor._pde = core
-        predictor._probes = probes
-        predictor._flow_m3s = flow_m3s
-        predictor._grid_mode = grid_mode
-        return predictor
+        name: str = "rollout_engine",
+        **fields,
+    ) -> RolloutEngine:
+        return RolloutEngine(pde=core, probes=probes, flow_m3s=flow_m3s, grid_mode=grid_mode, name=name, **fields)
 
-    return make_predictor
+    return make_engine

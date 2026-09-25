@@ -26,8 +26,7 @@ single shared pair cannot carry N different probes' soil_ids at once. This
 spike's simplified single-probe/no-surrogate schema below still proves the
 core duplicate-timestamp composite-PK mechanism (the part genuinely gated on
 a real DB); the multi-probe surrogate-attribute grouping itself is unit-tested
-without a DB in ``test_soil_predictor_trajectory_table.py`` /
-``test_soil_predictor_recommendation_pk.py``.
+without a DB in ``test_fieldsim_forecast_tables.py``.
 
 There is NO local MariaDB/MySQL server available in this environment (see
 project memory: no local DB server), and the lories SQL connector's own

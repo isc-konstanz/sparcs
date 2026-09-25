@@ -5,9 +5,7 @@
 Unit 1.3: DripConfig -- the single parse of [soil_simulation.drip] (nozzle_count
 x nozzle_flow_lph -> design_flow_lpm), and the explicit flag
 FieldSimulation._validate_irrigation_input gates the state-driven fallback feed
-on. SoilPredictor's [soil_predictor.drip] per-key override against an
-already-resolved DripConfig is tested in test_soil_predictor_flow_schedule.py
-(SoilPredictor._resolve_drip_layout).
+on. The [soil_predictor.drip] per-key override is tested in test_fieldsim_config.py.
 """
 
 from typing import Optional

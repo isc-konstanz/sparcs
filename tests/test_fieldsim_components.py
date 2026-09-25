@@ -384,6 +384,25 @@ def test_channel_outputs_step_writes_diagnostics_probes_and_anchor():
     assert soil_ns.data["anchor"].calls == [(ts, 0.07)]
 
 
+def test_channel_outputs_step_writes_the_stall_and_failure_tallies():
+    """The runner's per-tick tallies ride the row's diagnostics, so the row a
+    healing tick commits carries the count that preceded it."""
+    soil_ns = _NS(["weather_stall", "tick_failures"])
+    field = SimpleNamespace(simulation=SimpleNamespace(assimilator=None))
+    outputs = components.ChannelOutputs(field, shading=None, et=None, soil=soil_ns, predictor=None)
+
+    ts = dt.datetime(2026, 6, 21, 9, tzinfo=UTC)
+    outputs.step(
+        StepResult(
+            state=SoilState(se=np.array([0.5]), se_old=np.array([0.5]), surface_h={}, at=ts),
+            diagnostics={"weather_stall": 3.0, "tick_failures": 2.0},
+        )
+    )
+
+    assert soil_ns.data["weather_stall"].calls == [(ts, 3.0)]
+    assert soil_ns.data["tick_failures"].calls == [(ts, 2.0)]
+
+
 def test_channel_outputs_save_state_writes_simulation_state():
     soil_ns = _NS(["simulation_state"])
     outputs = components.ChannelOutputs(SimpleNamespace(), shading=None, et=None, soil=soil_ns, predictor=None)

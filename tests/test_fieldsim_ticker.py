@@ -8,6 +8,7 @@ raises. Every test drives ``_on_slot`` directly; no thread is started.
 """
 
 import datetime as dt
+import logging
 
 import pandas as pd
 import pytz
@@ -15,6 +16,8 @@ from lories.scheduler import TickScheduler
 from sparcs.components.agriculture.fieldsim import components
 from sparcs.components.agriculture.fieldsim.core.config import FieldConfig, FieldSetup, SoilConfig
 from sparcs.components.agriculture.fieldsim.runtime import Ticker
+
+SCHEDULER_LOGGER = "sparcs.components.agriculture.fieldsim.runtime.scheduler"
 
 
 def _setup(interval: int = 30, offset: int = 10) -> FieldSetup:
@@ -78,6 +81,21 @@ def test_ticker_hands_the_pre_tick_failure_tally_to_the_runner():
 
     assert runner.seen_failures == [0, 1, 2]
     assert runner.tick_failures == 2
+
+
+def test_ticker_failure_log_carries_the_consecutive_count(caplog):
+    """A one-off transient and a deterministic every-tick crash must be
+    distinguishable in the log, not two identical tracebacks."""
+    ticker = Ticker(_setup(), _StubRunner(failures=2), name="field")
+
+    with caplog.at_level(logging.ERROR, logger=SCHEDULER_LOGGER):
+        ticker._on_slot()
+        ticker._on_slot()
+
+    failures = [r for r in caplog.records if "tick failed" in r.getMessage()]
+    assert [r.levelno for r in failures] == [logging.ERROR, logging.ERROR]
+    assert "(1 consecutive)" in failures[0].getMessage()
+    assert "(2 consecutive)" in failures[1].getMessage()
 
 
 def test_ticker_stop_raises_the_cancel_signal_run_tick_reads():
