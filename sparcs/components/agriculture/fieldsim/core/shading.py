@@ -8,57 +8,70 @@ shade factors out. This is the pvfactors part of today's ``ground_shading.py``
 (the numpy-2 compat patch, ``_PVSetup``, the ground report and combine
 helpers, the horizontal / trackable / as-is setup builders) with every
 ``self.data`` call and the progress figure removed. Publishing goes through
-``FieldIO.publish_chain``; rendering lives in ``plots``.
+``Outputs.chain``; rendering lives in ``plots``.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Sequence
 
 import pandas as pd
+from lories.core import ConfigurationError
+from lories.core.configs.configurations import Configurations
+from lories.core.configs.parameters import Parameter, ParameterGroup, SelectParameter
 
-MODE_FREE_FIELD = "free_field"
-MODE_FIXED = "fixed"
-MODE_TRACKED = "tracked"
+from .config import Config
+
+MODE_AS_IS = "as_is"  # fixed-tilt rows as configured; supports mirrored
+MODE_HORIZONTAL = "horizontal"  # row geometry forced flat (surface_tilt = 0)
+MODE_TRACKABLE = "trackable"  # single-axis tracker via pvlib.tracking.singleaxis
+MODE_FREE_FIELD = "free_field"  # no PV array; open-sky reference baseline
+MODES = (MODE_AS_IS, MODE_HORIZONTAL, MODE_TRACKABLE, MODE_FREE_FIELD)
 
 
-@dataclass(frozen=True)
-class TrackerConfig:
-    axis_azimuth: float
-    max_angle: float
-    backtrack: bool = True
+class ShadingConfig(Config):
+    """``[ground_shading]`` plus the PV geometry it is evaluated against.
 
-
-@dataclass(frozen=True)
-class ShadingConfig:
-    """``[ground_shading]`` block plus the PV geometry it is evaluated against.
-
-    ``segment_ranges`` maps soil-mesh top-segment names to x-ranges in
-    pvfactors coordinates; None means no mesh is wired and factors are
-    reported per bay only.
+    ``bay_width``, ``pv_rows`` and ``segment_ranges`` are derived by the
+    adapter from the field config, the PV system and the soil mesh; they are
+    attributes, not config keys.
     """
 
-    mode: str = MODE_FREE_FIELD
-    albedo: float = 0.2
-    surface_azimuth: float = 180.0
-    surface_tilt: float = 0.0
-    mirrored: bool = False
+    _CONFIGS_ALLOWED_KEYS = Config._CONFIGS_ALLOWED_KEYS | {"plot"}
+
+    mode = SelectParameter(choices=list(MODES), default=MODE_AS_IS, desc="as_is, horizontal, trackable or free_field")
+    albedo = Parameter(type=float, default=0.2, min=0.0, max=1.0, desc="Ground albedo")
+    surface_azimuth = Parameter(type=float, default=180.0, min=0.0, max=360.0, desc="PV surface azimuth (deg)")
+    surface_tilt = Parameter(type=float, default=0.0, min=0.0, max=90.0, desc="PV surface tilt (deg)")
+    mirrored = Parameter(type=bool, default=False, desc="Mirror the row arrangement about the bay centre")
+    axis_azimuth = Parameter(type=float, default=100.0, min=0.0, max=360.0, desc="Row-axis bearing (deg)")
+    tracker = ParameterGroup(
+        key="tracker",
+        desc="[tracker] single-axis tracking geometry, required for mode = trackable",
+        children=[
+            Parameter(key="axis_azimuth", type=float, default=180.0, min=0.0, max=360.0, desc="Axis azimuth (deg)"),
+            Parameter(key="max_angle", type=float, default=60.0, min=0.0, max=90.0, desc="Maximum rotation (deg)"),
+            Parameter(key="backtrack", type=bool, default=True, desc="Backtrack to avoid row-to-row shading"),
+        ],
+    )
+
+    # derived, set by the adapter
     bay_width: float = 3.5
-    tracker: Optional[TrackerConfig] = None
-    pv_rows: Sequence[Mapping[str, float]] = ()  # row geometry from the PV system
+    pv_rows: Sequence[Mapping[str, float]] = ()
     segment_ranges: Optional[Mapping[str, tuple[float, float]]] = None
 
-    @classmethod
-    def from_mapping(cls, block: Mapping[str, Any], *, pv_geometry: Any, bay_width: float) -> ShadingConfig:
-        """Today ``GroundShading._configure_geometry`` + ``_resolve_segment_ranges``."""
-        raise NotImplementedError
+    def _on_configure(self, configs: Configurations) -> None:
+        if self.mode == MODE_TRACKABLE and not self.tracker:
+            raise ConfigurationError("mode = trackable requires a [tracker] section")
 
-    def __post_init__(self) -> None:
-        if self.mode not in (MODE_FREE_FIELD, MODE_FIXED, MODE_TRACKED):
-            raise ValueError(f"unknown shading mode {self.mode!r}")
-        if not 0.0 <= self.albedo <= 1.0:
-            raise ValueError("albedo must be within [0, 1]")
+    def derive(
+        self, *, bay_width: float, pv_rows: Sequence[Mapping[str, float]] = (), segment_ranges=None
+    ) -> ShadingConfig:
+        """Today ``GroundShading._configure_geometry`` + ``_resolve_segment_ranges``."""
+        self.bay_width = bay_width
+        self.pv_rows = tuple(pv_rows)
+        self.segment_ranges = segment_ranges
+        return self
 
 
 class ShadingModel:

@@ -47,7 +47,7 @@ class FieldRunner:
             if state is not None:
                 self.simulation.resume(state)
             self._resumed = True
-        frontier = self.simulation.state.at if self.simulation.state is not None else cutoff - self.config.interval
+        frontier = self.simulation.state.at if self.simulation.state is not None else cutoff - self.config.interval_td
         if frontier >= cutoff:
             return False
 

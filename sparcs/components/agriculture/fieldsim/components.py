@@ -3,18 +3,24 @@
 sparcs.components.agriculture.fieldsim.components
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The lories layer: the only module in this package that imports lories.
+The lories layer: the only module in this package that imports lories
+components and channels.
 
-``FieldSimulation`` parses the unchanged ``.d`` tree into ``FieldConfig``
-once, builds the ``Simulation``, the runner and the scheduler, owns the
-thread through activate/deactivate, and exposes the ``Snapshot`` for dash.
+``FieldSimulation`` configures the ``FieldConfig`` section from its own
+``.conf``, lets each ``.d`` child configure its own section, attaches them,
+builds the ``Simulation``, the runner and the scheduler, owns the thread
+through activate/deactivate, and exposes the ``Snapshot`` for dash.
 
 ``GroundShading``, ``Evapotranspiration``, ``SoilSimulation`` and
 ``SoilPredictor`` remain Components for one reason: channel ids and logger
 table names derive from the component id, and those are frozen. Each is a
-``ChannelNamespace``: a TYPE plus a ``CHANNELS`` spec list, registered by
-the shared ``configure``. No logic. ``ChannelInputs`` and ``ChannelOutputs``
+``ChannelNamespace``: a TYPE, a ``CHANNELS`` spec list, and the ``Config``
+class its file is validated against. ``ChannelInputs`` and ``ChannelOutputs``
 implement the two runtime ports over those channels.
+
+Every section's keys are declared once, as lories ``Parameter`` descriptors
+on the ``Config`` classes in ``core.config``; unknown keys fail the load.
+``FieldSimulation.schema()`` returns the whole tree.
 
 Not registered as a component type; the live ``simulation.FieldSimulation``
 keeps the ``field_simulation`` type. Class names are reused on purpose so the
@@ -33,11 +39,11 @@ from lories.core import Configurations
 
 from .core.assimilator import Assimilator
 from .core.chain import WeatherChain
-from .core.config import FieldConfig
+from .core.config import Config, FieldConfig, PlannerConfig, PlotConfig, SoilConfig
 from .core.engine import SoilEngine
 from .core.evapotranspiration import ETModel
 from .core.planner import IrrigationPlanner
-from .core.shading import ShadingModel
+from .core.shading import ShadingConfig, ShadingModel
 from .core.simulation import Simulation
 from .core.state import ChainResult, Plan, Snapshot, SoilState, StepResult
 from .runtime.ports import InputKey
@@ -58,13 +64,19 @@ class ChannelSpec:
 
 
 class ChannelNamespace(Component):
-    """A Component that exists to own channels under its id. Subclasses set
-    ``TYPE`` and ``CHANNELS``; registration is data, not code."""
+    """A Component that exists to own channels under its id and to validate
+    its ``.d`` file against one ``Config`` class. No logic."""
 
     CHANNELS: ClassVar[Sequence[ChannelSpec]] = ()
+    CONFIG: ClassVar[Optional[Type[Config]]] = None
+
+    config: Optional[Config] = None
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
+        if self.CONFIG is not None:
+            self.config = self.CONFIG()
+            self.config.configure(configs)  # resolves, applies defaults, rejects unknown keys
         for spec in self.CHANNELS:
             self.data.add(
                 spec.key,
@@ -75,9 +87,14 @@ class ChannelNamespace(Component):
                 logger={"enabled": spec.logged},
             )
 
+    @classmethod
+    def schema(cls) -> dict[str, Any]:
+        return cls.CONFIG.schema() if cls.CONFIG is not None else {}
+
 
 class GroundShading(ChannelNamespace):
     TYPE: str = "ground_shading"
+    CONFIG = ShadingConfig
     CHANNELS = (  # excerpt; the full list is today's GroundShading.CHANNELS + per-segment GHI
         ChannelSpec("shading_factor", float, "Ground Shading Factor", logged=True),
         ChannelSpec("shading_progress_image", bytes, "Ground Shading Progress Image", "png", "last", logged=True),
@@ -87,6 +104,7 @@ class GroundShading(ChannelNamespace):
 
 class Evapotranspiration(ChannelNamespace):
     TYPE: str = "evapotranspiration"
+    CONFIG = None  # no keys of its own today; its .d file carries only channels
     CHANNELS = (  # excerpt; today's Evapotranspiration.CHANNELS, Penman-Monteith intermediates
         ChannelSpec("net_irradiance", float, "Net Irradiance", "W/m^2"),
         ChannelSpec("aerodynamic_resistance", float, "Aerodynamic Resistance", "s/m"),
@@ -96,6 +114,7 @@ class Evapotranspiration(ChannelNamespace):
 
 class SoilSimulation(ChannelNamespace):
     TYPE: str = "soil_simulation"
+    CONFIG = SoilConfig
     CHANNELS = (  # excerpt; WATER_* / WALK_* / stall counters + per-probe channels from [probes.points.*]
         ChannelSpec("simulation_state", bytes, "Simulation State", aggregate="last", logged=True),
         ChannelSpec("water_total", float, "Total Soil Water", "m^3/m"),
@@ -105,6 +124,7 @@ class SoilSimulation(ChannelNamespace):
 
 class SoilPredictor(ChannelNamespace):
     TYPE: str = "soil_predictor"
+    CONFIG = PlannerConfig
     CHANNELS = ()  # forecast header / detail / irrigation / image are logger tables, written directly
 
 
@@ -157,20 +177,41 @@ class ChannelOutputs:
 
 
 class FieldSimulation(Component):
-    """Parse once, assemble, own the thread, expose the snapshot."""
+    """Configure own section, let children configure theirs, attach, assemble, own the thread."""
 
     TYPE: str = "field_simulation"
-    INCLUDES = [GroundShading.TYPE, Evapotranspiration.TYPE, SoilSimulation.TYPE, SoilPredictor.TYPE]
+    CHILDREN: ClassVar[Sequence[Type[ChannelNamespace]]] = (
+        GroundShading,
+        Evapotranspiration,
+        SoilSimulation,
+        SoilPredictor,
+    )
+    INCLUDES = [c.TYPE for c in CHILDREN]
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
-        self.config = FieldConfig.from_mapping(self._materialize(configs))
+        field = FieldConfig()
+        field.configure(configs)  # own keys; child sections and [plot] are allowed, not resolved here
+
         self.ground_shading = self._child(GroundShading, configs)
         self.evapotranspiration = self._child(Evapotranspiration, configs)
         self.soil = self._child(SoilSimulation, configs)
         self.predictor = self._child(SoilPredictor, configs)
-        if self.soil is None:
+        if self.soil is None or self.soil.config is None:
             raise ValueError(f"{self.id}: [soil_simulation] block is required")
+
+        plots = None
+        if configs.has_member("plot"):
+            plots = PlotConfig()
+            plots.configure(configs.get_member("plot"))
+        shading = self.ground_shading.config if self.ground_shading is not None else ShadingConfig.from_dict()
+        shading.derive(bay_width=field.bay_width)  # pv_rows / segment_ranges follow from the PV system and mesh
+        self.config = field.attach(
+            soil=self.soil.config,
+            planner=self.predictor.config if self.predictor is not None else None,
+            shading=shading,
+            plots=plots,
+        )
 
         engine = SoilEngine.build(self.config.soil)
         self.simulation = Simulation(
@@ -202,6 +243,16 @@ class FieldSimulation(Component):
         """What dash reads. Never a channel round-trip."""
         return self.simulation.snapshot()
 
+    @classmethod
+    def schema(cls) -> dict[str, Any]:
+        """The whole tree of needed and allowed keys: own section, [plot],
+        and one entry per child type. What a config editor reads."""
+        tree: dict[str, Any] = dict(FieldConfig.schema())
+        tree["plot"] = {"type": "group", "children": PlotConfig.schema()}
+        for child in cls.CHILDREN:
+            tree[child.TYPE] = {"type": "component", "children": child.schema()}
+        return tree
+
     def _child(self, cls: Type[_C], configs: Configurations) -> Optional[_C]:
         """Build one channel namespace from its ``.d`` member, if present."""
         if not configs.has_member(cls.TYPE, includes=True):
@@ -210,11 +261,5 @@ class FieldSimulation(Component):
         self.components.add(child)
         return child
 
-    @staticmethod
-    def _materialize(configs: Configurations) -> Mapping[str, Any]:
-        """Walk the known member keys with ``get_member(..., ensure_exists=True)``
-        and return a plain nested dict, so ``.d`` files declared only on disk
-        are loaded and the core never sees a ``Configurations``. The
-        ``[soil_simulation.model]`` over ``[model]`` cascade is applied here
-        with ``Component._build_defaults`` and nowhere else."""
-        raise NotImplementedError
+
+Mapping  # imported for annotations in subclasses

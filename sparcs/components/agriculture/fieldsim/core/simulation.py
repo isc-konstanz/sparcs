@@ -63,7 +63,7 @@ class Simulation:
         forcing, chain = self.chain.forcing_series(weather, irrigation_lpm)
         if tension_history and self.assimilator.enabled:
             self.assimilator.ingest(tension_history)
-        probes = self.config.soil.probes
+        probes = self.config.soil.probe_specs
         results: list[StepResult] = []
         for step in forcing:
             if self.state is None:

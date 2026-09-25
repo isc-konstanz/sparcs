@@ -44,7 +44,7 @@ class ScenarioRunner:
         inputs = FrameInputs(frames, state=initial_state)
         recorder = Recorder()
         runner = FieldRunner(self.config, self.simulation, inputs, recorder)
-        step = step or self.config.interval
+        step = step or self.config.interval_td
         now = start
         while now <= end:
             runner.run_tick(now)

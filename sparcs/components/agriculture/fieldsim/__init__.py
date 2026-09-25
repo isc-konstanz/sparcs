@@ -10,13 +10,13 @@ Three layers, one dependency direction, lories -> application -> core:
 
     core/        config, state, engine, shading, evapotranspiration, plots,
                  chain, assimilator, planner, simulation (the session and
-                 scenario API). Pure Python + FiPy. No lories, no channels,
+                 scenario API). Config sections are lories Configurators
+                 with Parameter() declarations; no channels, no components,
                  no threads, no I/O.
     runtime/     ports (Inputs / Outputs), runner, scheduler, memory
                  (FrameInputs / Recorder), scenario (ScenarioRunner)
     components   FieldSimulation, the four ChannelNamespace subclasses,
-                 ChannelInputs, ChannelOutputs: the lories layer, the only
-                 module that imports lories.
+                 ChannelInputs, ChannelOutputs: the lories layer.
 
 This package is NOT wired into ``sparcs.components.agriculture`` and registers
 no component type. It exists to be read next to the live ``simulation``
