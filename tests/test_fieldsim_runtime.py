@@ -35,10 +35,10 @@ class _Probe:
 
 class _Engine:
     def initial_state(self, at):
-        return SoilState(np.full(3, 0.5), 0.0, at)
+        return SoilState(np.full(3, 0.5), np.full(3, 0.5), {}, at)
 
     def advance(self, state, forcing, cancel=None):
-        return StepResult(SoilState(state.se * 0.99, 0.0, forcing.end), {"water": float(state.se.sum())})
+        return StepResult(SoilState(state.se * 0.99, state.se, {}, forcing.end), {"water": float(state.se.sum())})
 
     def tension_at(self, state, probe):
         return -100.0 / float(state.se[0])
@@ -62,7 +62,7 @@ class _Chain(WeatherChain):
         return [SegmentProperties("top", lai=1.0)]
 
     def _forcings(self, weather, shading, et, irrigation_lpm):
-        return [Forcing(t.to_pydatetime(), 3600.0, 0.0) for t in weather.index]
+        return [Forcing(t.to_pydatetime(), 3600.0) for t in weather.index]
 
 
 class _NoAssimilation:
@@ -120,7 +120,11 @@ def test_recorder_to_frames():
     t0 = dt.datetime(2026, 9, 20, 1, tzinfo=UTC)
     for i in range(3):
         rec.step(
-            StepResult(SoilState(np.zeros(1), 0.0, t0 + dt.timedelta(hours=i)), {"water": float(i)}, {"p": -10.0 * i})
+            StepResult(
+                SoilState(np.zeros(1), np.zeros(1), {}, t0 + dt.timedelta(hours=i)),
+                {"water": float(i)},
+                {"p": -10.0 * i},
+            )
         )
     frames = rec.to_frames()
     assert frames["diagnostics"].shape == (3, 1) and list(frames["diagnostics"]["water"]) == [0.0, 1.0, 2.0]
@@ -163,7 +167,7 @@ def test_repeated_tick_at_same_instant_is_a_noop():
 
 def test_resume_from_persisted_state_skips_history():
     setup = _setup(planner=False)
-    state = SoilState(np.full(3, 0.4), 0.0, dt.datetime(2026, 9, 20, 10, tzinfo=UTC))
+    state = SoilState(np.full(3, 0.4), np.full(3, 0.4), {}, dt.datetime(2026, 9, 20, 10, tzinfo=UTC))
     rec = Recorder()
     runner = FieldRunner(
         setup,

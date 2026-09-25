@@ -79,8 +79,11 @@ class Config(Configurator):
             raise ConfigurationError(f"{cls.__name__}: unknown configuration keys {unknown}")
         return configs
 
+    raw: Optional[Configurations] = None  # the section's own Configurations, for the legacy parsers
+
     def _at_configure(self, configs: Configurations) -> None:
         super()._at_configure(configs)
+        self.raw = configs
         for attr, cls in self._SECTIONS.items():
             key = type(self).__config_parameters__[attr]._resolve_key()
             if isinstance(configs.get(key), Mapping):
@@ -360,6 +363,11 @@ class FieldSetup:
     shading: Any  # shading.ShadingConfig; typed Any to avoid an import cycle
     planner: Optional[PlannerConfig] = None
     plots: Optional[PlotConfig] = None
+    # resolved [soil_simulation.model] over field-level [model]: a lories Configurations
+    # (or None -> PDEConfig defaults); computed once by the adapter, consumed by SoilEngine.build
+    model: Any = None
+    # lories Location of the field (validate_meteo_inputs needs it); None offline
+    location: Any = None
 
     @property
     def planner_drip(self) -> DripConfig:
