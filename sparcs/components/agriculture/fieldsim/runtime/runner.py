@@ -18,7 +18,7 @@ from typing import Iterator, Mapping
 
 import pandas as pd
 
-from ..core.config import FieldConfig
+from ..core.config import FieldSetup
 from ..core.engine import Cancel
 from ..core.simulation import Simulation
 from .ports import InputKey, Inputs, Outputs
@@ -27,13 +27,14 @@ logger = logging.getLogger(__name__)
 
 
 class FieldRunner:
-    def __init__(self, config: FieldConfig, simulation: Simulation, inputs: Inputs, outputs: Outputs) -> None:
-        self.config = config
+    def __init__(self, setup: FieldSetup, simulation: Simulation, inputs: Inputs, outputs: Outputs) -> None:
+        self.setup = setup
         self.simulation = simulation
         self.inputs = inputs
         self.outputs = outputs
         self._resumed = False
         self._last_planned: dt.date | None = None
+        self._last_plan_warned: dt.date | None = None
 
     def run_tick(self, now: dt.datetime, cancel: Cancel = None) -> bool:
         """Advance the simulation from its frontier up to ``now - intake_delay``.
@@ -41,13 +42,15 @@ class FieldRunner:
         Returns True when at least one row was processed. Stall accounting
         is the scheduler's job; it only needs this bool.
         """
-        cutoff = now - self.config.intake_delay
+        cutoff = now - self.setup.field.intake_delay
         if not self._resumed:
             state = self.inputs.load_state()
             if state is not None:
                 self.simulation.resume(state)
             self._resumed = True
-        frontier = self.simulation.state.at if self.simulation.state is not None else cutoff - self.config.interval_td
+        frontier = (
+            self.simulation.state.at if self.simulation.state is not None else cutoff - self.setup.field.interval_td
+        )
         if frontier >= cutoff:
             return False
 
@@ -69,10 +72,12 @@ class FieldRunner:
                 return processed
 
         if processed and self._planner_due(now):
-            forecast = self.inputs.read(InputKey.FORECAST, now, now + self.config.planner.horizon)
+            forecast = self.inputs.read(InputKey.FORECAST, now, now + self.setup.planner.horizon)
             plan = self.simulation.plan(forecast)
             if plan is None:
-                logger.warning("planner skipped: empty forecast or no state")
+                if self._last_plan_warned != now.date():  # latched once per boundary, as today
+                    logger.warning("planner skipped: empty forecast or no state")
+                    self._last_plan_warned = now.date()
             else:
                 self.outputs.plan(plan)
                 self._last_planned = now.date()
@@ -92,7 +97,7 @@ class FieldRunner:
 
     def _planner_due(self, now: dt.datetime) -> bool:
         """Daily boundary gate with dedup (today ``SoilPredictor._gate_boundary``)."""
-        return self.config.planner is not None and self._last_planned != now.date()
+        return self.setup.planner is not None and self._last_planned != now.date()
 
     @staticmethod
     def _day_chunks(start: dt.datetime, end: dt.datetime) -> Iterator[tuple[dt.datetime, dt.datetime]]:

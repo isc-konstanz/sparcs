@@ -18,7 +18,7 @@ from typing import Mapping, Optional
 
 import pandas as pd
 
-from ..core.config import FieldConfig
+from ..core.config import FieldSetup
 from ..core.simulation import Simulation
 from ..core.state import SoilState
 from .memory import FrameInputs, Recorder
@@ -27,8 +27,8 @@ from .runner import FieldRunner
 
 
 class ScenarioRunner:
-    def __init__(self, config: FieldConfig, simulation: Simulation) -> None:
-        self.config = config
+    def __init__(self, setup: FieldSetup, simulation: Simulation) -> None:
+        self.setup = setup
         self.simulation = simulation
 
     def run(
@@ -43,8 +43,8 @@ class ScenarioRunner:
         configured interval) and return everything the runner wrote."""
         inputs = FrameInputs(frames, state=initial_state)
         recorder = Recorder()
-        runner = FieldRunner(self.config, self.simulation, inputs, recorder)
-        step = step or self.config.interval_td
+        runner = FieldRunner(self.setup, self.simulation, inputs, recorder)
+        step = step or self.setup.field.interval_td
         now = start
         while now <= end:
             runner.run_tick(now)

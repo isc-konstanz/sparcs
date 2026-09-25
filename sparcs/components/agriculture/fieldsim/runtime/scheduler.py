@@ -15,7 +15,7 @@ import datetime as dt
 import logging
 import threading
 
-from ..core.config import FieldConfig
+from ..core.config import FieldSetup
 from .runner import FieldRunner
 
 logger = logging.getLogger(__name__)
@@ -25,8 +25,8 @@ FAILURE_ESCALATE_AT = 2
 
 
 class TickScheduler:
-    def __init__(self, config: FieldConfig, runner: FieldRunner) -> None:
-        self.config = config
+    def __init__(self, setup: FieldSetup, runner: FieldRunner) -> None:
+        self.setup = setup
         self.runner = runner
         self._interrupt = threading.Event()
         self._thread: threading.Thread | None = None

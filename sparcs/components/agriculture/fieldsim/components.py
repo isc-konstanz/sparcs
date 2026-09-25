@@ -7,9 +7,10 @@ The lories layer: the only module in this package that imports lories
 components and channels.
 
 ``FieldSimulation`` configures the ``FieldConfig`` section from its own
-``.conf``, lets each ``.d`` child configure its own section, attaches them,
-builds the ``Simulation``, the runner and the scheduler, owns the thread
-through activate/deactivate, and exposes the ``Snapshot`` for dash.
+``.conf``, lets each ``.d`` child configure its own section, bundles them
+into a frozen ``FieldSetup``, builds the ``Simulation``, the runner and the
+scheduler, owns the thread through activate/deactivate, and exposes the
+``Snapshot`` for dash.
 
 ``GroundShading``, ``Evapotranspiration``, ``SoilSimulation`` and
 ``SoilPredictor`` remain Components for one reason: channel ids and logger
@@ -39,7 +40,7 @@ from lories.core import Configurations
 
 from .core.assimilator import Assimilator
 from .core.chain import WeatherChain
-from .core.config import Config, FieldConfig, PlannerConfig, PlotConfig, SoilConfig
+from .core.config import Config, FieldConfig, FieldSetup, PlannerConfig, PlotConfig, SoilConfig
 from .core.engine import SoilEngine
 from .core.evapotranspiration import ETModel
 from .core.planner import IrrigationPlanner
@@ -177,7 +178,7 @@ class ChannelOutputs:
 
 
 class FieldSimulation(Component):
-    """Configure own section, let children configure theirs, attach, assemble, own the thread."""
+    """Configure own section, let children configure theirs, bundle, assemble, own the thread."""
 
     TYPE: str = "field_simulation"
     CHILDREN: ClassVar[Sequence[Type[ChannelNamespace]]] = (
@@ -204,30 +205,33 @@ class FieldSimulation(Component):
         if configs.has_member("plot"):
             plots = PlotConfig()
             plots.configure(configs.get_member("plot"))
+        soil: SoilConfig = self.soil.config
+        soil.mesh.derive(bay_width=field.bay_width)
         shading = self.ground_shading.config if self.ground_shading is not None else ShadingConfig.from_dict()
         shading.derive(bay_width=field.bay_width)  # pv_rows / segment_ranges follow from the PV system and mesh
-        self.config = field.attach(
-            soil=self.soil.config,
-            planner=self.predictor.config if self.predictor is not None else None,
+        self.setup = FieldSetup(
+            field=field,
+            soil=soil,
             shading=shading,
+            planner=self.predictor.config if self.predictor is not None else None,
             plots=plots,
         )
 
-        engine = SoilEngine.build(self.config.soil)
+        engine = SoilEngine.build(self.setup.soil)
         self.simulation = Simulation(
-            self.config,
+            self.setup,
             engine=engine,
-            chain=WeatherChain(self.config, ShadingModel(self.config.shading), ETModel(), self.config.plots),
-            assimilator=Assimilator(self.config.soil.anchor, engine),
-            planner=IrrigationPlanner(self.config.planner, engine) if self.config.planner else None,
+            chain=WeatherChain(self.setup, ShadingModel(self.setup.shading), ETModel(), self.setup.plots),
+            assimilator=Assimilator(self.setup.soil.anchor, engine),
+            planner=IrrigationPlanner(self.setup.planner, engine) if self.setup.planner else None,
         )
         self.runner = FieldRunner(
-            self.config,
+            self.setup,
             self.simulation,
             inputs=ChannelInputs(self, self.soil),
             outputs=ChannelOutputs(self.ground_shading, self.evapotranspiration, self.soil, self.predictor),
         )
-        self.scheduler = TickScheduler(self.config, self.runner)
+        self.scheduler = TickScheduler(self.setup, self.runner)
 
     def activate(self) -> None:
         super().activate()

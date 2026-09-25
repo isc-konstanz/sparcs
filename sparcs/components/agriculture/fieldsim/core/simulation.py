@@ -20,7 +20,7 @@ import pandas as pd
 
 from .assimilator import Assimilator
 from .chain import WeatherChain
-from .config import FieldConfig
+from .config import FieldSetup
 from .engine import Cancel, SoilEngine
 from .planner import IrrigationPlanner
 from .state import ChainResult, Plan, Snapshot, SoilState, StepResult
@@ -31,13 +31,13 @@ logger = logging.getLogger(__name__)
 class Simulation:
     def __init__(
         self,
-        config: FieldConfig,
+        setup: FieldSetup,
         engine: SoilEngine,
         chain: WeatherChain,
         assimilator: Assimilator,
         planner: Optional[IrrigationPlanner] = None,
     ) -> None:
-        self.config = config
+        self.setup = setup
         self.engine = engine
         self.chain = chain
         self.assimilator = assimilator
@@ -63,7 +63,7 @@ class Simulation:
         forcing, chain = self.chain.forcing_series(weather, irrigation_lpm)
         if tension_history and self.assimilator.enabled:
             self.assimilator.ingest(tension_history)
-        probes = self.config.soil.probe_specs
+        probes = self.setup.soil.probe_specs
         results: list[StepResult] = []
         for step in forcing:
             if self.state is None:

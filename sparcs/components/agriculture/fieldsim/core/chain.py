@@ -16,7 +16,7 @@ from typing import Optional, Sequence
 
 import pandas as pd
 
-from .config import FieldConfig
+from .config import FieldSetup
 from .evapotranspiration import ETModel, SegmentProperties
 from .plots import PlotConfig, render_due, render_shading_png
 from .shading import ShadingModel
@@ -26,12 +26,12 @@ from .state import ChainResult, Forcing
 class WeatherChain:
     def __init__(
         self,
-        config: FieldConfig,
+        setup: FieldSetup,
         shading: ShadingModel,
         et: ETModel,
         plots: Optional[PlotConfig] = None,
     ) -> None:
-        self.config = config
+        self.setup = setup
         self.shading = shading
         self.et = et
         self.plots = plots
@@ -57,7 +57,7 @@ class WeatherChain:
         raise NotImplementedError
 
     def _segments(self, weather: pd.DataFrame, shading: pd.DataFrame) -> Sequence[SegmentProperties]:
-        """One ``SegmentProperties`` per soil top segment from ``config``
+        """One ``SegmentProperties`` per soil top segment from ``setup.field``
         (lai_type, plant_height, bare_*) and the shading factors
         (today ``_populate_vegetation`` + ``_build_segments``)."""
         raise NotImplementedError
