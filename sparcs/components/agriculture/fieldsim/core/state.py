@@ -5,7 +5,8 @@ sparcs.components.agriculture.fieldsim.core.state
 
 Value objects that cross the seams: ``SoilState`` in and out of the engine,
 ``Forcing`` and ``ChainResult`` out of the weather chain, ``StepResult`` out of
-one advance, ``Plan`` out of the planner. All immutable, all FiPy-free, all
+one advance, ``Plan`` out of the planner, ``Snapshot`` as the read model the
+``Simulation`` keeps for dash and tests. All immutable, all FiPy-free, all
 picklable.
 """
 
@@ -71,10 +72,12 @@ class ChainResult:
 
 @dataclass(frozen=True)
 class StepResult:
-    """Outcome of ``SoilEngine.advance`` for one ``Forcing``."""
+    """Outcome of ``SoilEngine.advance`` for one ``Forcing``, completed by
+    ``Simulation.run`` with the assimilated state and the probe tensions."""
 
     state: SoilState
     diagnostics: Mapping[str, float]  # water_total, delta, walk_substeps, skipped_s, ...
+    probe_tension: Mapping[str, float] = field(default_factory=dict)  # signed negative hPa
     cancelled: bool = False
 
 
@@ -89,3 +92,18 @@ class Plan:
     detail: pd.DataFrame
     irrigation: pd.DataFrame
     image: pd.DataFrame | None = None
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    """What the ``Simulation`` knows right now. Dash and tests read this;
+    nothing reads back through the output channels."""
+
+    state: SoilState | None
+    last_chain: ChainResult | None = None
+    last_step: StepResult | None = None
+    last_plan: Plan | None = None
+
+    @property
+    def frontier(self) -> dt.datetime | None:
+        return self.state.at if self.state is not None else None

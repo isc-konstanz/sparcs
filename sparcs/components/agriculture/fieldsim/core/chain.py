@@ -37,7 +37,7 @@ class WeatherChain:
         self.plots = plots
         self._last_plot: Optional[pd.Timestamp] = None
 
-    def forcing_series(self, weather: pd.DataFrame, irrigation_lpm: pd.Series) -> tuple[Sequence[Forcing], ChainResult]:
+    def forcing_series(self, weather: pd.DataFrame, irrigation_lpm: pd.Series) -> tuple[Sequence[Forcing], ChainResult]:  # noqa: E501
         weather = self._prepare_weather(weather)
         shading = self.shading.evaluate(weather)
         segments = self._segments(weather, shading)

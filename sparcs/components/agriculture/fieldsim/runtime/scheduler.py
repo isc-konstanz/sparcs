@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-sparcs.components.agriculture.fieldsim.base.scheduler
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+sparcs.components.agriculture.fieldsim.runtime.scheduler
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The tick thread and nothing else: slot alignment, intake delay, stall and
-failure counters, watchdog, clean stop. Calls ``FieldRunner.run_tick`` and
-reads its bool. Today this is interleaved with the tick logic in
-``FieldSimulation._tick_loop`` / ``_tick`` / ``_on_tick``.
+The tick thread and nothing else: slot alignment, stall and failure
+counters, clean stop. Calls ``FieldRunner.run_tick`` with its interrupt as
+the cancel callable and reads the bool. Today this is interleaved with the
+tick logic in ``FieldSimulation._tick_loop`` / ``_tick`` / ``_on_tick``.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ class TickScheduler:
 
     def _tick(self, now: dt.datetime) -> None:
         try:
-            processed = self.runner.run_tick(now)
+            processed = self.runner.run_tick(now, cancel=self._interrupt.is_set)
         except Exception:
             self.failed_ticks += 1
             log = logger.error if self.failed_ticks >= FAILURE_ESCALATE_AT else logger.warning

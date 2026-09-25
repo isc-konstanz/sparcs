@@ -15,10 +15,13 @@ roll candidates off a snapshot without the engine knowing.
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+import datetime as dt
+from typing import Any, Callable, Mapping, Optional
 
 from .config import SoilConfig
 from .state import Forcing, SoilState, StepResult
+
+Cancel = Optional[Callable[[], bool]]
 
 
 class SoilEngine:
@@ -35,15 +38,16 @@ class SoilEngine:
         pickled config."""
         raise NotImplementedError
 
-    def initial_state(self, at: Any) -> SoilState:
+    def initial_state(self, at: dt.datetime) -> SoilState:
         """Hydrostatic initial condition from ``config.mesh`` / ``config.pde``
         (today ``_hydrostatic_ic_array``)."""
         raise NotImplementedError
 
-    def advance(self, state: SoilState, forcing: Forcing, *, cancel: Any = None) -> StepResult:
+    def advance(self, state: SoilState, forcing: Forcing, *, cancel: Cancel = None) -> StepResult:
         """Walk one forcing window: apply source, solve with sub-stepping and
         rollback (today ``SoilPDECore.walk_window``), commit ponding, return
-        the new state plus mass-balance diagnostics. Never publishes."""
+        the new state plus mass-balance diagnostics. ``cancel`` is polled
+        between substeps; a cancelled result carries the input state."""
         raise NotImplementedError
 
     def tension_at(self, state: SoilState, probe: Any) -> float:
