@@ -3,10 +3,10 @@
 sparcs.components.agriculture.fieldsim.runtime.scheduler
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The tick thread and nothing else: slot alignment, stall and failure
-counters, clean stop. Calls ``FieldRunner.run_tick`` with its interrupt as
-the cancel callable and reads the bool. Today this is interleaved with the
-tick logic in ``FieldSimulation._tick_loop`` / ``_tick`` / ``_on_tick``.
+The tick thread, delegated to lories. ``Ticker`` wraps
+``lories.scheduler.TickScheduler`` and adds only what is field-specific: the
+cancel signal handed to ``FieldRunner.run_tick``, the consecutive-failure
+tally mirrored down to the runner, and the slot-overrun warning.
 """
 
 from __future__ import annotations
@@ -17,71 +17,96 @@ import threading
 from typing import Any
 
 import pandas as pd
+import pytz
+from lories.scheduler import TickScheduler
 
 from ..core.config import FieldSetup
 from .runner import FieldRunner
 
 logger = logging.getLogger(__name__)
 
-STALL_ERROR_TICKS = 3
-FAILURE_ESCALATE_AT = 2
+
+def _as_timezone(tz: Any) -> pytz.BaseTzInfo:
+    """Normalise ``None``, a zone name or any ``tzinfo`` into a pytz zone."""
+    if tz is None:
+        return pytz.UTC
+    if isinstance(tz, pytz.BaseTzInfo):
+        return tz
+    if isinstance(tz, dt.tzinfo):
+        name = getattr(tz, "zone", None) or getattr(tz, "key", None) or str(tz)
+    else:
+        name = str(tz)
+    if name.upper() == "UTC":
+        return pytz.UTC
+    return pytz.timezone(name)
 
 
-class TickScheduler:
-    def __init__(self, setup: FieldSetup, runner: FieldRunner, tz: Any = dt.timezone.utc) -> None:
+class Ticker:
+    """Run ``FieldRunner.run_tick`` on the field's aligned cadence.
+
+    lories aligns slots on epoch seconds, which lands on the same instant as
+    the live ``slot_ceil`` (a floor in the site timezone) for every interval
+    that divides 60 minutes; a longer, non-dividing interval would drift
+    against the site's wall clock.
+    """
+
+    def __init__(
+        self,
+        setup: FieldSetup,
+        runner: FieldRunner,
+        *,
+        tz: Any = pytz.UTC,
+        name: str = "fieldsim",
+    ) -> None:
         self.setup = setup
         self.runner = runner
-        self.tz = tz  # the field's timezone: slots align to local wall-clock, as today
-        self._interrupt = threading.Event()
-        self._thread: threading.Thread | None = None
-        self.stalled_ticks = 0
+        self.timezone = _as_timezone(tz)
         self.failed_ticks = 0
+        self._name = name
+        self._interval = pd.Timedelta(minutes=setup.field.interval)
+        # Not lories' interrupt: run_tick reads this one, so a stop lands
+        # inside the running tick, not only on the next slot.
+        self._cancel = threading.Event()
+        self._scheduler = TickScheduler(
+            self._on_slot,
+            self._interval,
+            pd.Timedelta(minutes=setup.field.offset),
+            name=name,
+            timezone=self.timezone,
+        )
+
+    @property
+    def scheduler(self) -> TickScheduler:
+        """The wrapped lories scheduler."""
+        return self._scheduler
 
     def start(self) -> None:
-        self._interrupt.clear()
-        self._thread = threading.Thread(target=self._loop, name="fieldsim-tick", daemon=True)
-        self._thread.start()
+        self._cancel.clear()
+        self._scheduler.start()
 
-    def stop(self, timeout_s: float = 30.0) -> None:
-        self._interrupt.set()
-        if self._thread is not None:
-            self._thread.join(timeout_s)
+    def stop(self) -> None:
+        self._cancel.set()
+        self._scheduler.stop()
 
-    def _loop(self) -> None:
-        while not self._interrupt.is_set():
-            self._interrupt.wait(self._seconds_to_next_slot())
-            if self._interrupt.is_set():
-                break
-            self._tick(dt.datetime.now(dt.timezone.utc))
-
-    def _tick(self, now: dt.datetime) -> None:
+    def _on_slot(self) -> None:
+        now = pd.Timestamp.now(tz=self.timezone)
+        # Pre-tick tally: a failed tick commits no row, so the rows this one
+        # commits carry the count of the failures that preceded them.
+        self.runner.tick_failures = self.failed_ticks
         try:
-            processed = self.runner.run_tick(now, cancel=self._interrupt.is_set)
+            self.runner.run_tick(now, cancel=self._cancel.is_set)
         except Exception:
             self.failed_ticks += 1
-            log = logger.error if self.failed_ticks >= FAILURE_ESCALATE_AT else logger.warning
-            log("tick failed (%d consecutive)", self.failed_ticks, exc_info=True)
-            return
-        self.failed_ticks = 0
-        if processed:
-            self.stalled_ticks = 0
-            return
-        self.stalled_ticks += 1
-        log = logger.error if self.stalled_ticks == STALL_ERROR_TICKS else logger.warning
-        log("simulation stalled for %d ticks", self.stalled_ticks)
+            # Swallowed: lories' _run_slot would log a second traceback.
+            logger.exception("%s: tick failed (%d consecutive).", self._name, self.failed_ticks)
+        else:
+            self.failed_ticks = 0
+        self._log_overrun(now)
 
-    def next_slot(self, now: dt.datetime) -> pd.Timestamp:
-        """First aligned slot strictly after ``now``: absolute alignment
-        (floor to ``interval`` in ``tz``, plus ``offset``), so restarts never
-        shift the schedule. Same expression as the live ``_schedule.slot_ceil``."""
-        field = self.setup.field
-        ts = pd.Timestamp(now)
-        ts = ts.tz_localize(self.tz) if ts.tzinfo is None else ts.tz_convert(self.tz)
-        slot = ts.floor(f"{field.interval}min") + pd.Timedelta(minutes=field.offset)
-        while slot <= ts:
-            slot += pd.Timedelta(minutes=field.interval)
-        return slot
-
-    def _seconds_to_next_slot(self) -> float:
-        now = dt.datetime.now(dt.timezone.utc)
-        return max(0.0, (self.next_slot(now) - pd.Timestamp(now)).total_seconds())
+    def _log_overrun(self, start: pd.Timestamp) -> None:
+        """WARN for a tick whose duration crossed one or more slot boundaries."""
+        duration = pd.Timestamp.now(tz=self.timezone) - start
+        skipped = int(duration // self._interval)
+        if skipped < 1:
+            return
+        logger.warning("%s: tick overran its slot (duration=%s, slots_skipped=%d).", self._name, duration, skipped)

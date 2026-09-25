@@ -2,12 +2,7 @@
 """sparcs.tests.test_fieldsim_engine
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``SoilEngine`` over the live ``SoilPDECore``: build from ``SoilConfig``,
-hydrostatic/uniform initial state, one ``advance`` window with its mass-
-balance diagnostics, equivalence with calling ``SoilPDECore.walk_window``
-directly, state-blob round-trips, cancel/resume, and probe tensions.
-
-Heavy (builds a real Gmsh mesh and runs FiPy): marked slow.
+``SoilEngine`` over the live ``SoilPDECore``. Heavy (Gmsh + FiPy): marked slow.
 """
 
 import datetime as dt
@@ -76,12 +71,27 @@ def test_initial_state_shape_and_bounds(engine):
     assert np.all(state.se >= lo) and np.all(state.se <= hi)
 
 
+def test_cold_start_s_follows_the_pde_config(tmp_path):
+    default = SoilEngine.build(_soil_config(tmp_path, "soil_cold_default.msh"), rel_sat_name="Se_cold_default")
+    assert default.cold_start_s == 3 * 3600.0
+
+    hydrostatic = SoilEngine.build(
+        _soil_config(tmp_path, "soil_cold_hydro.msh", ic_water_table_depth=1.0), rel_sat_name="Se_cold_hydro"
+    )
+    assert hydrostatic.cold_start_s == 0.0
+
+    explicit = SoilEngine.build(
+        _soil_config(tmp_path, "soil_cold_explicit.msh", cold_start="30min"), rel_sat_name="Se_cold_explicit"
+    )
+    assert explicit.cold_start_s == 1800.0
+
+
 def test_advance_rain_increases_storage(engine):
     at = dt.datetime(2026, 1, 1, tzinfo=UTC)
     initial = engine.initial_state(at)
     water_before = engine.diagnostics(initial)["water_total"]
 
-    forcing = Forcing(start=at, dt_s=3600.0, rain_flux=1.0e-4)
+    forcing = Forcing(at=at, dt_s=3600.0, rain_flux=1.0e-4)
     result = engine.advance(initial, forcing)
 
     assert not result.cancelled
@@ -116,7 +126,7 @@ def test_advance_matches_live_core_directly(tmp_path):
 
     at = dt.datetime(2026, 1, 1, tzinfo=UTC)
     initial = engine.initial_state(at)
-    forcing = Forcing(start=at, dt_s=3600.0, rain_flux=1.0e-5, flow_m3s=2.0e-6)
+    forcing = Forcing(at=at, dt_s=3600.0, rain_flux=1.0e-5, flow_m3s=2.0e-6)
 
     result = engine.advance(initial, forcing)
 
@@ -141,7 +151,7 @@ def test_state_blob_round_trip(engine):
     assert np.array_equal(from_initial_blob.se_old, initial.se_old)
     assert from_initial_blob.surface_h == initial.surface_h
 
-    forcing = Forcing(start=at, dt_s=1800.0, rain_flux=5.0e-6)
+    forcing = Forcing(at=at, dt_s=1800.0, rain_flux=5.0e-6)
     result = engine.advance(initial, forcing)
 
     from_core_blob = SoilState.from_blob(engine.pde.save_state_blob(), result.state.at)
@@ -153,7 +163,7 @@ def test_state_blob_round_trip(engine):
 def test_cancel_holds_input_state_then_resumes(engine):
     at = dt.datetime(2026, 1, 1, tzinfo=UTC)
     initial = engine.initial_state(at)
-    forcing = Forcing(start=at, dt_s=3600.0, rain_flux=1.0e-5)
+    forcing = Forcing(at=at, dt_s=3600.0, rain_flux=1.0e-5)
 
     cancelled = engine.advance(initial, forcing, cancel=lambda: True)
     assert cancelled.cancelled is True
@@ -177,7 +187,7 @@ def test_tension_at_probe(tmp_path):
     soil.mesh.derive(bay_width=3.0)
     engine = SoilEngine.build(soil, rel_sat_name="Se_probe_test")
 
-    probes_block = soil.raw.get_member("probes", defaults={}, ensure_exists=True)
+    probes_block = soil.configs.get_member("probes", defaults={}, ensure_exists=True)
     probes = engine.probes(probes_block)
     assert len(probes) == 1
 

@@ -3,17 +3,8 @@
 sparcs.components.agriculture.fieldsim.core.shading
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Ground shading under the PV rows, as a pure model: geometry in, per-segment
-shade factors out. Free-field mode (no PV array) is a direct port of today's
-``GroundShading._evaluate_free_field``, needing nothing beyond the weather
-GHI column. The pvfactors modes (as_is / horizontal / trackable) reuse the
-live ``ground_shading.py``'s geometry primitives directly -- ``_PVSetup`` and
-the pure ground/report helpers -- rather than re-deriving them here: that
-module pulls in ``lories.Component``/``Constant`` at import time (for its own
-channel registration) but never FiPy, so importing it is safe for this
-FiPy-free chain; the remaining glue (matplotlib progress plots, channel
-writes) stays behind ``publish=True`` in that module and is never touched
-here. A later unit may inline the geometry builders and drop this import.
+Ground shading under the PV rows as a pure model: geometry in, per-segment
+shade factors out, over the live ``ground_shading`` geometry primitives.
 """
 
 from __future__ import annotations
@@ -59,22 +50,13 @@ _ZENITH_DAYTIME_LIMIT = 89.0
 class ShadingConfig(Config):
     """``[ground_shading]`` plus the PV geometry it is evaluated against.
 
-    Keys mirror today's ``GroundShading._configure_geometry`` /
-    ``_build_horizontal_setups`` / ``_build_trackable_setups`` /
-    ``_build_as_is_setups`` exactly: ``height``/``width``/``distance``/
-    ``axis_azimuth`` are common to every non-free-field mode; ``axis_tilt``/
-    ``max_angle``/``backtrack`` are read only in trackable mode and
-    ``surface_tilt``/``mirrored`` only in as_is mode -- but all live flat at
-    the top of ``[ground_shading]``, never under a ``[tracker]`` table (that
-    grouping in an earlier draft of this class was a guess, not what the live
-    parser reads).
-
-    ``bay_width``, ``pv_rows`` and ``segment_ranges`` are derived by the
-    adapter from the field config, the PV system and the soil mesh; they are
-    attributes, not config keys.
+    ``axis_tilt``/``max_angle``/``backtrack`` are read only in trackable mode and
+    ``surface_tilt``/``mirrored`` only in as_is mode, but all keys live flat at
+    the top of the table. ``bay_width``, ``pv_rows`` and ``segment_ranges`` are
+    derived by the adapter, not config keys.
     """
 
-    _CONFIGS_ALLOWED_KEYS = Config._CONFIGS_ALLOWED_KEYS | {"plot"}
+    _CONFIGS_RESERVED_KEYS = Config._CONFIGS_RESERVED_KEYS | {"plot"}
 
     mode = SelectParameter(choices=list(MODES), default=MODE_AS_IS, desc="as_is, horizontal, trackable or free_field")
     albedo = Parameter(type=float, default=0.2, min=0.0, max=1.0, desc="Ground albedo")
@@ -85,7 +67,13 @@ class ShadingConfig(Config):
     )
     axis_azimuth = Parameter(type=float, default=100.0, min=0.0, max=360.0, desc="Row-axis bearing (deg)")
     surface_tilt = Parameter(type=float, default=10.0, min=0.0, max=90.0, desc="PV surface tilt (deg); as_is mode")
-    surface_azimuth = Parameter(type=float, default=180.0, min=0.0, max=360.0, desc="PV surface azimuth (deg)")
+    # no min/max bound: lories compares a None default against min (TypeError)
+    surface_azimuth = Parameter(
+        type=float,
+        default=None,
+        required=False,
+        desc="PV surface azimuth (deg); defaults to axis_azimuth when trackable, else 180",
+    )
     mirrored = Parameter(type=bool, default=False, desc="Mirror the row arrangement about the bay centre (as_is)")
     axis_tilt = Parameter(type=float, default=0.0, min=-90.0, max=90.0, desc="Tracker axis tilt from horizontal (deg)")
     max_angle = Parameter(type=float, default=60.0, min=0.0, max=90.0, desc="Tracker maximum rotation (deg)")
@@ -99,14 +87,19 @@ class ShadingConfig(Config):
     def derive(
         self, *, bay_width: float, pv_rows: Sequence[Mapping[str, float]] = (), segment_ranges=None
     ) -> ShadingConfig:
-        """Today ``GroundShading._configure_geometry``'s ``distance`` default
-        plus ``_resolve_segment_ranges``."""
+        """Fill the bay-width-dependent geometry and the soil-mesh segment ranges."""
         self.bay_width = bay_width
         self.pv_rows = tuple(pv_rows)
         self.segment_ranges = segment_ranges
         if self.distance is None:
             self.distance = float(bay_width)
         return self
+
+    def resolved_surface_azimuth(self) -> float:
+        """``surface_azimuth``, defaulting to ``axis_azimuth`` when trackable, else 180."""
+        if self.surface_azimuth is not None:
+            return float(self.surface_azimuth)
+        return float(self.axis_azimuth) if self.mode == MODE_TRACKABLE else 180.0
 
 
 class ShadingModel:
@@ -118,21 +111,17 @@ class ShadingModel:
         self._tracker: Optional[_TrackerConfig] = None
         self._mirrored: bool = False
         self._surface_tilt: float = config.surface_tilt
-        self._surface_azimuth: float = config.surface_azimuth
+        self._surface_azimuth: float = config.resolved_surface_azimuth()
         self._last_pv_rows: list[tuple] = []
         self._pvfactors_failure_warned = False
         if config.mode != MODE_FREE_FIELD:
             self._build_setups()
 
     def evaluate(self, weather: pd.DataFrame) -> pd.DataFrame:
-        """Return one row per weather row with a ``<segment>`` column per
-        soil top segment (shade factor in [0, 1]), ``open_sky_ghi`` and a
-        ``ghi_<segment>`` column per segment.
+        """One row per weather row: a shade factor in [0, 1] per soil top segment,
+        ``open_sky_ghi`` and a ``ghi_<segment>`` column each.
 
-        Free-field mode returns all ones with ``open_sky_ghi`` taken straight
-        from the weather GHI column, without touching pvfactors (today
-        ``GroundShading.evaluate`` + ``_evaluate_free_field``). Any pvfactors
-        exception falls back to the same open-sky result, warning once.
+        Free-field mode and any pvfactors exception fall back to the open-sky result.
         """
         if weather.empty:
             return pd.DataFrame(index=weather.index)
@@ -178,15 +167,14 @@ class ShadingModel:
         return out
 
     def pv_rows_at(self, ts: pd.Timestamp) -> list[tuple]:
-        """PV-row geometry for the plot at ``ts``; night frames reuse the
-        last sun-up geometry (today ``_synthesize_pv_rows``)."""
+        """PV-row geometry for the plot at ``ts``; night frames reuse the last sun-up geometry."""
         return self._last_pv_rows if self._last_pv_rows else self._synthesize_pv_rows()
 
     def _build_setups(self) -> None:
-        """Today ``_build_horizontal_setups`` / ``_build_trackable_setups`` /
-        ``_build_as_is_setups``, chosen by ``config.mode``."""
+        """One ``_PVSetup`` per row arrangement, chosen by ``config.mode``."""
         cfg = self.config
         distance = cfg.distance if cfg.distance is not None else cfg.bay_width
+        surface_azimuth = cfg.resolved_surface_azimuth()
         common = dict(
             n_rows=_N_ROWS,
             height=cfg.height,
@@ -197,12 +185,12 @@ class ShadingModel:
         if cfg.mode == MODE_HORIZONTAL:
             self._mirrored = False
             self._surface_tilt = 0.0
-            self._surface_azimuth = cfg.surface_azimuth
+            self._surface_azimuth = surface_azimuth
             self._setups = [_PVSetup(surface_tilt=0.0, surface_azimuth=self._surface_azimuth, offset_x=0.0, **common)]
         elif cfg.mode == MODE_TRACKABLE:
             self._mirrored = False
             self._surface_tilt = 0.0
-            self._surface_azimuth = cfg.surface_azimuth
+            self._surface_azimuth = surface_azimuth
             self._tracker = _TrackerConfig(
                 axis_tilt=cfg.axis_tilt,
                 axis_azimuth=common["axis_azimuth"],
@@ -213,7 +201,6 @@ class ShadingModel:
             self._setups = [_PVSetup(surface_tilt=0.0, surface_azimuth=self._surface_azimuth, offset_x=0.0, **common)]
         else:  # MODE_AS_IS
             surface_tilt = cfg.surface_tilt
-            surface_azimuth = cfg.surface_azimuth
             mirrored = cfg.mirrored
             self._surface_tilt = surface_tilt
             self._surface_azimuth = surface_azimuth
@@ -235,8 +222,7 @@ class ShadingModel:
         combined_per_t: list[list[tuple]],
         ghi_open: np.ndarray,
     ) -> tuple[dict[str, float], dict[str, float]]:
-        """Today ``_aggregate_per_segment`` over ``_qinc_in_range``: time-mean
-        shade factor (sun-up rows only) and GHI [W/m^2] per segment."""
+        """Time-mean shade factor (sun-up rows only) and GHI [W/m^2] per segment."""
         seg_factors: dict[str, float] = {}
         seg_ghi: dict[str, float] = {}
         for name, (x0, x1) in (self.config.segment_ranges or {}).items():
@@ -256,8 +242,7 @@ class ShadingModel:
         return seg_factors, seg_ghi
 
     def _open_sky_result(self, weather: pd.DataFrame) -> pd.DataFrame:
-        """Factor 1.0 everywhere, per-segment GHI = open-sky GHI (today
-        ``_evaluate_free_field`` / ``_publish_open_sky``)."""
+        """Factor 1.0 everywhere, per-segment GHI = open-sky GHI."""
         ghi = weather[Weather.GHI]
         out = pd.DataFrame(index=weather.index)
         out["open_sky_ghi"] = ghi
@@ -267,8 +252,7 @@ class ShadingModel:
         return out
 
     def _build_pvfactors_input(self, weather: pd.DataFrame) -> pd.DataFrame:
-        """Select/derive the columns pvfactors needs; drop night rows (today
-        ``_build_pvfactors_input``)."""
+        """Select/derive the columns pvfactors needs; drop night rows."""
         df = pd.DataFrame(index=weather.index)
         df["solar_zenith"] = weather.get("solar_zenith")
         df["solar_azimuth"] = weather.get("solar_azimuth")
@@ -303,8 +287,7 @@ class ShadingModel:
         return df
 
     def _synthesize_pv_rows(self) -> list[tuple]:
-        """Compute PV-row endpoints analytically from setup config, no
-        pvfactors (today ``_synthesize_pv_rows``)."""
+        """PV-row endpoints computed analytically from the setup config, without pvfactors."""
         if not self._setups:
             return []
         rows: list[tuple] = []

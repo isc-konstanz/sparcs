@@ -3,16 +3,12 @@
 sparcs.components.agriculture.fieldsim.core.chain
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Weather frame in, forcing series plus chain outputs out. Orchestration only:
-prepare weather, shading, segments, evapotranspiration, fold into ``Forcing``.
-The models live in ``shading`` and ``evapotranspiration``; nothing here
-publishes. What today's ``FieldSimulation._run_chain`` + ``_build_segments`` +
-``SoilSimulation._compute_flux_rates`` compute, minus the reads and the
-channel writes.
+Weather frame in, forcing series plus chain outputs out. Orchestration only.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 from typing import Mapping, Optional, Sequence
 
@@ -28,14 +24,13 @@ from .state import ChainResult, Forcing
 
 logger = logging.getLogger(__name__)
 
-# Monthly LAI lookup tables keyed by ``field.lai_type`` (today's ``_LAI_BY_TYPE``).
 _LAI_BY_TYPE: dict[str, list[float]] = {
     "fao": [3.0] * 12,
     "grass": [0.2, 0.2, 0.2, 0.3, 0.6, 0.8, 0.9, 1.2, 1.4, 1.2, 0.8, 0.6],
     "apple": [0.2, 0.4, 1.2, 2.5, 3.0, 3.2, 3.0, 2.8, 2.0, 1.0, 0.5, 0.2],
 }
 
-# Weather keys filled with a default when the feed doesn't supply them (today's ``_WEATHER_DEFAULTS``).
+# Filled with a default when the weather feed does not supply them.
 _WEATHER_DEFAULTS: dict[str, float] = {
     Weather.CLEAR_SKY_INDEX: 0.5,
     Weather.HUMIDITY_REL: 60.0,  # %
@@ -43,8 +38,6 @@ _WEATHER_DEFAULTS: dict[str, float] = {
 
 _CANOPY_SEGMENT_NAMES = ("PlantTopLeftSegment", "PlantTopRightSegment")
 
-# Vegetation column names populated onto the weather frame; match today's
-# ``FieldSimulation`` Constant keys (LAI/ROUGHNESS/PLANT_HEIGHT/NDVI).
 _LAI = "lai"
 _ROUGHNESS = "roughness"
 _PLANT_HEIGHT = "plant_height"
@@ -52,13 +45,12 @@ _NDVI = "ndvi"
 
 
 def design_flow_lpm(nozzle_count: int, nozzle_flow_lph: float) -> float:
-    """Whole-field design flow [l/min] from the drip layout (today's ``simulation._soil.design_flow_lpm``)."""
+    """Whole-field design flow [l/min] from the drip layout."""
     return nozzle_count * nozzle_flow_lph / 60.0
 
 
 def flow_m3s_per_m(flow_lpm: float, total_drip_line_length_m: float) -> float:
-    """Whole-field flow [l/min] normalized to m^3/s per out-of-plane metre of
-    row (today's ``simulation._soil.flow_m3s_per_m``)."""
+    """Whole-field flow [l/min] as m^3/s per out-of-plane metre of row."""
     return flow_lpm / (60_000.0 * total_drip_line_length_m)
 
 
@@ -66,8 +58,7 @@ def segment_flux_dicts(
     seg_et: Mapping[str, pd.DataFrame],
     ts: pd.Timestamp,
 ) -> tuple[dict[str, float], dict[str, float]]:
-    """Per-segment ET flux dicts at ``ts``: negative ET is clipped to zero and
-    zero-flux segments are skipped (today's ``simulation._soil.segment_flux_dicts``)."""
+    """Per-segment ET flux dicts at ``ts``, negatives clipped and zero-flux segments skipped."""
     seg_evap: dict[str, float] = {}
     seg_transp: dict[str, float] = {}
     for name, frame in seg_et.items():
@@ -83,9 +74,7 @@ def segment_flux_dicts(
 
 
 def rain_flux(weather: pd.DataFrame, ts: pd.Timestamp, elapsed_s: float) -> float:
-    """Rain flux density [kg/(m^2*s)] for the interval ending at ``ts``:
-    ``precip_mm / elapsed_s`` (today's ``simulation._soil.rain_flux``); reads
-    ``lories.components.weather.Weather.PRECIPITATION``."""
+    """Rain flux density [kg/(m^2 s)] for the interval ending at ``ts``."""
     col = Weather.PRECIPITATION
     if elapsed_s <= 0 or col not in weather.columns or ts not in weather.index:
         return 0.0
@@ -116,26 +105,33 @@ class WeatherChain:
         self._vegetation_placeholder_warned = False
         self._weather_default_warned: set[str] = set()
 
-    def forcing_series(self, weather: pd.DataFrame, irrigation_lpm: pd.Series) -> tuple[Sequence[Forcing], ChainResult]:  # noqa: E501
+    def forcing_series(
+        self,
+        weather: pd.DataFrame,
+        irrigation_lpm: pd.Series,
+        *,
+        frontier: Optional[dt.datetime] = None,
+        first_dt_s: float = 0.0,
+    ) -> tuple[Sequence[Forcing], ChainResult]:
+        """Chain outputs for every weather row, plus one ``Forcing`` per row after ``frontier``.
+
+        Without a frontier the first row is the cold-start anchor and spans ``first_dt_s``.
+        """
         df = self._prepare_weather(weather)
         shading = self.shading.evaluate(df)
         segments = self._segments(df, shading)
         bulk, seg_et = self.et.evaluate(df, segments)
-        forcing = self._forcings(df, shading, seg_et, irrigation_lpm)
+        forcing = self._forcings(df, shading, seg_et, irrigation_lpm, frontier=frontier, first_dt_s=first_dt_s)
 
         if self.plots is not None and not df.empty:
             ts = df.index[-1]
             if render_due(self._last_plot, ts, self.plots):
-                # Rendering itself (render_shading_png) is a later unit's
-                # job; this only keeps the due-cadence bookkeeping current.
                 self._last_plot = ts
 
         return forcing, ChainResult(shading=shading, evapotranspiration=bulk, image=None)
 
     def horizon_inputs(self, forecast: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
-        """What the planner rolls over: the prepared forecast frame (the live
-        rollout reads its index and precipitation column) and the per-segment
-        ET frames. Same chain as ``forcing_series``, minus the forcings."""
+        """The prepared forecast frame and the per-segment ET frames the planner rolls over."""
         df = self._prepare_weather(forecast)
         shading = self.shading.evaluate(df)
         segments = self._segments(df, shading)
@@ -143,17 +139,13 @@ class WeatherChain:
         return df, dict(seg_et)
 
     def _prepare_weather(self, weather: pd.DataFrame) -> pd.DataFrame:
-        """Derive solar-position/irradiance columns when a ``Location`` is
-        known, then fill the placeholder vegetation state (today's
-        ``_prepare_weather`` + ``_populate_vegetation``). Required-column
-        validation is ``ETModel.evaluate``'s job, not this seam's."""
+        """Derive solar-position/irradiance columns when a ``Location`` is known, then vegetation."""
         if self.setup.location is not None:
             weather = validate_meteo_inputs(weather, self.setup.location)
         return self._populate_vegetation(weather)
 
     def _populate_vegetation(self, weather: pd.DataFrame) -> pd.DataFrame:
-        """Today's ``_populate_vegetation`` (``publish=False`` path): fill the
-        placeholder canopy state and the optional weather defaults."""
+        """Fill the placeholder canopy state and the optional weather defaults."""
         field = self.setup.field
         df = weather.copy()
         if not self._vegetation_placeholder_warned:
@@ -183,9 +175,7 @@ class WeatherChain:
         return df
 
     def _segments(self, weather: pd.DataFrame, shading: pd.DataFrame) -> Sequence[SegmentProperties]:
-        """One ``SegmentProperties`` per soil top segment from ``setup.field``
-        (lai_type, plant_height, bare_*) and the shading factors
-        (today ``_populate_vegetation`` + ``_build_segments``)."""
+        """One ``SegmentProperties`` per soil top segment from the field config and shading."""
         field = self.setup.field
         canopy_lai = float(weather[_LAI].iloc[-1])
         canopy_plant_height = float(weather[_PLANT_HEIGHT].iloc[-1])
@@ -230,29 +220,27 @@ class WeatherChain:
         shading: pd.DataFrame,
         seg_et: Mapping[str, pd.DataFrame],
         irrigation_lpm: pd.Series,
+        *,
+        frontier: Optional[dt.datetime],
+        first_dt_s: float = 0.0,
     ) -> Sequence[Forcing]:
-        """Rain from ``weather``, irrigation l/min over the drip line length
-        into m^3/s per drip segment, ET per segment; one ``Forcing`` per row
-        (today ``SoilSimulation._compute_flux_rates`` + ``flow_m3s_per_m``).
-        ``shading`` isn't needed for the flux math -- the per-segment shade
-        factor is already folded into ``seg_et`` by ``ETModel.evaluate`` --
-        but stays positional so it matches ``forcing_series``'s call shape."""
+        """One ``Forcing`` per row after ``frontier``, each window reaching back to the previous row."""
         index = weather.index
         irrigation = irrigation_lpm.reindex(index, method="ffill").fillna(0.0)
         total_drip_line_length_m = self.setup.soil.total_drip_line_length_m
+        cutoff = pd.Timestamp(frontier) if frontier is not None else None
 
         forcings: list[Forcing] = []
-        for i, ts in enumerate(index):
-            if i + 1 < len(index):
-                dt_s = (index[i + 1] - ts).total_seconds()
-            elif i > 0:
-                dt_s = (index[i] - index[i - 1]).total_seconds()
-            else:
-                dt_s = 3600.0
+        previous = cutoff
+        for ts in index:
+            if cutoff is not None and ts <= cutoff:
+                continue
+            dt_s = first_dt_s if previous is None else (ts - previous).total_seconds()
+            previous = ts
             seg_evap, seg_transp = segment_flux_dicts(seg_et, ts)
             forcings.append(
                 Forcing(
-                    start=ts.to_pydatetime(),
+                    at=ts.to_pydatetime(),
                     dt_s=dt_s,
                     rain_flux=rain_flux(weather, ts, dt_s),
                     flow_m3s=flow_m3s_per_m(float(irrigation.loc[ts]), total_drip_line_length_m),

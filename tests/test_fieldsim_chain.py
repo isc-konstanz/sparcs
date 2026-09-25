@@ -2,10 +2,7 @@
 """tests.test_fieldsim_chain
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``WeatherChain``, ``ETModel`` and ``ShadingModel`` as pure models: a weather
-frame in, a ``Forcing`` list plus a ``ChainResult`` out, numerically
-identical to what the live ``simulation`` Components compute with
-``publish=False``. No FiPy import, no Gmsh, no channels.
+``WeatherChain``, ``ETModel`` and ``ShadingModel`` as pure models.
 """
 
 from pathlib import Path
@@ -26,8 +23,6 @@ from sparcs.components.agriculture.fieldsim.core.config import FieldConfig, Fiel
 from sparcs.components.agriculture.fieldsim.core.evapotranspiration import ETModel, SegmentProperties
 from sparcs.components.agriculture.fieldsim.core.shading import ShadingConfig, ShadingModel
 
-# Real copperhead field_2 geometry conf (see project_copperhead_field2_config);
-# the acceptance criterion is that ShadingConfig parses it without error.
 _GROUND_SHADING_CONF = Path(
     r"C:\Users\jb\My_Nextcloud\ISC_Share\Software\lories_sparcs\sparcs\data\copperhead\conf\agri_pv.d"
     r"\field_2.d\field_simulation.d\ground_shading.conf"
@@ -35,8 +30,7 @@ _GROUND_SHADING_CONF = Path(
 
 
 def _weather_frame(hours: int = 24) -> pd.DataFrame:
-    """24 synthetic hourly rows with every ``ETModel.REQUIRED_WEATHER_COLUMNS``
-    column, daytime GHI > 0 centred on noon."""
+    """Synthetic hourly rows with every required weather column, daytime GHI centred on noon."""
     idx = pd.date_range("2026-06-21", periods=hours, freq="1h", tz="UTC")
     daylight = np.clip(np.sin(np.pi * (idx.hour - 5) / 14), 0.0, None)
     return pd.DataFrame(
@@ -62,6 +56,7 @@ def _setup(total_drip_line_length_m: float = 12.6) -> FieldSetup:
 
 
 def test_shading_config_accepts_real_ground_shading_conf():
+    """The real copperhead field_2 geometry conf must parse without error."""
     if not _GROUND_SHADING_CONF.is_file():
         pytest.skip(f"real conf not present: {_GROUND_SHADING_CONF}")
     configs = Configurations.load(_GROUND_SHADING_CONF.name, data_dir=str(_GROUND_SHADING_CONF.parent), flat=True)
@@ -148,12 +143,16 @@ def test_et_model_matches_live_evapotranspiration_publish_false():
 # --------------------------------------------------------------------------- WeatherChain.forcing_series
 
 
+def _chain(setup) -> WeatherChain:
+    shading_config = ShadingConfig.from_dict({"mode": "free_field"}).derive(bay_width=3.5, segment_ranges=None)
+    return WeatherChain(setup, ShadingModel(shading_config), ETModel(), top_segment_names=(), segment_face_length={})
+
+
 def test_forcing_series_dt_flow_rain_and_segment_fluxes():
     setup = _setup(total_drip_line_length_m=12.6)
-    shading_config = ShadingConfig.from_dict({"mode": "free_field"}).derive(bay_width=3.5, segment_ranges=None)
-    shading = ShadingModel(shading_config)
-    et = ETModel()
-    chain = WeatherChain(setup, shading, et, top_segment_names=(), segment_face_length={})
+    chain = _chain(setup)
+    shading = chain.shading
+    et = chain.et
 
     weather = _weather_frame()
     weather.iloc[5, weather.columns.get_loc(Weather.PRECIPITATION)] = 2.0  # mm at hour 5
@@ -163,8 +162,9 @@ def test_forcing_series_dt_flow_rain_and_segment_fluxes():
 
     assert len(forcings) == len(weather.index)
     for forcing, ts in zip(forcings, weather.index):
-        assert pd.Timestamp(forcing.start) == ts
-    assert all(f.dt_s == 3600.0 for f in forcings)
+        assert pd.Timestamp(forcing.at) == ts
+    assert forcings[0].dt_s == 0.0
+    assert all(f.dt_s == 3600.0 for f in forcings[1:])
 
     expected_flow = flow_m3s_per_m(0.53, setup.soil.total_drip_line_length_m)
     assert forcings[0].flow_m3s == pytest.approx(expected_flow)
@@ -174,8 +174,6 @@ def test_forcing_series_dt_flow_rain_and_segment_fluxes():
     assert forcings[5].rain_flux > 0.0
     assert forcings[0].rain_flux == 0.0
 
-    # Reconstruct the same per-segment ET the chain computed internally and
-    # check the noon Forcing's seg_evap/seg_transp against the shared helper.
     df = chain._prepare_weather(weather)
     shading_df = shading.evaluate(df)
     segments = chain._segments(df, shading_df)
@@ -188,3 +186,43 @@ def test_forcing_series_dt_flow_rain_and_segment_fluxes():
     assert chain_result.evapotranspiration.index.equals(weather.index)
     assert chain_result.shading.index.equals(weather.index)
     assert chain_result.image is None
+
+
+def test_forcing_windows_reach_backwards_from_their_row():
+    chain = _chain(_setup())
+    weather = _weather_frame(hours=3)
+    irrigation_lpm = pd.Series(0.0, index=weather.index)
+
+    forcings, _ = chain.forcing_series(weather, irrigation_lpm)
+
+    assert [f.dt_s for f in forcings] == [0.0, 3600.0, 3600.0]
+    for forcing, ts in zip(forcings, weather.index):
+        assert pd.Timestamp(forcing.end) == ts
+    assert pd.Timestamp(forcings[1].start) == weather.index[0]
+    assert pd.Timestamp(forcings[2].start) == weather.index[1]
+
+
+def test_forcing_series_drops_rows_at_or_before_the_frontier():
+    chain = _chain(_setup())
+    weather = _weather_frame(hours=3)
+    irrigation_lpm = pd.Series(0.0, index=weather.index)
+
+    forcings, chain_result = chain.forcing_series(weather, irrigation_lpm, frontier=weather.index[0])
+
+    assert [pd.Timestamp(f.at) for f in forcings] == list(weather.index[1:])
+    assert forcings[0].dt_s == 3600.0
+    assert pd.Timestamp(forcings[0].start) == weather.index[0]
+    assert chain_result.shading.index.equals(weather.index)
+
+
+def test_forcing_series_first_window_spans_a_gapped_frontier():
+    chain = _chain(_setup())
+    weather = _weather_frame(hours=4)
+    irrigation_lpm = pd.Series(0.0, index=weather.index)
+    frontier = weather.index[0] - pd.Timedelta(minutes=30)
+
+    forcings, _ = chain.forcing_series(weather, irrigation_lpm, frontier=frontier)
+
+    assert len(forcings) == len(weather.index)
+    assert forcings[0].dt_s == 1800.0
+    assert pd.Timestamp(forcings[0].start) == frontier

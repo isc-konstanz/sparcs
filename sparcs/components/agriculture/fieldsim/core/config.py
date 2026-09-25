@@ -3,36 +3,17 @@
 sparcs.components.agriculture.fieldsim.core.config
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Configuration sections for the unchanged ``field_simulation.conf`` +
-``field_simulation.d/`` layout, declared with lories' parameter structure.
-
-Each section is a lories ``Configurator`` mirroring one TOML table. Every
-key is one class-level ``Parameter`` (type, default, bounds, choices,
-description), so what is needed and allowed is declared once and known at
-runtime: lories resolves and coerces the TOML, applies defaults, and
-``schema()`` returns the declaration. Unknown keys are a hard error
-(``Config._assert_configs``), recursively through declared groups, the same
-rule lories' converters and processors follow.
-
-A nested table that has its own section class (``[mesh]``, ``[drip]``) is
-declared with ``section()``: the strict check and the schema see its keys,
-and after resolution the attribute holds a configured instance of that
-class, not a dict. Tables still owned by dataclasses next to FiPy code
-(pde, ponding, feddes, anchor, probes, windows) remain passthrough groups:
-accepted verbatim, flagged ``passthrough`` in the schema, not validated.
-
-``FieldSetup`` is the frozen bundle the runtime receives: nothing on a
-section changes after ``configure``. ``from_dict`` builds a configured
-section from a plain mapping for scenarios, notebooks and tests.
-
-This is the only lories import in ``core``: the config machinery. Channels,
-components and threads stay out.
+Configuration sections for the ``field_simulation.conf`` +
+``field_simulation.d/`` layout, declared as lories ``Configurator`` classes.
+Unknown keys are a hard error; ``FieldSetup`` bundles the configured sections.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, ClassVar, Iterable, Mapping, Optional, Sequence
 
 from lories.core import ConfigurationError
@@ -50,7 +31,10 @@ from lories.core.configs.parameters import (
 )
 
 LAI_TYPES = ("fao", "grass", "apple")
-GRID_MODES = ("ladder", "full")
+GRID_MODES = ("fill_order", "full")
+
+# Never created, so ``from_dict`` cannot pick up a "<name>.d/<key>.conf" from disk.
+_NO_CONF_DIR = Path(tempfile.gettempdir(), "fieldsim-no-conf-dir")
 
 
 # --------------------------------------------------------------------------- base
@@ -59,9 +43,7 @@ GRID_MODES = ("ladder", "full")
 class Config(Configurator):
     """Base for all fieldsim sections: strict keys, typed sub-sections, schema, from_dict."""
 
-    # Keys every section may carry without declaring them: the lories
-    # reserved set plus the component-level keys that share the same file.
-    _CONFIGS_ALLOWED_KEYS: ClassVar[frozenset] = frozenset({"type", "data"})
+    _CONFIGS_RESERVED_KEYS: ClassVar[frozenset] = Configurator._CONFIGS_RESERVED_KEYS | {"type", "data"}
     # Child sections handled by other Config classes (set per class).
     _CONFIGS_CHILD_KEYS: ClassVar[Iterable[str]] = ()
     # attribute -> section class, for tables declared with section()
@@ -72,18 +54,33 @@ class Config(Configurator):
         configs = super()._assert_configs(configs)
         if configs is None:
             return None
-        params = {p._resolve_key(): p for p in cls.__config_parameters__.values()}
-        allowed = set(cls._CONFIGS_RESERVED_KEYS) | set(cls._CONFIGS_ALLOWED_KEYS) | set(cls._CONFIGS_CHILD_KEYS)
-        unknown = _unknown_keys(configs, params, allowed, path=cls.__name__)
+        unknown = _unknown_keys(
+            configs,
+            cls._params_by_key(),
+            cls._allowed_keys(),
+            sections=cls._sections_by_key(),
+            path=cls.__name__,
+        )
         if unknown:
             raise ConfigurationError(f"{cls.__name__}: unknown configuration keys {unknown}")
         return configs
 
-    raw: Optional[Configurations] = None  # the section's own Configurations, for the legacy parsers
+    @classmethod
+    def _params_by_key(cls) -> dict[str, _Parameter]:
+        return {p._resolve_key(): p for p in cls.__config_parameters__.values()}
+
+    @classmethod
+    def _allowed_keys(cls) -> set:
+        return set(cls._CONFIGS_RESERVED_KEYS) | set(cls._CONFIGS_CHILD_KEYS)
+
+    @classmethod
+    def _sections_by_key(cls) -> dict[str, type]:
+        """``_SECTIONS`` keyed by config key instead of attribute name."""
+        params = cls.__config_parameters__
+        return {params[attr]._resolve_key(): section_cls for attr, section_cls in cls._SECTIONS.items()}
 
     def _at_configure(self, configs: Configurations) -> None:
         super()._at_configure(configs)
-        self.raw = configs
         for attr, cls in self._SECTIONS.items():
             key = type(self).__config_parameters__[attr]._resolve_key()
             if isinstance(configs.get(key), Mapping):
@@ -95,45 +92,66 @@ class Config(Configurator):
 
     @classmethod
     def schema(cls) -> dict[str, Any]:
-        """Needed and allowed keys with type, default, bounds and description.
-        Groups without declared children are flagged ``passthrough``."""
+        """Declared keys with type, default, bounds and description."""
+        sections = cls._sections_by_key()
         out: dict[str, Any] = {}
         for p in cls.__config_parameters__.values():
+            key = p._resolve_key()
             sch = p.to_schema()
-            if isinstance(p, ParameterGroup) and not p.children:
+            if key in sections:
+                sch["children"] = sections[key].schema()
+            elif isinstance(p, ParameterGroup) and not p.children:
                 sch["passthrough"] = True
-            out[p._resolve_key()] = sch
+            out[key] = sch
         return out
 
     @classmethod
     def from_dict(cls, values: Optional[Mapping[str, Any]] = None, name: str = "fieldsim"):
-        """A configured instance from a plain mapping; for scenarios and tests."""
+        """A configured instance from a plain mapping; reads nothing from disk."""
         instance = cls()
-        instance.configure(Configurations(name, Directories(), defaults=dict(values or {})))
+        instance.configure(Configurations(name, Directories(conf_dir=str(_NO_CONF_DIR)), defaults=dict(values or {})))
         return instance
 
     def values(self) -> dict[str, Any]:
         return {attr: getattr(self, attr) for attr in type(self).__config_parameters__}
 
 
-def section(cls: type, key: str, *, required: bool = False, desc: Optional[str] = None) -> ParameterGroup:
-    """Declare a nested table validated by section class ``cls``. Pair it
-    with an entry in ``_SECTIONS`` so the attribute becomes a ``cls`` instance."""
-    return ParameterGroup(key=key, desc=desc, required=required, children=list(cls.__config_parameters__.values()))
+def section(key: str, *, required: bool = False, desc: Optional[str] = None) -> ParameterGroup:
+    """Declare a nested table whose keys belong to the ``_SECTIONS`` class for it.
+
+    Childless on purpose: the group only enforces presence, while ``_SECTIONS``
+    carries the class to the strict key check, the schema and ``_at_configure``.
+    """
+    return ParameterGroup(key=key, desc=desc, required=required)
 
 
-def _unknown_keys(configs: Any, params: Mapping[str, _Parameter], allowed: set, *, path: str) -> list[str]:
-    """Keys of ``configs`` that no parameter declares, recursing into groups
-    with declared children. A sub-table is a Mapping value; ``has_member``
-    is not used because lories counts bool values as members."""
+def _unknown_keys(
+    configs: Any,
+    params: Mapping[str, _Parameter],
+    allowed: set,
+    *,
+    sections: Optional[Mapping[str, type]] = None,
+    path: str,
+) -> list[str]:
+    """Keys of ``configs`` that no parameter declares, recursing into sections and groups."""
     unknown: list[str] = []
+    sections = sections or {}
     for key in configs:
         if key in allowed:
             continue
         param = params.get(key)
         is_section = isinstance(configs.get(key), Mapping)
+        section_cls = sections.get(key)
         if param is None:
             unknown.append(f"{path}.{key}")
+        elif section_cls is not None and is_section:
+            unknown += _unknown_keys(
+                configs.get_member(key),
+                section_cls._params_by_key(),
+                section_cls._allowed_keys(),
+                sections=section_cls._sections_by_key(),
+                path=f"{path}.{key}",
+            )
         elif isinstance(param, ParameterGroup) and param.children and is_section:
             unknown += _unknown_keys(configs.get_member(key), param.children, set(), path=f"{path}.{key}")
         elif isinstance(param, _TypedParameter) and is_section:
@@ -141,35 +159,42 @@ def _unknown_keys(configs: Any, params: Mapping[str, _Parameter], allowed: set, 
     return unknown
 
 
+def _positive(value: float) -> None:
+    if value <= 0:
+        raise ValueError("must be greater than zero")
+
+
 # --------------------------------------------------------------------------- leaf sections
 
 
 class PlotConfig(Config):
-    """``[plot]``: progress-image settings, field-level default cascaded to every child.
-
-    Whether plotting is on is the section's own ``enabled`` key, which lories
-    reserves as the table's on/off switch: a ``[plot]`` with ``enabled = false``
-    must not be configured at all (the adapter passes ``plots=None``), so no
-    ``enabled`` parameter is declared here.
-    """
+    """``[plot]``: progress-image settings. ``enabled`` is lories' own table switch."""
 
     interval = DurationParameter(default="1h", desc="Minimum time between two rendered frames")
-    disable_after_failures = Parameter(
-        type=int, default=5, min=1, desc="Consecutive render failures before plotting stops"
+    dir = Parameter(
+        type=str, default=None, required=False, desc="Directory the images are written to; defaults to the data dir"
     )
+    disable_after_failures = Parameter(
+        type=int, default=3, min=1, desc="Consecutive render failures before plotting stops"
+    )
+
+    @classmethod
+    def _assert_configs(cls, configs: Optional[Configurations]) -> Optional[Configurations]:
+        configs = super()._assert_configs(configs)
+        if configs is None:
+            return None
+        interval = configs.get("interval", default=None)
+        if isinstance(interval, (int, float)) and not isinstance(interval, bool):
+            # A bare number is seconds; DurationParameter only reads strings.
+            configs.set("interval", f"{int(round(float(interval)))}s", replace=True)
+        return configs
 
 
 class MeshConfig(Config):
-    """``[soil_simulation.mesh]``: the 2D bay cross-section handed to Gmsh.
-
-    ``width`` defaults to the field-level ``bay_width`` so mesh and PV bay
-    agree; the adapter fills it through ``derive``. The top boundary is cut
-    into ``d_x``-wide segments, so ``(width - plant_width) / (2 * d_x)`` must
-    be a non-negative integer.
-    """
+    """``[soil_simulation.mesh]``: the 2D bay cross-section handed to Gmsh."""
 
     filename = Parameter(type=str, default="soil.msh", desc="Gmsh mesh file, built when missing")
-    dl = Parameter(type=float, default=0.1, min=0.0, desc="Element characteristic length (m)")
+    dl = Parameter(type=float, default=0.1, validator=_positive, desc="Element characteristic length (m), > 0")
     width = Parameter(
         type=float, default=None, required=False, desc="Cross-section width (m); defaults to the field bay_width"
     )
@@ -180,8 +205,6 @@ class MeshConfig(Config):
     dx = Parameter(key="d_x", type=float, default=0.5, min=0.0, desc="Top-boundary segment width (m); keep > dl")
 
     def _on_configure(self, configs: Configurations) -> None:
-        if self.dl <= 0:
-            raise ConfigurationError("mesh.dl must be positive")
         if self.watering_width < self.dl:
             raise ConfigurationError("mesh.watering_width must be >= dl so the drip strip is resolved")
         if self.dx <= self.dl:
@@ -197,11 +220,16 @@ class MeshConfig(Config):
         return self
 
     def _check_segments(self, width: float) -> None:
-        n = (width - self.plant_width) / (2.0 * self.dx)
-        if n < 0 or abs(n - round(n)) > 1e-9:
-            raise ConfigurationError(
-                f"mesh: (width - plant_width) / (2 * d_x) = {n:.4f} must be a non-negative integer"
-            )
+        if width < self.plant_width + 2 * self.dx:
+            raise ConfigurationError("mesh.width must be at least plant_width + 2 * d_x")
+        if self.height <= 0:
+            raise ConfigurationError("mesh.height must be positive")
+        if self.height <= self.plant_height:
+            raise ConfigurationError("mesh.height must be greater than plant_height")
+        half_width = (width - self.plant_width) / 2
+        surface_count = round(half_width / self.dx)
+        if surface_count < 1 or abs(half_width - surface_count * self.dx) > 1e-9 * max(1.0, half_width):
+            raise ConfigurationError("mesh: (width - plant_width) must be a multiple of 2 * d_x")
 
     @property
     def top_segments(self) -> int:
@@ -210,13 +238,7 @@ class MeshConfig(Config):
 
 
 class DripConfig(Config):
-    """``[drip]``: whole-field drip layout; ``design_flow_lpm`` is derived.
-
-    ``explicit`` records whether the table was present. The live sim only
-    trusts the valve-state fallback feed when it was: a bare state channel
-    with no explicit block would otherwise roll at the 1 nozzle x 1 l/h
-    placeholder.
-    """
+    """``[drip]``: whole-field drip layout; ``explicit`` records whether the table was present."""
 
     nozzle_count = Parameter(type=int, default=1, min=1, desc="Number of drip nozzles on the field")
     nozzle_flow_lph = Parameter(type=float, default=1.0, min=0.0, desc="Flow per nozzle (l/h)")
@@ -228,8 +250,7 @@ class DripConfig(Config):
         return self.nozzle_count * self.nozzle_flow_lph / 60.0
 
     def override(self, values: Mapping[str, Any]) -> DripConfig:
-        """A copy with the given keys replaced (the predictor's per-key
-        ``[soil_predictor.drip]`` merge over the sim's block)."""
+        """A copy with the given keys replaced."""
         merged = {**self.values(), **dict(values)}
         out = DripConfig.from_dict(merged)
         out.explicit = self.explicit
@@ -242,11 +263,11 @@ class DripConfig(Config):
 class SoilConfig(Config):
     """``[soil_simulation]``: everything the engine needs, nothing more."""
 
-    _CONFIGS_ALLOWED_KEYS = Config._CONFIGS_ALLOWED_KEYS | {"plot"}
+    _CONFIGS_RESERVED_KEYS = Config._CONFIGS_RESERVED_KEYS | {"plot"}
     _SECTIONS = {"mesh": MeshConfig, "drip": DripConfig}
 
-    mesh = section(MeshConfig, "mesh", required=True, desc="[mesh] bay cross-section geometry")
-    drip = section(DripConfig, "drip", desc="[drip] whole-field drip layout; defaults to 1 nozzle x 1 l/h")
+    mesh = section("mesh", required=True, desc="[mesh] bay cross-section geometry")
+    drip = section("drip", desc="[drip] whole-field drip layout; defaults to 1 nozzle x 1 l/h")
     pde = ParameterGroup(key="pde", desc="[pde] solver settings (simulation._soil.PDEConfig, passthrough)")
     ponding = ParameterGroup(key="ponding", desc="[ponding] surface storage, sibling of [pde] (passthrough)")
     feddes = ParameterGroup(key="feddes", desc="[feddes] root water uptake, sibling of [pde] (passthrough)")
@@ -266,7 +287,7 @@ class SoilConfig(Config):
     )
     plot_structure = Parameter(type=bool, default=False, desc="Render the mesh structure plot once at configure")
 
-    # derived by the adapter from [probes.points.*] and sensor discovery (simulation._soil.ProbeSpec)
+    # derived by the adapter from [probes.points.*] and sensor discovery
     probe_specs: Sequence[Any] = ()
 
     def _on_configure(self, configs: Configurations) -> None:
@@ -278,14 +299,13 @@ class SoilConfig(Config):
 
 
 class PlannerConfig(Config):
-    """``[soil_predictor]``. The planner never reads ``[soil_simulation]``;
-    its ``[drip]`` is a per-key override the adapter merges over the sim's."""
+    """``[soil_predictor]``: its ``[drip]`` is a per-key override of the sim's."""
 
-    _CONFIGS_ALLOWED_KEYS = Config._CONFIGS_ALLOWED_KEYS | {"plot"}
+    _CONFIGS_RESERVED_KEYS = Config._CONFIGS_RESERVED_KEYS | {"plot"}
 
-    windows = ParameterGroup(key="windows", desc="[windows] watering windows, start time per key (passthrough)")
-    interval = Parameter(type=int, default=30, min=1, desc="Planner schedule cadence (minutes)")
-    offset = Parameter(type=int, default=0, min=0, desc="Planner schedule offset within the interval (minutes)")
+    windows = ParameterGroup(key="windows", desc="[windows.<name>] start time and durations (passthrough)")
+    interval = Parameter(type=int, default=1440, min=1, desc="Planner schedule cadence (minutes)")
+    offset = Parameter(type=int, default=60, min=0, desc="Planner schedule offset within the interval (minutes)")
     state = ParameterGroup(
         key="state",
         desc="[state] predictor state-blob debug sink",
@@ -294,17 +314,18 @@ class PlannerConfig(Config):
             DurationParameter(key="interval", default="1h", desc="Blob cadence"),
         ],
     )
-    durations_min = ListParameter(item_type=int, default=[], desc="Candidate watering durations (min)")
-    grid_mode = SelectParameter(choices=list(GRID_MODES), default="ladder", desc="Shared-prefix ladder or full rolls")
-    combo_cap = Parameter(type=int, default=64, min=1, desc="Upper bound on candidates per run")
+    grid_mode = SelectParameter(
+        choices=list(GRID_MODES), default="fill_order", desc="Shared-prefix ladder or full rolls"
+    )
+    combo_cap = Parameter(type=int, default=16, min=1, desc="Upper bound on candidates per run")
     threshold_hpa = Parameter(
         type=float, default=300.0, min=0.0, desc="Tension threshold the score measures against (hPa)"
     )
     decision_probes = ListParameter(item_type=str, default=[], desc="Probe keys the score is evaluated at")
-    horizon = DurationParameter(default="3D", desc="Forecast horizon the candidates are rolled over")
+    horizon = DurationParameter(default="24h", desc="Forecast horizon the candidates are rolled over")
     max_windows = Parameter(type=int, default=4, min=1, desc="Windows considered per day")
     parallel = Parameter(type=bool, default=False, desc="Roll candidates in a process pool")
-    # no min bound: lories numeric validation compares a None default against min (TypeError)
+    # no min bound: lories compares a None default against min (TypeError)
     max_workers = Parameter(type=int, default=None, required=False, desc="Pool size; default cpu_count - 1")
     logger = Parameter(type=str, default=None, required=False, desc="Logger connector id for the forecast tables")
     drip = ParameterGroup(
@@ -322,10 +343,9 @@ class PlannerConfig(Config):
 
 
 class FieldConfig(Config):
-    """``[field_simulation]``: the field-level keys. Child tables are their
-    own sections, bundled by the adapter into a ``FieldSetup``."""
+    """``[field_simulation]``: the field-level keys."""
 
-    _CONFIGS_ALLOWED_KEYS = Config._CONFIGS_ALLOWED_KEYS | {"plot"}
+    _CONFIGS_RESERVED_KEYS = Config._CONFIGS_RESERVED_KEYS | {"plot"}
     _CONFIGS_CHILD_KEYS = ("ground_shading", "evapotranspiration", "soil_simulation", "soil_predictor")
 
     model = ParameterGroup(key="model", desc="[model] field-level van Genuchten parameters (passthrough)")
@@ -338,7 +358,7 @@ class FieldConfig(Config):
     bare_plant_height = Parameter(type=float, default=0.1, min=0.0, desc="Plant height of the bare segments (m)")
     bare_ndvi = Parameter(type=float, default=0.25, min=0.0, max=1.0, desc="NDVI of the bare segments")
     bay_width = Parameter(type=float, default=3.5, min=0.0, desc="Distance between PV rows (m)")
-    interval = Parameter(type=int, default=30, min=1, desc="Tick cadence, wall-clock aligned (minutes)")
+    interval = Parameter(type=int, default=60, min=1, desc="Tick cadence, wall-clock aligned (minutes)")
     offset = Parameter(type=int, default=0, min=0, desc="Tick offset within the interval (minutes)")
     intake_delay = DurationParameter(default="30min", desc="How far behind now the frontier may advance")
 
@@ -360,19 +380,15 @@ class FieldConfig(Config):
 
 @dataclass(frozen=True)
 class FieldSetup:
-    """Everything the runtime needs, assembled once by the adapter after
-    every section configured. Nothing here changes afterwards."""
+    """The configured sections the runtime receives; nothing here changes afterwards."""
 
     field: FieldConfig
     soil: SoilConfig
     shading: Any  # shading.ShadingConfig; typed Any to avoid an import cycle
     planner: Optional[PlannerConfig] = None
     plots: Optional[PlotConfig] = None
-    # resolved [soil_simulation.model] over field-level [model]: a lories Configurations
-    # (or None -> PDEConfig defaults); computed once by the adapter, consumed by SoilEngine.build
-    model: Any = None
-    # lories Location of the field (validate_meteo_inputs needs it); None offline
-    location: Any = None
+    model: Any = None  # resolved [soil_simulation.model] over field-level [model]
+    location: Any = None  # lories Location of the field; None offline
 
     @property
     def planner_drip(self) -> DripConfig:

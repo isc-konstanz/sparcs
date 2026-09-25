@@ -3,14 +3,7 @@
 sparcs.components.agriculture.fieldsim.core.state
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Value objects that cross the seams: ``SoilState`` in and out of the engine,
-``Forcing`` and ``ChainResult`` out of the weather chain, ``StepResult`` out of
-one advance, ``Plan`` out of the planner, ``Snapshot`` as the read model the
-``Simulation`` keeps for dash and tests. All immutable, all FiPy-free, all
-picklable.
-
-Units follow the live PDE core (``simulation._soil.FluxRates``): surface
-fluxes in kg/(m^2 s), drip flow in m^3/s per metre of row, pond depths in m.
+Immutable, FiPy-free, picklable value objects that cross the core seams.
 """
 
 from __future__ import annotations
@@ -26,13 +19,10 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class SoilState:
-    """Everything needed to resume the PDE exactly: the relative-saturation
-    field, its previous-step copy, the pond depth per surface segment, and
-    the instant the state is valid for. Mirrors what
-    ``SoilPDECore.save_state_blob`` persists."""
+    """Everything needed to resume the PDE exactly, plus the instant it is valid for."""
 
-    se: np.ndarray  # rel_sat.value
-    se_old: np.ndarray  # rel_sat._old.value
+    se: np.ndarray
+    se_old: np.ndarray
     surface_h: Mapping[str, float]  # pond depth [m] per open-sky segment + "WateringTopSegment"
     at: dt.datetime
 
@@ -41,9 +31,7 @@ class SoilState:
         return float(sum(self.surface_h.values())) if self.surface_h else 0.0
 
     def to_blob(self) -> bytes:
-        """The ``simulation_state`` wire format: npz with ``rel_sat``,
-        ``rel_sat_old``, ``surface_names`` (fixed-width unicode, no pickle)
-        and ``surface_h``. Byte-compatible with ``SoilPDECore.save_state_blob``."""
+        """The ``simulation_state`` npz wire format, byte-compatible with ``SoilPDECore``."""
         buf = io.BytesIO()
         names = np.array(list(self.surface_h.keys()), dtype=np.str_)
         values = np.array([self.surface_h[k] for k in names], dtype=float)
@@ -58,8 +46,7 @@ class SoilState:
 
     @classmethod
     def from_blob(cls, blob: bytes, at: dt.datetime) -> SoilState:
-        """Inverse of ``to_blob``; tolerates legacy blobs that carry only
-        ``rel_sat`` (then ``se_old = se`` and no ponds), as the live core does."""
+        """Inverse of ``to_blob``; tolerates legacy blobs carrying only ``rel_sat``."""
         arrays = np.load(io.BytesIO(blob), allow_pickle=True)
         se = np.asarray(arrays["rel_sat"], dtype=float)
         se_old = np.asarray(arrays["rel_sat_old"], dtype=float) if "rel_sat_old" in arrays.files else se.copy()
@@ -71,28 +58,27 @@ class SoilState:
 
 @dataclass(frozen=True)
 class Forcing:
-    """Surface forcing held constant over one window, in the PDE core's
-    units. One ``Forcing`` per weather row; the chain produces the list.
-    Maps one-to-one onto ``simulation._soil.FluxRates``."""
+    """Surface forcing held constant over the window ``(at - dt_s, at]``."""
 
-    start: dt.datetime
+    at: dt.datetime
     dt_s: float
-    rain_flux: float = 0.0  # kg/(m^2 s), uniform over the open-sky top
-    flow_m3s: float = 0.0  # m^3/s per metre of row, into the drip strip
+    rain_flux: float = 0.0  # kg/(m^2 s)
+    flow_m3s: float = 0.0  # m^3/s per metre of row
     seg_evap: Mapping[str, float] = field(default_factory=dict)  # kg/(m^2 s) per top segment
     seg_transp: Mapping[str, float] = field(default_factory=dict)  # kg/(m^2 s) per top segment
 
     @property
+    def start(self) -> dt.datetime:
+        return self.at - dt.timedelta(seconds=self.dt_s)
+
+    @property
     def end(self) -> dt.datetime:
-        return self.start + dt.timedelta(seconds=self.dt_s)
+        return self.at
 
 
 @dataclass(frozen=True)
 class ChainResult:
-    """Outputs of one ``WeatherChain.forcing_series`` call, published once
-    per weather chunk: shading factors and open-sky irradiance per row, the
-    ET intermediates and per-segment ET per row, and the shading progress
-    image when one was due."""
+    """Outputs of one ``WeatherChain.forcing_series`` call."""
 
     shading: pd.DataFrame
     evapotranspiration: pd.DataFrame
@@ -101,13 +87,7 @@ class ChainResult:
 
 @dataclass(frozen=True)
 class StepResult:
-    """Outcome of ``SoilEngine.advance`` for one ``Forcing``, completed by
-    ``Simulation.run`` with the assimilated state and the probe tensions.
-
-    ``diagnostics`` carries the mass-balance terms in kg/(m^2 h)
-    (``top_out, transpiration, top_in, bottom_out, runoff, demand_unmet,
-    balance_residual``) plus ``water_total``, ``surface_water``,
-    ``delta_storage``, ``skipped_s``, ``retries`` and ``walk_ok``."""
+    """Outcome of one advance, completed with the assimilated state and probe tensions."""
 
     state: SoilState
     diagnostics: Mapping[str, float]
@@ -117,8 +97,7 @@ class StepResult:
 
 @dataclass(frozen=True)
 class Plan:
-    """Outcome of ``IrrigationPlanner.plan``: the chosen candidate plus the
-    frames the forecast tables are written from."""
+    """Outcome of ``IrrigationPlanner.plan``: the chosen candidate and the forecast frames."""
 
     chosen: Any
     trajectories: Mapping[Any, pd.DataFrame]
@@ -130,8 +109,7 @@ class Plan:
 
 @dataclass(frozen=True)
 class Snapshot:
-    """What the ``Simulation`` knows right now. Dash and tests read this;
-    nothing reads back through the output channels."""
+    """What the ``Simulation`` knows right now; the read model for dash and tests."""
 
     state: SoilState | None
     last_chain: ChainResult | None = None

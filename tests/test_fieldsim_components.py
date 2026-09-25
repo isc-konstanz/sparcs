@@ -17,6 +17,7 @@ import pytest
 
 import numpy as np
 import pandas as pd
+from lories import Constant
 from lories.components.weather import Weather
 from lories.data import Channels
 from sparcs.components.agriculture.fieldsim import components
@@ -25,6 +26,10 @@ from sparcs.components.agriculture.fieldsim.core.config import FieldConfig, Fiel
 from sparcs.components.agriculture.fieldsim.core.simulation import Simulation
 from sparcs.components.agriculture.fieldsim.core.state import ChainResult, Plan, SoilState, StepResult
 from sparcs.components.agriculture.fieldsim.runtime.ports import InputKey
+from sparcs.components.agriculture.simulation import Evapotranspiration as LiveET
+from sparcs.components.agriculture.simulation import FieldSimulation as LiveField
+from sparcs.components.agriculture.simulation import GroundShading as LiveGroundShading
+from sparcs.components.agriculture.simulation import SoilSimulation as LiveSoil
 
 UTC = dt.timezone.utc
 
@@ -74,9 +79,11 @@ def test_simulation_build_wires_engine_chain_assimilator_planner(tmp_path):
     soil = _soil_config(tmp_path, "components_build.msh")
     planner_cfg = PlannerConfig.from_dict(
         {
-            "windows": {"w0": {"start": "08:10"}, "w1": {"start": "10:10"}},
-            "durations_min": [0, 5],
-            "grid_mode": "ladder",
+            "windows": {
+                "w0": {"start": "08:10", "durations": ["0min", "5min"]},
+                "w1": {"start": "10:10", "durations": ["0min", "5min"]},
+            },
+            "grid_mode": "fill_order",
             "decision_probes": ["strip"],
             "threshold_hpa": 5.0,
             "max_windows": 4,
@@ -219,15 +226,17 @@ def test_channel_inputs_irrigation_measured_then_state_then_empty():
     got = inputs.read(InputKey.IRRIGATION, start, end)
     assert got["irrigation_flow_lpm"].tolist() == pytest.approx([5.0])
 
-    # state wired but not explicit -> never fabricate a forcing from it: empty
+    # state wired but not explicit -> never fabricate a forcing from it: 0.0
     soil.drip.explicit = False
     got = inputs.read(InputKey.IRRIGATION, start, end)
-    assert got.empty
+    assert not got.empty
+    assert (got["irrigation_flow_lpm"] == 0.0).all()
 
-    # no meter and no state channel at all -> empty
+    # no meter and no state channel at all -> 0.0 on the weather index
     field._irrigation_state_channel = None
     got = inputs.read(InputKey.IRRIGATION, start, end)
-    assert got.empty
+    assert not got.empty
+    assert (got["irrigation_flow_lpm"] == 0.0).all()
 
 
 def test_channel_inputs_tension_one_column_per_sensor_nan_where_absent():
@@ -426,10 +435,53 @@ def test_channel_outputs_chain_writes_shading_et_and_vegetation_per_row():
     assert [v for _, v in field_ns.data["lai"].calls] == [1.0, 1.0]
 
 
+class _FakePredictorData(dict):
+    """Channel lookups by key, auto-creating a recording channel whose ``id``
+    is the key (so the publisher's key -> id rename is the identity) and whose
+    ``logger`` is None (so the connector hop falls back to the id lookups)."""
+
+    def __missing__(self, key):
+        channel = _RecordingChannel()
+        channel.id = key
+        channel.logger = None
+        self[key] = channel
+        return channel
+
+
+class _FakePredictor:
+    """The surface ``ForecastTablePublisher`` reads off a predictor."""
+
+    _HEADER_FORECAST_ID_KEY = components.SoilPredictor._HEADER_FORECAST_ID_KEY
+    _HEADER_IS_RECOMMENDED_KEY = components.SoilPredictor._HEADER_IS_RECOMMENDED_KEY
+    _HEADER_TOTAL_MIN_KEY = components.SoilPredictor._HEADER_TOTAL_MIN_KEY
+    _HEADER_WEATHER_CREATION_KEY = components.SoilPredictor._HEADER_WEATHER_CREATION_KEY
+    _IRRIGATION_STATE_KEY = components.SoilPredictor._IRRIGATION_STATE_KEY
+    _IRRIGATION_TIMESTAMP_CREATION_KEY = components.SoilPredictor._IRRIGATION_TIMESTAMP_CREATION_KEY
+    _IMAGE_KEY = components.SoilPredictor._IMAGE_KEY
+    _IMAGE_TIMESTAMP_CREATION_KEY = components.SoilPredictor._IMAGE_TIMESTAMP_CREATION_KEY
+    _header_window_min_keys = ()
+    _header_window_start_keys = ()
+    _traj_channel_keys = {"strip": "traj_strip"}
+    _detail_creation_keys = {}
+    _detail_forecast_id_keys = {}
+
+    tables = components.SoilPredictor.tables
+    _write_direct_frame = components.SoilPredictor._write_direct_frame
+    _resolve_logger_connector = components.SoilPredictor._resolve_logger_connector
+    _logger_connector_from_channel = components.SoilPredictor._logger_connector_from_channel
+    _bump_write_failure = components.SoilPredictor._bump_write_failure
+
+    def __init__(self, connector):
+        self.name = "fieldsim_test.soil_predictor"
+        self._logger_id = "db"
+        self._write_failures = None
+        self.connectors = {"db": connector}
+        self.data = _FakePredictorData()
+
+
 def test_channel_outputs_plan_writes_four_tables_best_effort():
     connector = _FakeConnector(raise_on_column="irrigation_state")
-    predictor = _NS([])
-    predictor.connectors = {"db": connector}
+    predictor = _FakePredictor(connector)
     field = SimpleNamespace(setup=SimpleNamespace(planner=SimpleNamespace(logger="db")))
     outputs = components.ChannelOutputs(field, shading=None, et=None, soil=None, predictor=predictor)
 
@@ -451,83 +503,123 @@ def test_channel_outputs_plan_writes_four_tables_best_effort():
     assert {"traj_strip"} in written_columns
     assert {"predict_image"} in written_columns
 
-
-# --------------------------------------------------------------------------- CHANNELS completeness
-
-
-def test_ground_shading_channels_match_live():
-    try:
-        from sparcs.components.agriculture.simulation.ground_shading import GroundShading as LiveGroundShading
-
-        expected = {c.key for c in LiveGroundShading.CHANNELS} | {"shading_progress_image", "plot_strikes"}
-    except ImportError:
-        expected = {"shading_factor", "shading_progress_image", "plot_strikes"}
-    assert {spec.key for spec in components.GroundShading.CHANNELS} == expected
+    failures = components._WRITE_FAILURE_CHANNELS["irrigation table"]
+    assert predictor._write_failures == {"irrigation table": 1}
+    assert [v for _, v in predictor.data[failures].calls] == [1.0]
 
 
-def test_evapotranspiration_channels_match_live():
-    try:
-        from sparcs.components.agriculture.simulation.evapotranspiration import Evapotranspiration as LiveET
+def test_channel_outputs_plan_skips_a_connector_without_write():
+    predictor = _FakePredictor(connector=object())
+    field = SimpleNamespace(setup=SimpleNamespace(planner=SimpleNamespace(logger="db")))
+    outputs = components.ChannelOutputs(field, shading=None, et=None, soil=None, predictor=predictor)
 
-        expected = {c.key for c in LiveET.CHANNELS}
-    except ImportError:
-        expected = {
-            "sat_vapor_pressure",
-            "ground_vapor_pressure",
-            "vaporization_heat",
-            "slope_sat_vapor_pressure",
-            "net_irradiance",
-            "aerodynamic_resistance",
-            "soil_heat_flow",
-            "resistance_surface",
-            "radiation_term",
-            "aerodynamic_term",
-            "evapotranspiration",
-        }
-    assert {spec.key for spec in components.Evapotranspiration.CHANNELS} == expected
+    ts = pd.Timestamp("2026-06-21 08:00", tz="UTC")
+    plan = Plan(
+        chosen=None,
+        trajectories={},
+        header=pd.DataFrame({"forecast_id": [0]}, index=[ts]),
+        detail=pd.DataFrame(),
+        irrigation=pd.DataFrame(),
+        image=None,
+    )
+
+    outputs.plan(plan)  # skipped, not raised
+
+    assert predictor._write_failures is None
 
 
-def test_soil_simulation_channels_match_live():
-    try:
-        from sparcs.components.agriculture.simulation.soil import SoilSimulation as LiveSoil
-
-        expected = {
-            c.key
-            for c in (
-                LiveSoil.WATER_TOP_IN,
-                LiveSoil.WATER_TOP_OUT,
-                LiveSoil.WATER_BOTTOM,
-                LiveSoil.WATER_TRANSP,
-                LiveSoil.WATER_RUNOFF,
-                LiveSoil.WATER_DEMAND_UNMET,
-                LiveSoil.WATER_BALANCE_RESIDUAL,
-                LiveSoil.WATER_ANCHOR,
-                LiveSoil.WALK_SKIPPED_S,
-                LiveSoil.WALK_RETRIES,
-                LiveSoil.WEATHER_STALL,
-                LiveSoil.TICK_FAILURES,
-            )
-        } | {LiveSoil.SIMULATION_STATE.key, LiveSoil.SOIL_PROGRESS_IMAGE.key, "plot_strikes"}
-    except ImportError:
-        expected = {
-            "top_in",
-            "top_out",
-            "bottom_out",
-            "transpiration",
-            "runoff",
-            "demand_unmet",
-            "balance_residual",
-            "anchor",
-            "skipped_s",
-            "retries",
-            "weather_stall",
-            "tick_failures",
-            "simulation_state",
-            "soil_progress_image",
-            "plot_strikes",
-        }
-    assert {spec.key for spec in components.SoilSimulation.CHANNELS} == expected
+# --------------------------------------------------------------------------- CHANNELS
 
 
-def test_soil_predictor_channels_empty_tables_only():
-    assert components.SoilPredictor.CHANNELS == ()
+def _declared(namespace) -> set:
+    return {str(c) for c in (*namespace.CHANNELS, *namespace.PLOT_CHANNELS)}
+
+
+def test_ground_shading_channels_reuse_the_live_constants():
+    assert components.GroundShading.CHANNELS[0] is LiveGroundShading.SHADING_FACTOR
+    assert components.GroundShading.PLOT_CHANNELS == (LiveGroundShading.SHADING_PROGRESS_IMAGE,)
+    assert _declared(components.GroundShading) == {"shading_factor", "shading_progress_image", "plot_strikes"}
+
+
+def test_evapotranspiration_channels_are_the_live_constants():
+    assert components.Evapotranspiration.CHANNELS == tuple(LiveET.CHANNELS)
+    assert components.Evapotranspiration.PLOT_CHANNELS == ()
+
+
+def test_soil_simulation_channels_reuse_the_live_constants():
+    expected = {
+        c.key
+        for c in (
+            LiveSoil.SIMULATION_STATE,
+            LiveSoil.SOIL_PROGRESS_IMAGE,
+            LiveSoil.WATER_TOP_IN,
+            LiveSoil.WATER_TOP_OUT,
+            LiveSoil.WATER_BOTTOM,
+            LiveSoil.WATER_TRANSP,
+            LiveSoil.WATER_RUNOFF,
+            LiveSoil.WATER_DEMAND_UNMET,
+            LiveSoil.WATER_BALANCE_RESIDUAL,
+            LiveSoil.WATER_ANCHOR,
+            LiveSoil.WALK_SKIPPED_S,
+            LiveSoil.WALK_RETRIES,
+            LiveSoil.WEATHER_STALL,
+            LiveSoil.TICK_FAILURES,
+        )
+    } | {"plot_strikes"}
+    assert _declared(components.SoilSimulation) == expected
+    assert components.SoilSimulation.PLOT_CHANNELS == (LiveSoil.SOIL_PROGRESS_IMAGE,)
+    assert all(isinstance(c, Constant) for c in components.SoilSimulation.CHANNELS)
+
+
+def test_field_level_channels_are_the_live_constants():
+    assert components._VEGETATION_CHANNELS == tuple(LiveField.VEGETATION_CHANNELS)
+    assert components._SEGMENT_CHANNELS == tuple(LiveField.SEGMENT_CHANNELS)
+    assert components._SOIL_DIAGNOSTIC_CHANNELS[0] is LiveSoil.WATER_TOP_IN
+
+
+def test_soil_predictor_channels_are_the_write_failure_counters():
+    assert components.SoilPredictor.CHANNELS == tuple(components._WRITE_FAILURE_CHANNELS.values())
+    assert components.SoilPredictor._HEADER_TABLE_NAME == "agri_field_forecast"
+
+
+class _RecordingAdds:
+    """Stands in for ``Component.data`` during channel registration."""
+
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    def add(self, key, **configs) -> None:
+        self.calls.append((key, configs))
+
+
+def _added(namespace, **kwargs) -> dict:
+    data = _RecordingAdds()
+    namespace.register_channels(data, **kwargs)
+    assert all(isinstance(key, Constant) for key, _ in data.calls)
+    return {str(key): configs for key, configs in data.calls}
+
+
+def test_register_channels_passes_constants_with_the_live_kwargs():
+    soil = _added(components.SoilSimulation)
+    assert soil["top_in"] == {"aggregate": "mean", "logger": {"enabled": True}}
+    assert soil["weather_stall"] == {"aggregate": "mean", "logger": {"enabled": True}}
+    assert soil["simulation_state"] == {"aggregate": "last", "logger": {"enabled": True, "column": "state"}}
+    assert soil["soil_progress_image"] == {"aggregate": "last", "logger": {"enabled": True, "column": "image"}}
+    assert soil["plot_strikes"] == {"aggregate": "last", "logger": {"enabled": False}}
+
+    shading = _added(components.GroundShading)
+    assert shading["shading_factor"] == {"aggregate": "mean", "logger": {"enabled": False}}
+    assert shading["shading_progress_image"] == {"aggregate": "last", "logger": {"enabled": True}}
+
+    et = _added(components.Evapotranspiration)
+    assert all(configs == {"aggregate": "mean", "logger": {"enabled": False}} for configs in et.values())
+
+    predictor = _added(components.SoilPredictor)
+    assert predictor["header_write_failures"] == {"aggregate": "last", "logger": {"enabled": False}}
+
+
+def test_register_channels_skips_the_image_channels_when_plot_is_disabled():
+    for namespace in (components.GroundShading, components.SoilSimulation):
+        added = _added(namespace, plot_enabled=False)
+        assert set(added) == {str(c) for c in namespace.CHANNELS}
+        assert set(added).isdisjoint({str(c) for c in namespace.PLOT_CHANNELS})

@@ -3,9 +3,8 @@
 sparcs.components.agriculture.fieldsim.runtime.memory
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-In-memory implementations of the two ports. Shipped adapters, not test
-doubles: ``ScenarioRunner`` runs on them, and so do tests, notebooks and
-tuning campaigns.
+In-memory implementations of the two ports, used by ``ScenarioRunner``,
+tests, notebooks and tuning campaigns.
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ from .ports import InputKey
 
 class FrameInputs:
     """``Inputs`` over one DataFrame per key. Frames are indexed by
-    timestamp; ``read`` slices ``[start, end)``."""
+    timestamp; ``read`` slices ``(start, end]``."""
 
     def __init__(self, frames: Mapping[InputKey, pd.DataFrame], state: Optional[SoilState] = None) -> None:
         self.frames = dict(frames)
@@ -31,7 +30,7 @@ class FrameInputs:
         frame = self.frames.get(key)
         if frame is None or frame.empty:
             return pd.DataFrame()
-        return frame.loc[(frame.index >= start) & (frame.index < end)]
+        return frame.loc[(frame.index > start) & (frame.index <= end)]
 
     def load_state(self) -> SoilState | None:
         return self.state

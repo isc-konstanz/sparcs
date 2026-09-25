@@ -3,11 +3,9 @@
 sparcs.components.agriculture.fieldsim.runtime.ports
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The two protocols between the live runner and the outside world, split by
-direction. ``Inputs`` is one keyed ranged read plus the persisted state;
-``Outputs`` is one method per result type. Adding an input is a new key, not
-a new method. Dash does not read through ``Outputs``; it reads the
-``Snapshot`` the ``Simulation`` keeps.
+The two protocols between the runner and the outside world: ``Inputs`` is
+one keyed ranged read plus the persisted state, ``Outputs`` one method per
+result type.
 """
 
 from __future__ import annotations
@@ -30,19 +28,17 @@ class InputKey(enum.Enum):
 
 class Inputs(Protocol):
     def read(self, key: InputKey, start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
-        """Rows in ``[start, end)``; empty frame when nothing is available."""
+        """Rows in ``(start, end]``; empty frame when nothing is available."""
         ...
 
     def load_state(self) -> SoilState | None:
-        """Last persisted state, or None on a cold start. Called once, on
-        the first tick; there is no listener."""
+        """Last persisted state, or None on a cold start."""
         ...
 
 
 class Outputs(Protocol):
     def chain(self, now: dt.datetime, result: ChainResult) -> None:
-        """Shading and ET outputs for one weather chunk. The sink owns the
-        cadence: channels fan out per row, a recorder keeps the frame."""
+        """Shading and ET outputs for one weather chunk."""
         ...
 
     def step(self, result: StepResult) -> None:
@@ -50,7 +46,7 @@ class Outputs(Protocol):
         ...
 
     def plan(self, plan: Plan) -> None:
-        """Forecast header / detail / irrigation / image tables, best effort."""
+        """Forecast header / detail / irrigation / image tables."""
         ...
 
     def save_state(self, state: SoilState) -> None: ...

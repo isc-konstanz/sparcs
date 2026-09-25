@@ -3,34 +3,9 @@
 sparcs.components.agriculture.fieldsim.core.planner
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Irrigation planning over a forecast horizon. Receives the shared engine and a
-state snapshot; never reaches into the live simulation or replays the chain
-through a parent component.
-
-Candidate enumeration, scheduling and scoring stay the live module functions
-(``simulation._predictor_candidates``); the roll-out mechanics stay the live
-``simulation._predictor_rollout.RolloutEngine`` (the ladder/caterpillar,
-the independent reference roll, and the parallel spawn-pool executor).
-Ladder versus parallel is a flag on ``PlannerConfig``, not a strategy
-hierarchy; both produce ``{candidate: (timestamps, {probe_id: [Se, ...]})}``
-and the rest of ``plan`` does not care which ran.
-
-Grid-mode vocabulary: ``PlannerConfig.grid_mode`` uses fieldsim's
-``"ladder"``/``"full"`` pair; the live functions use ``"fill_order"``/
-``"full"``. ``_GRID_MODE_LIVE`` is the one translation site.
-
-The engine owns exactly one live PDE core, and a roll-out mutates it in
-place (loads state blobs, walks windows). ``plan`` always calls
-``engine.invalidate()`` in a ``finally`` so the engine's identity cache never
-trusts whatever candidate a roll-out left the core holding.
-
-The three forecast-table frame builders below are pure ports of
-``simulation._predictor_tables.ForecastTablePublisher.build_header_frame`` /
-``build_detail_frame`` / ``build_irrigation_frame``: same column-name
-vocabulary (so the tables stay byte-compatible with the live schema), but
-taking explicit arguments instead of reading through a predictor instance.
-``forecast_ids`` and ``_merge_irrigation_intervals`` are already pure
-module-level helpers there and are imported, not re-implemented.
+Irrigation planning over a forecast horizon, on the shared engine and a state
+snapshot. Candidate enumeration, scoring and roll-out are the live functions;
+the frame builders keep the live forecast-table column vocabulary.
 """
 
 from __future__ import annotations
@@ -41,6 +16,7 @@ from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
 import pandas as pd
+from lories.core import ConfigurationError
 from sparcs.components.agriculture.simulation._predictor_candidates import (
     WateringWindow,
     build_candidate_grid,
@@ -60,16 +36,9 @@ from .state import Plan, SoilState
 
 logger = logging.getLogger(__name__)
 
-Candidate = tuple  # tuple[pd.Timedelta, ...]; loose alias, ladder entries vary in arity only by config
+Candidate = tuple  # tuple[pd.Timedelta, ...]
 RawTrajectory = tuple  # tuple[list[pd.Timestamp], dict[str, list[float]]]
 
-# fieldsim's PlannerConfig.grid_mode vocabulary -> the live candidate/rollout
-# functions' vocabulary (context/sparcs.md reserves "ladder" for the strictly
-# front-loaded subset the live code calls "fill_order").
-_GRID_MODE_LIVE = {"ladder": "fill_order", "full": "full"}
-
-# Column-name vocabulary ported verbatim from _predictor_tables so the
-# forecast tables stay byte-compatible with the live schema.
 _HEADER_FORECAST_ID_KEY = "forecast_id"
 _HEADER_IS_RECOMMENDED_KEY = "is_recommended"
 _HEADER_TOTAL_MIN_KEY = "total_min"
@@ -88,13 +57,7 @@ def build_header_frame(
     windows: Sequence[WateringWindow],
     max_windows: int,
 ) -> pd.DataFrame:
-    """Port of ``ForecastTablePublisher.build_header_frame``: one row per
-    candidate in ``ladder``, indexed at ``run_timestamp``. Per candidate: its
-    deterministic ``forecast_id`` (``forecast_ids``), its per-window minutes
-    and the configured windows' clock-time starts (``None`` past the
-    configured count), ``is_recommended`` (True only for ``chosen``),
-    ``total_min`` and ``weather_creation`` (constant across every row).
-    """
+    """One row per ladder candidate, indexed at ``run_timestamp``."""
     ids = forecast_ids(list(ladder))
     window_min_keys = [f"w{i}_min" for i in range(max_windows)]
     window_start_keys = [f"w{i}_start" for i in range(max_windows)]
@@ -135,13 +98,7 @@ def build_detail_frame(
     run_timestamp: pd.Timestamp,
     probe_ids: Sequence[str],
 ) -> pd.DataFrame:
-    """Port of ``ForecastTablePublisher.build_detail_frame``: per-probe LONG
-    rows (one row per candidate x forecast-timestamp x probe). Every row
-    populates ONLY that probe's own three columns (tension, its
-    ``timestamp_creation`` twin, its ``forecast_id`` twin); every other
-    probe's three columns are absent/NaN on that row -- see the live
-    docstring for why (the direct-write path's per-probe surrogate grouping).
-    """
+    """One LONG row per candidate x forecast-timestamp x probe, populating only that probe's columns."""
     ids = forecast_ids(list(ladder))
     tension_keys = {p: f"traj_{p}" for p in probe_ids}
     creation_keys = {p: f"traj_{p}{_DETAIL_TIMESTAMP_CREATION_SUFFIX}" for p in probe_ids}
@@ -186,10 +143,7 @@ def build_irrigation_frame(
     horizon_end: pd.Timestamp,
     run_timestamp: pd.Timestamp,
 ) -> pd.DataFrame:
-    """Port of ``ForecastTablePublisher.build_irrigation_frame``: one
-    ``(on_ts, True)`` / ``(off_ts, False)`` row per merged on-interval of the
-    chosen candidate's watering schedule, both stamped with ``run_timestamp``.
-    """
+    """An ``(on_ts, True)`` / ``(off_ts, False)`` row pair per merged on-interval."""
     columns = [_IRRIGATION_STATE_KEY, _IRRIGATION_TIMESTAMP_CREATION_KEY]
     schedule = build_flow_schedule(list(windows), list(candidate), flow_m3s, horizon_start, horizon_end)
     intervals = _merge_irrigation_intervals(schedule)
@@ -227,34 +181,26 @@ class IrrigationPlanner:
 
         self._flow_m3s = derive_flow_m3s(drip.nozzle_count, drip.nozzle_flow_lph, total_drip_line_length_m)
 
-        # Parse windows exactly as SoilPredictor.configure does: each
-        # [windows.<name>] carries its own `durations` list (duration strings);
-        # a window without one falls back to the section-level durations_min.
         self._windows: list[WateringWindow] = []
         self._window_durations: list[list[pd.Timedelta]] = []
-        raw_windows = config.windows or {}
-        if raw_windows:
-            fallback = sorted({pd.Timedelta(minutes=int(m)) for m in config.durations_min})
-            for key, window_cfg in raw_windows.items():
-                start = pd.Timestamp(str(window_cfg["start"])).time()
-                if "durations" in window_cfg:
-                    durations = sorted({pd.Timedelta(str(d)) for d in window_cfg["durations"]})
-                else:
-                    durations = list(fallback)
-                if pd.Timedelta(0) not in durations:
-                    raise ValueError(
-                        f"{name}: [windows.{key}] is missing a '0min' duration; "
-                        "every window's durations list must include zero."
-                    )
-                self._windows.append(WateringWindow(start=start))
-                self._window_durations.append(durations)
-            order = sorted(range(len(self._windows)), key=lambda i: self._windows[i].start)
-            self._windows = [self._windows[i] for i in order]
-            self._window_durations = [self._window_durations[i] for i in order]
+        for key, window_cfg in (config.windows or {}).items():
+            if "durations" not in window_cfg:
+                raise ConfigurationError(f"{name}: [windows.{key}] is missing its 'durations' list.")
+            start = pd.Timestamp(str(window_cfg["start"])).time()
+            durations = sorted({pd.Timedelta(str(d)) for d in window_cfg["durations"]})
+            if pd.Timedelta(0) not in durations:
+                raise ValueError(
+                    f"{name}: [windows.{key}] is missing a '0min' duration; "
+                    "every window's durations list must include zero."
+                )
+            self._windows.append(WateringWindow(start=start))
+            self._window_durations.append(durations)
+        order = sorted(range(len(self._windows)), key=lambda i: self._windows[i].start)
+        self._windows = [self._windows[i] for i in order]
+        self._window_durations = [self._window_durations[i] for i in order]
 
         self._grid_mode = config.grid_mode
-        self._live_grid_mode = _GRID_MODE_LIVE[self._grid_mode]
-        self._ladder: list[Candidate] = build_candidate_grid(self._window_durations, self._live_grid_mode)
+        self._ladder: list[Candidate] = build_candidate_grid(self._window_durations, self._grid_mode)
         check_candidate_cap(self._ladder, config.combo_cap, log_name=name)
 
         decision_probes = [str(p) for p in config.decision_probes]
@@ -289,19 +235,10 @@ class IrrigationPlanner:
         run_timestamp: pd.Timestamp,
         weather_creation: Optional[pd.Timestamp] = None,
     ) -> Plan:
-        """
-        1. zero-flow baseline from ``state.se``: a bare roll with no watering.
-        2. no configured windows -> the zero-flow roll IS the plan
-           (``chosen=None``).
-        3. otherwise roll every ladder candidate (``rollout``: ladder or
-           parallel, degrading to ladder on any parallel failure).
-        4. convert every candidate's Se trajectory to signed tension (hPa)
-           at the roll -> publish boundary, one frame per candidate.
-        5. select the recommended candidate against ``threshold_hpa`` at the
-           decision probes.
-        6. build the header / detail / irrigation frames for the sinks.
-        The engine's identity cache is always invalidated on the way out
-        (every roll here mutates the shared core directly).
+        """Roll the candidates, select one against ``threshold_hpa`` and build the frames.
+
+        Without configured windows the zero-flow roll is the plan (``chosen=None``).
+        The engine's identity cache is always invalidated on the way out.
         """
         try:
             ic_se = np.asarray(state.se, dtype=float)
@@ -333,7 +270,7 @@ class IrrigationPlanner:
             }
 
             chosen = select_candidate(
-                self._ladder, ladder_tension, self._decision_probes, self._threshold_hpa, self._live_grid_mode
+                self._ladder, ladder_tension, self._decision_probes, self._threshold_hpa, self._grid_mode
             )
 
             header = build_header_frame(
@@ -355,11 +292,7 @@ class IrrigationPlanner:
         horizon_start: pd.Timestamp,
         horizon_end: pd.Timestamp,
     ) -> dict[Candidate, RawTrajectory]:
-        """Ladder (shared-prefix caterpillar) or parallel (process pool,
-        workers rebuild an engine from the pickled ``SoilConfig``). Any
-        parallel-execution failure degrades to the ladder for this call
-        (mirrors ``SoilPredictor._rollout_dispatch``): a parallelism failure
-        must never abort a plan."""
+        """Sequential ladder or parallel process pool; a parallel failure degrades to the ladder."""
         engine = self._rollout_engine()
         if self.config.parallel:
             try:
@@ -388,7 +321,7 @@ class IrrigationPlanner:
             windows=self._windows,
             window_durations=self._window_durations,
             flow_m3s=self._flow_m3s,
-            grid_mode=self._live_grid_mode,
+            grid_mode=self._grid_mode,
             ladder=self._ladder,
             max_workers=self._max_workers,
             name=self.name,
@@ -398,9 +331,7 @@ class IrrigationPlanner:
         )
 
     def _to_tension(self, se_traj: Mapping[str, list[float]]) -> dict[str, list[float]]:
-        """Se -> signed water tension (negative hPa), the same roll ->
-        publish boundary conversion as ``engine.tension_at`` (scalar) and
-        ``SoilBase._tension_from_se`` (sequence), applied per probe here."""
+        """Se -> signed water tension (negative hPa) per probe."""
         out: dict[str, list[float]] = {}
         for probe_id, values in se_traj.items():
             tension = np.asarray(self.engine.model.psi_from_se(np.asarray(values, dtype=float)), dtype=float)

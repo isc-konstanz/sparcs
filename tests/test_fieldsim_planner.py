@@ -2,16 +2,8 @@
 """sparcs.tests.test_fieldsim_planner
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``IrrigationPlanner`` over the live ``RolloutEngine`` / candidate functions /
-forecast-table builders, on the tmp-mesh ``SoilEngine`` recipe from
-``test_fieldsim_engine.py`` with a strip probe: candidate-grid construction
-against the live ``build_candidate_grid``, a full ``plan()`` over a synthetic
-horizon, ladder/full grid-mode equivalence (the same guard
-``test_soil_predictor_ladder_rollout.py`` makes for the live predictor), the
-no-windows zero-flow baseline, the ``engine.invalidate()`` contract, the
-candidate-cap guard, and the parallel-roll-out degrade-to-ladder path.
-
-Heavy (builds a real Gmsh mesh and runs FiPy): marked slow.
+``IrrigationPlanner`` over the live roll-out and forecast-table builders.
+Heavy (Gmsh + FiPy): marked slow.
 """
 
 import datetime as dt
@@ -24,6 +16,7 @@ import pandas as pd
 pytestmark = pytest.mark.slow
 
 from lories.components.weather import Weather  # noqa: E402
+from lories.core import ConfigurationError  # noqa: E402
 from sparcs.components.agriculture.fieldsim.core.config import DripConfig, PlannerConfig, SoilConfig  # noqa: E402
 from sparcs.components.agriculture.fieldsim.core.engine import SoilEngine  # noqa: E402
 from sparcs.components.agriculture.fieldsim.core.planner import IrrigationPlanner  # noqa: E402
@@ -59,7 +52,7 @@ def _soil_config(tmp_path, filename: str) -> SoilConfig:
 def _engine_and_probes(tmp_path, filename: str):
     soil = _soil_config(tmp_path, filename)
     engine = SoilEngine.build(soil, rel_sat_name=f"Se_{filename}")
-    probes_block = soil.raw.get_member("probes", defaults={}, ensure_exists=True)
+    probes_block = soil.configs.get_member("probes", defaults={}, ensure_exists=True)
     probes = engine.probes(probes_block)
     return engine, probes
 
@@ -80,16 +73,13 @@ def _drip() -> DripConfig:
 def _planner_config(**overrides) -> dict:
     base = {
         "windows": {
-            "w0": {"start": "08:10"},
-            "w1": {"start": "10:10"},
+            "w0": {"start": "08:10", "durations": ["0min", "5min"]},
+            "w1": {"start": "10:10", "durations": ["0min", "5min"]},
         },
-        "durations_min": [0, 5],
-        "grid_mode": "ladder",
+        "grid_mode": "fill_order",
         "decision_probes": ["strip"],
-        # Low (near-saturation) target so MORE watering scores better --
-        # makes the recommended candidate, and therefore the irrigation-frame
-        # path, deterministic across the two grid modes and independent of
-        # wherever the default IC's absolute tension happens to land.
+        # Near-saturation target, so more watering always scores better and the
+        # recommended candidate is deterministic across both grid modes.
         "threshold_hpa": 5.0,
         "max_windows": 4,
     }
@@ -180,7 +170,7 @@ def test_plan_returns_chosen_candidate_and_forecast_tables(tmp_path):
 def test_ladder_and_full_grid_modes_agree_on_a_shared_candidate(tmp_path):
     horizon_start = pd.Timestamp("2026-07-03 08:00", tz=UTC)
 
-    planner_ladder, engine_ladder = _build_planner(tmp_path, "planner_eq_ladder.msh", grid_mode="ladder")
+    planner_ladder, engine_ladder = _build_planner(tmp_path, "planner_eq_ladder.msh", grid_mode="fill_order")
     weather_ladder, seg_et_ladder = _weather_and_seg_et(engine_ladder, horizon_start)
     ic_ladder = engine_ladder.initial_state(horizon_start.to_pydatetime())
     ladder_traj = planner_ladder.rollout(
@@ -245,7 +235,7 @@ def test_plan_invalidates_engine_so_advance_matches_a_fresh_engine(tmp_path):
     planner.plan(state, weather, seg_et, weather.index[0], weather.index[-1], run_timestamp=horizon_start)
     assert engine._current is None
 
-    forcing = Forcing(start=state.at, dt_s=3600.0, rain_flux=1.0e-5)
+    forcing = Forcing(at=state.at, dt_s=3600.0, rain_flux=1.0e-5)
     result = engine.advance(state, forcing)
 
     fresh_engine, _fresh_probes = _engine_and_probes(tmp_path, "planner_invalidate_fresh.msh")
@@ -262,7 +252,16 @@ def test_plan_invalidates_engine_so_advance_matches_a_fresh_engine(tmp_path):
 
 def test_combo_cap_exceeded_raises(tmp_path):
     engine, probes = _engine_and_probes(tmp_path, "planner_cap.msh")
-    config = PlannerConfig.from_dict(_planner_config(durations_min=[0, 5, 10, 15, 20], combo_cap=2))
+    durations = ["0min", "5min", "10min", "15min", "20min"]
+    config = PlannerConfig.from_dict(
+        _planner_config(
+            windows={
+                "w0": {"start": "08:10", "durations": durations},
+                "w1": {"start": "10:10", "durations": durations},
+            },
+            combo_cap=2,
+        )
+    )
     with pytest.raises(ValueError):
         IrrigationPlanner(config, engine, probes=probes, drip=_drip(), total_drip_line_length_m=1.0)
 
@@ -290,18 +289,27 @@ def test_parallel_rollout_failure_degrades_to_ladder(tmp_path, monkeypatch, capl
 
 
 def test_per_window_durations_are_honoured(tmp_path):
-    """The real soil_predictor.conf gives every [windows.<name>] its own
-    `durations` list; a window without one falls back to durations_min."""
     planner, _ = _build_planner(
         tmp_path,
         "durations.msh",
-        durations_min=[0, 15],
         windows={
             "morning": {"start": "08:00", "durations": ["0min", "30min", "1h"]},
-            "evening": {"start": "20:00"},
+            "evening": {"start": "20:00", "durations": ["0min", "15min"]},
         },
     )
     assert planner._window_durations[0] == [pd.Timedelta(0), pd.Timedelta("30min"), pd.Timedelta("1h")]
     assert planner._window_durations[1] == [pd.Timedelta(0), pd.Timedelta("15min")]
     with pytest.raises(ValueError, match="missing a '0min' duration"):
         _build_planner(tmp_path, "durations.msh", windows={"m": {"start": "08:00", "durations": ["30min"]}})
+
+
+def test_window_without_durations_is_a_configuration_error(tmp_path):
+    with pytest.raises(ConfigurationError, match=r"\[windows.evening\] is missing its 'durations' list"):
+        _build_planner(
+            tmp_path,
+            "durations_missing.msh",
+            windows={
+                "morning": {"start": "08:00", "durations": ["0min", "30min"]},
+                "evening": {"start": "20:00"},
+            },
+        )

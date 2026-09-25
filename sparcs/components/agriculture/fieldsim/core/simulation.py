@@ -3,11 +3,8 @@
 sparcs.components.agriculture.fieldsim.core.simulation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The simulation session: the scenario and test API. Owns the current state
-and the latest results, composes engine, chain, assimilator and planner, and
-runs the per-chunk sequence. No I/O, no clock, no gating; those belong to
-``runtime.runner``. Notebooks, tuning campaigns and dt benches call ``run``
-directly with frames.
+The simulation session: owns the state, composes engine, chain, assimilator
+and planner, and runs the per-chunk sequence. No I/O, no clock, no gating.
 """
 
 from __future__ import annotations
@@ -26,18 +23,13 @@ from .engine import Cancel, SoilEngine
 from .evapotranspiration import ETModel
 from .planner import IrrigationPlanner
 from .shading import _N_ROWS, MODE_FREE_FIELD, ShadingModel
-from .state import ChainResult, Plan, Snapshot, SoilState, StepResult
+from .state import ChainResult, Forcing, Plan, Snapshot, SoilState, StepResult
 
 logger = logging.getLogger(__name__)
 
 
 def _resolve_segment_ranges(mesh, shading_config, bay_width: float) -> Optional[dict[str, tuple[float, float]]]:
-    """Soil-mesh top-segment x-ranges in pvfactors coordinates (port of the
-    live ``GroundShading._resolve_segment_ranges``): aligns the PV array
-    centre over the plant centre of the soil mesh, then maps each mesh
-    segment. ``None`` when there is no mesh. In ``free_field`` mode (no PV
-    array) the shift is the plant centre alone, matching the live no-setups
-    branch."""
+    """Soil-mesh top-segment x-ranges in pvfactors coordinates; ``None`` without a mesh."""
     if mesh is None:
         return None
     dx = mesh.dx
@@ -79,18 +71,15 @@ class Simulation:
         rel_sat_name: str = "relative saturation",
         name: str = "fieldsim",
     ) -> "Simulation":
-        """Assemble engine, chain, assimilator and planner from a configured
-        ``FieldSetup`` plus the sensors discovered at activation. Lories-free:
-        every argument is a plain config/value object, never a Component.
+        """Assemble engine, chain, assimilator and planner from a configured ``FieldSetup``.
 
-        Mutates ``setup.soil.probe_specs`` in place (``SoilConfig`` is not
-        frozen) so every later reader of the setup sees the resolved probes.
+        Sets ``setup.soil.probe_specs`` in place.
         """
         engine = SoilEngine.build(setup.soil, setup.model, rel_sat_name=rel_sat_name)
 
         probes = (
-            list(engine.probes(setup.soil.raw.get_member("probes", defaults={}, ensure_exists=True)))
-            if (setup.soil.raw is not None)
+            list(engine.probes(setup.soil.configs.get_member("probes", defaults={}, ensure_exists=True)))
+            if (setup.soil.configs is not None)
             else []
         )
         anchor_cfg = parse_anchor_config(setup.soil.anchor)
@@ -154,49 +143,66 @@ class Simulation:
         irrigation_lpm: pd.Series,
         tension_history: Optional[Mapping[str, pd.Series]] = None,
         cancel: Cancel = None,
+        *,
+        extra_diagnostics: Optional[Mapping[str, float]] = None,
     ) -> tuple[Sequence[StepResult], ChainResult]:
         """Advance over one weather chunk: chain once, then per row advance,
         assimilate, sample probes. Stops early on cancel; committed rows stay
-        committed. Returns the completed steps and the chain outputs."""
-        forcing, chain = self.chain.forcing_series(weather, irrigation_lpm)
+        committed. Without a state yet, the first row is the cold start.
+        ``extra_diagnostics`` is merged into every ``StepResult.diagnostics``.
+        """
+        frontier = self.state.at if self.state is not None else None
+        first_dt_s = self.engine.cold_start_s if self.state is None else 0.0
+        forcing, chain = self.chain.forcing_series(weather, irrigation_lpm, frontier=frontier, first_dt_s=first_dt_s)
+        self._last_chain = chain
         if tension_history and self.assimilator.enabled:
             self.assimilator.ingest(tension_history)
-        probes = self.setup.soil.probe_specs
+        extra = dict(extra_diagnostics or {})
         results: list[StepResult] = []
+
+        if self.state is None and forcing:
+            cold = forcing[0]
+            self.state = self.engine.initial_state(cold.at)
+            if cold.dt_s > 0:
+                logger.info("cold start spin-up: %.0fs with weather at %s", cold.dt_s, cold.at)
+                result = self._advance(cold, extra, cancel)
+                if result is None:
+                    logger.info("cold start cancelled at %s", cold.at)
+                    return results, chain
+                results.append(result)
+
         for step in forcing:
-            if self.state is None:
-                self.state = self.engine.initial_state(step.start)
-            result = self.engine.advance(self.state, step, cancel=cancel)
-            if result.cancelled:
-                logger.info("advance cancelled at %s, %d rows committed", step.start, len(results))
+            if step.at <= self.state.at:
+                continue
+            result = self._advance(step, extra, cancel)
+            if result is None:
+                logger.info("advance cancelled at %s, %d rows committed", step.at, len(results))
                 break
-            state = result.state
-            if self.assimilator.enabled:
-                state = self.assimilator.update(state, step.end)
-            # ProbeSpec's id attribute is `channel_id`; `key` stays as a fallback
-            # for lightweight test doubles that predate this attribute name.
-            tension = {
-                getattr(p, "channel_id", None) or getattr(p, "key", None): self.engine.tension_at(state, p)
-                for p in probes
-            }
-            result = replace(result, state=state, probe_tension=tension)
-            self.state = state
             results.append(result)
-        self._last_chain = chain
         if results:
             self._last_step = results[-1]
         return results, chain
 
-    def plan(self, forecast: pd.DataFrame) -> Optional[Plan]:
-        """Roll the planner over a forecast horizon from the current state.
-        Returns None when there is no planner, no state yet, or the chain
-        cannot yet produce the per-segment ET the planner needs
-        (``WeatherChain.horizon_inputs``; not yet landed -- see the chain
-        unit)."""
-        if self.planner is None or self.state is None or forecast.empty:
+    def _advance(self, step: Forcing, extra: Mapping[str, float], cancel: Cancel) -> Optional[StepResult]:
+        """One committed row; ``None`` when the walk was cancelled."""
+        result = self.engine.advance(self.state, step, cancel=cancel)
+        if result.cancelled:
             return None
-        if not hasattr(self.chain, "horizon_inputs"):
-            logger.warning("plan skipped: chain has no horizon_inputs yet")
+        state = result.state
+        if self.assimilator.enabled:
+            state = self.assimilator.update(state, step.end)
+        tension = {p.channel_id: self.engine.tension_at(state, p) for p in self.setup.soil.probe_specs}
+        self.state = state
+        return replace(
+            result,
+            state=state,
+            probe_tension=tension,
+            diagnostics={**result.diagnostics, **extra},
+        )
+
+    def plan(self, forecast: pd.DataFrame) -> Optional[Plan]:
+        """Roll the planner over a forecast horizon from the current state."""
+        if self.planner is None or self.state is None or forecast.empty:
             return None
         weather, seg_et = self.chain.horizon_inputs(forecast)
         if weather.empty:

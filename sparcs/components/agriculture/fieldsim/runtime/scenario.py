@@ -3,12 +3,10 @@
 sparcs.components.agriculture.fieldsim.runtime.scenario
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Offline driver: the same ``FieldRunner`` as production, fed by
-``FrameInputs`` and recorded by ``Recorder``, with a synthetic clock stepping
-``run_tick`` from ``start`` to ``end``. Every scenario therefore exercises
-frontier handling, catch-up chunking and the planner gate, not just the
-core. This is the entry point for parameter sweeps, model-vs-tensiometer
-benches and dt-sensitivity runs.
+Offline driver: the production ``FieldRunner`` over ``FrameInputs`` and a
+``Recorder``, with a synthetic clock stepping ``run_tick`` from ``start`` to
+``end``. The entry point for parameter sweeps, model-vs-tensiometer benches
+and dt-sensitivity runs.
 """
 
 from __future__ import annotations

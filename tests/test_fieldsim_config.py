@@ -2,15 +2,13 @@
 """sparcs.tests.test_fieldsim_config
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Config sections of the ``fieldsim`` skeleton: lories ``Parameter`` resolution,
-bounds and choices, the strict unknown-key rule (recursive through declared
-groups), typed sub-sections (``[mesh]`` / ``[drip]``) becoming objects, the
-schema with its ``passthrough`` flag, and a real-shaped ``soil_simulation.conf``
-loaded from disk.
+Config sections of the ``fieldsim`` skeleton: resolution, strict keys, typed
+sub-sections, schema, live-aligned defaults and a conf loaded from disk.
 """
 
 import pytest
 
+import pandas as pd
 from lories.core import ConfigurationError
 from lories.core.configs.configurations import Configurations
 from sparcs.components.agriculture.fieldsim.core.config import (
@@ -19,6 +17,7 @@ from sparcs.components.agriculture.fieldsim.core.config import (
     FieldSetup,
     MeshConfig,
     PlannerConfig,
+    PlotConfig,
     SoilConfig,
 )
 from sparcs.components.agriculture.fieldsim.core.shading import ShadingConfig
@@ -96,12 +95,13 @@ def test_unknown_top_level_key_is_hard_error():
 
 
 def test_unknown_key_inside_declared_group_is_hard_error():
-    # ShadingConfig's geometry keys are flat (mirroring the live
-    # GroundShading parser, which never nests them under a [tracker] table);
-    # PlannerConfig.state is the nearest declared-children group left to
-    # exercise the same recursive-into-a-group check.
     with pytest.raises(ConfigurationError, match=r"PlannerConfig.state.typo"):
         PlannerConfig.from_dict({"state": {"typo": 1}})
+
+
+def test_unknown_key_inside_a_section_is_hard_error():
+    with pytest.raises(ConfigurationError, match=r"SoilConfig.mesh.typo"):
+        SoilConfig.from_dict({"mesh": {"typo": 1}})
 
 
 def test_section_given_where_scalar_expected():
@@ -115,7 +115,6 @@ def test_passthrough_group_accepts_anything():
 
 
 def test_bool_scalar_is_not_mistaken_for_a_section():
-    # lories has_member() reports bool values as members; the strict check must not.
     s = SoilConfig.from_dict({"mesh": {}, "discover_sensor_probes": True})
     assert s.discover_sensor_probes is True
 
@@ -137,10 +136,26 @@ def test_mesh_geometry_rules():
         MeshConfig.from_dict({"dl": 0.2, "watering_width": 0.1})
     with pytest.raises(ConfigurationError, match="d_x must be larger than dl"):
         MeshConfig.from_dict({"dl": 0.5, "d_x": 0.5})
-    with pytest.raises(ConfigurationError, match="non-negative integer"):
-        MeshConfig.from_dict({"width": 3.3, "plant_width": 0.5, "d_x": 0.5})
     m = MeshConfig.from_dict({"plant_width": 0.5, "d_x": 0.5}).derive(bay_width=3.5)
     assert m.width == 3.5 and m.top_segments == 3
+
+
+def test_mesh_dl_must_be_positive():
+    with pytest.raises(ConfigurationError, match=r"Validation failed for 'dl'"):
+        MeshConfig.from_dict({"dl": 0.0})
+
+
+@pytest.mark.parametrize(
+    "values, fragment",
+    [
+        ({"width": 1.4, "plant_width": 0.5, "d_x": 0.5}, "at least plant_width"),
+        ({"width": 3.3, "plant_width": 0.5, "d_x": 0.5}, "multiple of 2"),
+        ({"width": 3.5, "height": 2.0, "plant_height": 2.0}, "greater than plant_height"),
+    ],
+)
+def test_mesh_segment_rules_match_the_live_mesh_builder(values, fragment):
+    with pytest.raises(ConfigurationError, match=fragment):
+        MeshConfig.from_dict(values)
 
 
 def test_drip_absent_means_placeholder_not_explicit():
@@ -170,9 +185,73 @@ def test_schema_marks_passthrough_groups_and_carries_bounds():
     sch = SoilConfig.schema()
     assert sch["pde"]["passthrough"] is True
     assert "passthrough" not in sch["mesh"]
-    assert "dl" in sch["mesh"]["children"]
+    assert sch["mesh"]["children"] == MeshConfig.schema()
+    assert "d_x" in sch["mesh"]["children"]
     assert sch["total_drip_line_length_m"]["type"] == "float"
     assert FieldConfig.schema()["lai_type"]["choices"] == ["fao", "grass", "apple"]
+
+
+def test_section_group_declares_no_children_of_its_own():
+    assert SoilConfig.__config_parameters__["mesh"].children == {}
+
+
+# --------------------------------------------------------------------------- live-aligned defaults
+
+
+def test_defaults_match_the_live_components():
+    field = FieldConfig.from_dict()
+    assert field.interval == 60 and field.offset == 0
+
+    planner = PlannerConfig.from_dict({})
+    assert planner.interval == 1440
+    assert planner.offset == 60
+    assert planner.combo_cap == 16
+    assert planner.horizon == pd.Timedelta("24h")
+    assert planner.grid_mode == "fill_order"
+
+    assert MeshConfig.from_dict().height == 5.0
+    assert PlotConfig.from_dict().disable_after_failures == 3
+
+
+def test_grid_mode_uses_the_live_vocabulary():
+    assert PlannerConfig.from_dict({"grid_mode": "full"}).grid_mode == "full"
+    with pytest.raises(ConfigurationError, match="must be one of"):
+        PlannerConfig.from_dict({"grid_mode": "ladder"})
+
+
+def test_planner_has_no_section_level_durations():
+    assert "durations_min" not in PlannerConfig.__config_parameters__
+    with pytest.raises(ConfigurationError, match=r"PlannerConfig.durations_min"):
+        PlannerConfig.from_dict({"durations_min": [0, 5]})
+
+
+def test_shading_surface_azimuth_defaults_per_mode():
+    assert ShadingConfig.from_dict({"mode": "as_is"}).resolved_surface_azimuth() == 180.0
+    assert ShadingConfig.from_dict({"mode": "horizontal"}).resolved_surface_azimuth() == 180.0
+    trackable = ShadingConfig.from_dict({"mode": "trackable", "axis_azimuth": 100.0})
+    assert trackable.surface_azimuth is None
+    assert trackable.resolved_surface_azimuth() == 100.0
+    assert ShadingConfig.from_dict({"mode": "trackable", "surface_azimuth": 90.0}).resolved_surface_azimuth() == 90.0
+
+
+def test_plot_interval_accepts_seconds_as_a_number():
+    assert PlotConfig.from_dict({"interval": 600}).interval == pd.Timedelta(seconds=600)
+    assert PlotConfig.from_dict({"interval": "30min"}).interval == pd.Timedelta(minutes=30)
+    assert PlotConfig.from_dict().interval == pd.Timedelta(hours=1)
+
+
+def test_plot_dir_is_optional():
+    assert PlotConfig.from_dict().dir is None
+    assert PlotConfig.from_dict({"dir": "/tmp/images"}).dir == "/tmp/images"
+
+
+def test_from_dict_ignores_a_member_conf_on_disk(tmp_path, monkeypatch):
+    members = tmp_path / "conf" / "fieldsim"
+    members.mkdir(parents=True)
+    (members / "mesh.conf").write_text("d_x = 9.0\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    assert SoilConfig.from_dict({"mesh": {}}).mesh.dx == 0.5
 
 
 # --------------------------------------------------------------------------- from disk
