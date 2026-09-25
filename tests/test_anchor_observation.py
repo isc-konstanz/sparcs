@@ -7,7 +7,7 @@ soil_tuning backends feed (``.scratch/soil-sensor-anchoring/PRD.md`` step 1).
 """
 
 import numpy as np
-from sparcs.components.agriculture.simulation._anchor import (
+from sparcs.components.agriculture.fieldsim.core.anchor import (
     _MIN_VARIANCE,
     observation_from_tension,
     sensor_xy_m,

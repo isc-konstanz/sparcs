@@ -17,12 +17,12 @@ pytestmark = pytest.mark.slow
 
 from lories.components.weather import Weather  # noqa: E402
 from lories.core import ConfigurationError  # noqa: E402
+from sparcs.components.agriculture.fieldsim.core.candidates import build_candidate_grid  # noqa: E402
 from sparcs.components.agriculture.fieldsim.core.config import DripConfig, PlannerConfig, SoilConfig  # noqa: E402
 from sparcs.components.agriculture.fieldsim.core.engine import SoilEngine  # noqa: E402
 from sparcs.components.agriculture.fieldsim.core.planner import IrrigationPlanner  # noqa: E402
+from sparcs.components.agriculture.fieldsim.core.rollout import RolloutEngine  # noqa: E402
 from sparcs.components.agriculture.fieldsim.core.state import Forcing  # noqa: E402
-from sparcs.components.agriculture.simulation._predictor_candidates import build_candidate_grid  # noqa: E402
-from sparcs.components.agriculture.simulation._predictor_rollout import RolloutEngine  # noqa: E402
 
 UTC = dt.timezone.utc
 

@@ -27,7 +27,7 @@ ConfigurationUnavailableError = lories_core.ConfigurationUnavailableError
 soil_predictor = pytest.importorskip("sparcs.components.agriculture.simulation.soil_predictor")
 SoilPredictor = soil_predictor.SoilPredictor
 
-_soil = pytest.importorskip("sparcs.components.agriculture.simulation._soil")
+_soil = pytest.importorskip("sparcs.components.agriculture.fieldsim.core.pde")
 SoilBase = _soil.SoilBase
 
 

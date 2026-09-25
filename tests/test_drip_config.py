@@ -13,7 +13,7 @@ already-resolved DripConfig is tested in test_soil_predictor_flow_schedule.py
 from typing import Optional
 
 from lories import Configurations
-from sparcs.components.agriculture.simulation._soil import (
+from sparcs.components.agriculture.fieldsim.core.pde import (
     _DEFAULT_NOZZLE_COUNT,
     _DEFAULT_NOZZLE_FLOW_LPH,
     DripConfig,

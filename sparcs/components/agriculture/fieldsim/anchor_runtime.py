@@ -30,8 +30,8 @@ from lories.data import Channels
 from lories.typing import Configurations
 from lories.util import to_timedelta
 
-from ._anchor import AnchorConfig, AnchorSensor, SensorOverrides, anchor_update, latest_reading_at
-from ._soil import SE_MAX, SE_MIN, ProbeSpec, resolve_probe_from_sensor
+from .core.anchor import AnchorConfig, AnchorSensor, SensorOverrides, anchor_update, latest_reading_at
+from .core.pde import SE_MAX, SE_MIN, ProbeSpec, resolve_probe_from_sensor
 
 logger = logging.getLogger(__name__)
 

@@ -17,7 +17,7 @@ import pandas as pd
 
 soil_tuning = pytest.importorskip("soil_tuning")
 
-from sparcs.components.agriculture.simulation._anchor import AnchorConfig, AnchorSensor  # noqa: E402
+from sparcs.components.agriculture.fieldsim.core.anchor import AnchorConfig, AnchorSensor  # noqa: E402
 from sparcs.components.agriculture.soil.models import Genuchten  # noqa: E402
 
 NOW = pd.Timestamp("2026-05-01 12:00")

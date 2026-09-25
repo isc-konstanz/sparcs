@@ -29,7 +29,7 @@ def pde_core_factory(tmp_path_factory):
     its own dt='50s' fixture.
     """
     from lories import Configurations
-    from sparcs.components.agriculture.simulation._soil import (
+    from sparcs.components.agriculture.fieldsim.core.pde import (
         MeshConfig,
         PDEConfig,
         SoilPDECore,
@@ -77,7 +77,7 @@ def strip_probe_factory():
     """Point probe under the watering strip (bay-center, just below the
     surface), where irrigation ponding directly affects the sampled Se."""
     import numpy as np
-    from sparcs.components.agriculture.simulation._soil import (
+    from sparcs.components.agriculture.fieldsim.core.pde import (
         ProbeSpec,
         SoilPDECore,
         _coords_to_cell,

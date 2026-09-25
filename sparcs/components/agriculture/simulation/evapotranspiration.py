@@ -16,6 +16,8 @@ import pandas as pd
 from lories import Component, Configurations, Constant
 from lories.components.weather import Weather
 
+from ..fieldsim.components import Evapotranspiration as _FsEvapotranspiration
+
 
 @dataclass
 class SegmentProperties:
@@ -48,17 +50,17 @@ class Evapotranspiration(Component):
         Weather.CLEAR_SKY_INDEX,
     ]
 
-    SVP = Constant(float, "sat_vapor_pressure", "Saturation Vapor Pressure", "kPa")
-    GVP = Constant(float, "ground_vapor_pressure", "Vapor Pressure on the Ground Surface", "kPa")
-    VAP_HEAT = Constant(float, "vaporization_heat", "Latent Heat of Vaporization", "J/kg")
-    SVP_SLOPE = Constant(float, "slope_sat_vapor_pressure", "Saturation Vapor Pressure Slope", "kPa/K")
-    NET_IRR = Constant(float, "net_irradiance", "Net Irradiance", "W/m^2")
-    AIR_RES = Constant(float, "aerodynamic_resistance", "Aerodynamic Resistance", "s/m")
-    SOIL_HEAT_FLOW = Constant(float, "soil_heat_flow", "Soil Heat Flow", "W/m^2")
-    SURFACE_RES = Constant(float, "resistance_surface", "Surface Resistance", "s/m")
-    RAD_TERM = Constant(float, "radiation_term", "Radiation Term", "(kPa*W)/(K*m^2)")
-    AER_TERM = Constant(float, "aerodynamic_term", "Aerodynamic Term", "(kPa*J)/(m^2*K*s)")
-    EVAPOTRANSPIRATION = Constant(float, "evapotranspiration", "Evapotranspiration", "kg/(m^2*h)")
+    SVP = _FsEvapotranspiration.SVP
+    GVP = _FsEvapotranspiration.GVP
+    VAP_HEAT = _FsEvapotranspiration.VAP_HEAT
+    SVP_SLOPE = _FsEvapotranspiration.SVP_SLOPE
+    NET_IRR = _FsEvapotranspiration.NET_IRR
+    AIR_RES = _FsEvapotranspiration.AIR_RES
+    SOIL_HEAT_FLOW = _FsEvapotranspiration.SOIL_HEAT_FLOW
+    SURFACE_RES = _FsEvapotranspiration.SURFACE_RES
+    RAD_TERM = _FsEvapotranspiration.RAD_TERM
+    AER_TERM = _FsEvapotranspiration.AER_TERM
+    EVAPOTRANSPIRATION = _FsEvapotranspiration.EVAPOTRANSPIRATION
 
     CHANNELS = [
         SVP,

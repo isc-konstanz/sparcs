@@ -227,7 +227,7 @@ def test_ingest_empty_series_warns_once_and_keeps_previous(caplog):
 
 
 def test_matches_live_anchor_update():
-    live = pytest.importorskip("sparcs.components.agriculture.simulation._anchor")
+    live = pytest.importorskip("sparcs.components.agriculture.fieldsim.core.anchor")
 
     engine, sensor, state = _near_far_setup()
     cfg = _cfg()

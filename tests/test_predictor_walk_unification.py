@@ -31,8 +31,8 @@ soil_predictor = pytest.importorskip("sparcs.components.agriculture.simulation.s
 from types import SimpleNamespace  # noqa: E402
 
 from lories.components.weather import Weather  # noqa: E402
-from sparcs.components.agriculture.simulation._predictor_rollout import RolloutEngine  # noqa: E402
-from sparcs.components.agriculture.simulation._soil import ClipDiagnostics  # noqa: E402
+from sparcs.components.agriculture.fieldsim.core.pde import ClipDiagnostics  # noqa: E402
+from sparcs.components.agriculture.fieldsim.core.rollout import RolloutEngine  # noqa: E402
 
 # Extreme flow so the watering interval visibly moves the sampled Se.
 _EXTREME_FLOW = 2000.0e-3 / 3600.0 * 0.5

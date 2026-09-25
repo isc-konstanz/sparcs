@@ -51,20 +51,20 @@ from lories.application.settings import Settings
 from lories.components.weather import Weather
 from lories.core.configs.directories import Directories, Directory
 from sparcs.components.agriculture import Irrigation, SoilMoisture
-from sparcs.components.agriculture.simulation import FieldSimulation, SoilSimulation, plot_render
-from sparcs.components.agriculture.simulation._anchor import (
+from sparcs.components.agriculture.fieldsim.core.anchor import (
     AnchorConfig,
     AnchorSensor,
     anchor_update,
     latest_reading_at,
 )
-from sparcs.components.agriculture.simulation._soil import (
+from sparcs.components.agriculture.fieldsim.core.pde import (
     SE_MAX,
     SE_MIN,
     FluxRates,
     PDEConfig,
     SoilPDECore,
 )
+from sparcs.components.agriculture.simulation import FieldSimulation, SoilSimulation, plot_render
 from sparcs.system import System as SparcsSystem
 
 log = logging.getLogger("sparcs.soil_tuning")

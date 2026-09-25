@@ -23,7 +23,7 @@ _base = pytest.importorskip("sparcs.components.agriculture.simulation.base")
 FieldSimulation = _base.FieldSimulation
 
 from lories.core import ConfigurationUnavailableError  # noqa: E402
-from sparcs.components.agriculture.simulation._soil import design_flow_lpm  # noqa: E402
+from sparcs.components.agriculture.fieldsim.core.pde import design_flow_lpm  # noqa: E402
 
 
 def _index(start="2026-05-01 10:00", periods=4, freq="15min"):

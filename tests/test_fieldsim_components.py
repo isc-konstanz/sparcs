@@ -162,7 +162,7 @@ def _fake_field(**overrides) -> SimpleNamespace:
         name="fieldsim_test",
         data=_FakeData(weather_channels, weather_frame),
         weather=SimpleNamespace(forecast=None),
-        soil=None,
+        soil_simulation=None,
         simulation=None,
         setup=SimpleNamespace(soil=SoilConfig.from_dict({"mesh": {}})),
         _weather_channels=weather_channels,
@@ -290,7 +290,7 @@ def test_channel_inputs_load_state_from_blob():
     )
     blob = state.to_blob()
     channel = _FakeChannel(valid=True, value=blob, timestamp=state.at)
-    field = _fake_field(soil=SimpleNamespace(data={"simulation_state": channel}))
+    field = _fake_field(soil_simulation=SimpleNamespace(data={"simulation_state": channel}))
     inputs = components.ChannelInputs(field)
 
     got = inputs.load_state()
@@ -298,7 +298,7 @@ def test_channel_inputs_load_state_from_blob():
     np.testing.assert_allclose(got.se, state.se)
     assert got.at == state.at
 
-    field.soil = None
+    field.soil_simulation = None
     assert inputs.load_state() is None
 
 

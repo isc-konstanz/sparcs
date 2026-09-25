@@ -28,12 +28,12 @@ from typing import TYPE_CHECKING, Any, Callable
 import pandas as pd
 from lories.typing import Configurations
 
-from ._soil import ProbeSpec
+from .core.pde import ProbeSpec
 
 if TYPE_CHECKING:
     from typing import Iterable, Optional
 
-    from .soil_predictor import SoilPredictor
+    from .components import SoilPredictor
 
 logger = logging.getLogger(__name__)
 

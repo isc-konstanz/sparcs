@@ -24,7 +24,7 @@ import pytest
 
 from lories import Configurations
 
-_soil = pytest.importorskip("sparcs.components.agriculture.simulation._soil")
+_soil = pytest.importorskip("sparcs.components.agriculture.fieldsim.core.pde")
 warn_unknown_keys = _soil.warn_unknown_keys
 SOIL_PREDICTOR_ALLOWED_KEYS = _soil.SOIL_PREDICTOR_ALLOWED_KEYS
 SOIL_SIMULATION_ALLOWED_KEYS = _soil.SOIL_SIMULATION_ALLOWED_KEYS

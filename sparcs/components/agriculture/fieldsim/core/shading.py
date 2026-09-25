@@ -19,7 +19,8 @@ import pandas as pd
 from lories.components.weather import Weather
 from lories.core.configs.parameters import Parameter, SelectParameter
 
-from ...simulation.ground_shading import (
+from .config import Config
+from .pv import (
     _combine_grounds,
     _open_sky_ghi,
     _patch_pvfactors_numpy2_compat,
@@ -28,7 +29,6 @@ from ...simulation.ground_shading import (
     _qinc_in_range,
     _TrackerConfig,
 )
-from .config import Config
 
 logger = logging.getLogger(__name__)
 

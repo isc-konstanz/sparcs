@@ -21,14 +21,14 @@ from matplotlib.collections import LineCollection, PolyCollection
 
 import numpy as np
 import pandas as pd
-from lories import Constant
 from lories.core import ConfigurationError
 from lories.data import Channels
 from lories.typing import Configurations
 
-from . import _anchor_runtime, plot_render, plot_style
-from ._anchor import AnchorSensor
-from ._soil import (
+from ..fieldsim import anchor_runtime as _anchor_runtime
+from ..fieldsim.components import SoilSimulation as _FsSoilSimulation
+from ..fieldsim.core.anchor import AnchorSensor
+from ..fieldsim.core.pde import (
     SOIL_SIMULATION_ALLOWED_KEYS,
     ClipDiagnostics,
     FluxRates,
@@ -44,6 +44,7 @@ from ._soil import (
     segment_flux_dicts,
     warn_unknown_keys,
 )
+from . import plot_render, plot_style
 
 logger = logging.getLogger(__name__)
 
@@ -83,55 +84,49 @@ class SoilSimulation(SoilBase):
     TYPE: str = "soil_simulation"
     INCLUDES = ["mesh", "pde", "plot", "probes", "anchor"]
 
-    SIMULATION_STATE = Constant(bytes, "simulation_state", "Soil Simulation State", "-")
-    SOIL_PROGRESS_IMAGE = Constant(bytes, "soil_progress_image", "Soil Simulation Progress Image", "png")
+    SIMULATION_STATE = _FsSoilSimulation.SIMULATION_STATE
+    SOIL_PROGRESS_IMAGE = _FsSoilSimulation.SOIL_PROGRESS_IMAGE
 
     # Internal math in kg/(m²·s); channels publish in kg/(m²·h). Short keys with
     # context="water" (house pattern, cf. context="pv" in solar/system.py): the
     # registry id stays "water_*"-unique while the bare key becomes the channel
     # key / agri_field_simulation SQL column.
-    WATER_TOP_IN = Constant(float, "top_in", "Top Water Input (Irrigation + Rain)", "kg/(m^2*h)", context="water")
-    WATER_TOP_OUT = Constant(float, "top_out", "Top Water Output (Evaporation)", "kg/(m^2*h)", context="water")
-    WATER_BOTTOM = Constant(float, "bottom_out", "Bottom Water Output (Drainage)", "kg/(m^2*h)", context="water")
-    WATER_TRANSP = Constant(float, "transpiration", "Plant Transpiration", "kg/(m^2*h)", context="water")
+    WATER_TOP_IN = _FsSoilSimulation.WATER_TOP_IN
+    WATER_TOP_OUT = _FsSoilSimulation.WATER_TOP_OUT
+    WATER_BOTTOM = _FsSoilSimulation.WATER_BOTTOM
+    WATER_TRANSP = _FsSoilSimulation.WATER_TRANSP
     # Per-step clipper residuals, area-normalised [kg/(m²·h)].
-    WATER_RUNOFF = Constant(float, "runoff", "Rejected Top Influx (Runoff)", "kg/(m^2*h)", context="water")
-    WATER_DEMAND_UNMET = Constant(float, "demand_unmet", "Unmet Evap+Transp Demand", "kg/(m^2*h)", context="water")
+    WATER_RUNOFF = _FsSoilSimulation.WATER_RUNOFF
+    WATER_DEMAND_UNMET = _FsSoilSimulation.WATER_DEMAND_UNMET
     # Gap between integral closure and independent bottom-face drainage estimate; non-zero flags solver drift.
-    WATER_BALANCE_RESIDUAL = Constant(
-        float,
-        "balance_residual",
-        "Mass-Balance Residual (integral - direct)",
-        "kg/(m^2*h)",
-        context="water",
-    )
+    WATER_BALANCE_RESIDUAL = _FsSoilSimulation.WATER_BALANCE_RESIDUAL
     # Per-step assimilation increment from anchoring [kg per out-of-plane metre,
     # matching total_water()]. A diagnostic of how hard the correction works; not
     # a flux, so it is excluded from the mass-balance residual.
-    WATER_ANCHOR = Constant(float, "anchor", "Anchor Assimilation Increment", "kg/m", context="water")
+    WATER_ANCHOR = _FsSoilSimulation.WATER_ANCHOR
 
     # Seconds of the advance window where a substep could not converge even at
     # dt_min and was skipped (state held through the gap; accept+mark per
     # issue 10/B7 -- no hold, no retry). Set every tick, 0.0 when nothing was
     # skipped: a column that only appears on failure cannot be dashboarded.
-    WALK_SKIPPED_S = Constant(float, "skipped_s", "Skipped Walk Duration (dt_min Unsolvable)", "s", context="water")
+    WALK_SKIPPED_S = _FsSoilSimulation.WALK_SKIPPED_S
 
     # Adaptive-walk substep rollbacks for the window (walk_window shrinks dt and
     # re-solves); persisted every tick (0 when clean) so a solver grinding
     # through retries is visible in the data -- the log stays DEBUG (issue 22/W2.4).
-    WALK_RETRIES = Constant(float, "retries", "Walk Substep Retries", "-", context="water")
+    WALK_RETRIES = _FsSoilSimulation.WALK_RETRIES
 
     # Count of consecutive fully-stalled ticks (every weather chunk in the
     # window empty/invalid) that PRECEDED the tick committing this row; 0.0 in
     # steady state, mirrored down from FieldSimulation._on_tick because
     # _record_diagnostics never runs during a stall itself (issue 19/W2.1).
-    WEATHER_STALL = Constant(float, "weather_stall", "Consecutive Weather-Stall Ticks", "-", context="water")
+    WEATHER_STALL = _FsSoilSimulation.WEATHER_STALL
 
     # Count of consecutive tick failures (_on_tick raised) that PRECEDED the
     # tick committing this row; 0.0 in steady state, mirrored down from
     # FieldSimulation._on_tick because a failed tick commits no row itself
     # (issue 20/W2.2).
-    TICK_FAILURES = Constant(float, "tick_failures", "Consecutive Tick Failures", "-", context="water")
+    TICK_FAILURES = _FsSoilSimulation.TICK_FAILURES
 
     _plot_config: Optional[plot_style.PlotConfig] = None
 
@@ -142,7 +137,7 @@ class SoilSimulation(SoilBase):
     STRIP_FLUX_WARN_MM_H: float = 500.0
 
     # et_data column, whole-field flow [l/min] per timestep; written by FieldSimulation._on_tick.
-    IRRIGATION_FLOW_LPM: str = "irrigation_flow_lpm"
+    IRRIGATION_FLOW_LPM = _FsSoilSimulation.IRRIGATION_FLOW_LPM
 
     _last_simulated_at: Optional[pd.Timestamp] = None
     _simulating: bool = False

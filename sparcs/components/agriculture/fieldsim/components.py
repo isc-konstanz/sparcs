@@ -34,14 +34,8 @@ from lories.components.weather import Weather
 from lories.core import Configurations, ConfigurationUnavailableError
 from lories.data import Channels
 from sparcs.components.agriculture.irrigation import Irrigation
-from sparcs.components.agriculture.simulation import Evapotranspiration as LiveEvapotranspiration
-from sparcs.components.agriculture.simulation import FieldSimulation as LiveFieldSimulation
-from sparcs.components.agriculture.simulation import GroundShading as LiveGroundShading
-from sparcs.components.agriculture.simulation import SoilPredictor as LiveSoilPredictor
-from sparcs.components.agriculture.simulation import SoilSimulation as LiveSoilSimulation
-from sparcs.components.agriculture.simulation._anchor_runtime import _walk_components
-from sparcs.components.agriculture.simulation._predictor_tables import ForecastTablePublisher
 
+from .anchor_runtime import _walk_components
 from .core.anchor import AnchorSensor
 from .core.assimilator import parse_anchor_config
 from .core.config import Config, FieldConfig, FieldSetup, PlannerConfig, PlotConfig, SoilConfig
@@ -49,6 +43,7 @@ from .core.evapotranspiration import ETModel
 from .core.shading import ShadingConfig
 from .core.simulation import Simulation
 from .core.state import ChainResult, Plan, Snapshot, SoilState, StepResult
+from .forecast_tables import ForecastTablePublisher
 from .runtime.ports import InputKey
 from .runtime.runner import FieldRunner
 from .runtime.scheduler import Ticker
@@ -126,45 +121,94 @@ class ChannelNamespace(Component):
 
 class GroundShading(ChannelNamespace):
     TYPE: str = "ground_shading"
+
+    SHADING_FACTOR = Constant(float, "shading_factor", "Mean Ground Shading Factor", "-")
+    SHADING_PROGRESS_IMAGE = Constant(bytes, "shading_progress_image", "Ground Shading Progress Image", "png")
     CONFIG = ShadingConfig
-    CHANNELS = (LiveGroundShading.SHADING_FACTOR, PLOT_STRIKES)
-    PLOT_CHANNELS = (LiveGroundShading.SHADING_PROGRESS_IMAGE,)
+    CHANNELS = (SHADING_FACTOR, PLOT_STRIKES)
+    PLOT_CHANNELS = (SHADING_PROGRESS_IMAGE,)
     CHANNEL_CONFIGS = {
         PLOT_STRIKES: _LAST_MEMORY,
-        LiveGroundShading.SHADING_PROGRESS_IMAGE: _SHADING_IMAGE,
+        SHADING_PROGRESS_IMAGE: _SHADING_IMAGE,
     }
 
 
 class Evapotranspiration(ChannelNamespace):
     TYPE: str = "evapotranspiration"
+
+    SVP = Constant(float, "sat_vapor_pressure", "Saturation Vapor Pressure", "kPa")
+    GVP = Constant(float, "ground_vapor_pressure", "Vapor Pressure on the Ground Surface", "kPa")
+    VAP_HEAT = Constant(float, "vaporization_heat", "Latent Heat of Vaporization", "J/kg")
+    SVP_SLOPE = Constant(float, "slope_sat_vapor_pressure", "Saturation Vapor Pressure Slope", "kPa/K")
+    NET_IRR = Constant(float, "net_irradiance", "Net Irradiance", "W/m^2")
+    AIR_RES = Constant(float, "aerodynamic_resistance", "Aerodynamic Resistance", "s/m")
+    SOIL_HEAT_FLOW = Constant(float, "soil_heat_flow", "Soil Heat Flow", "W/m^2")
+    SURFACE_RES = Constant(float, "resistance_surface", "Surface Resistance", "s/m")
+    RAD_TERM = Constant(float, "radiation_term", "Radiation Term", "(kPa*W)/(K*m^2)")
+    AER_TERM = Constant(float, "aerodynamic_term", "Aerodynamic Term", "(kPa*J)/(m^2*K*s)")
+    EVAPOTRANSPIRATION = Constant(float, "evapotranspiration", "Evapotranspiration", "kg/(m^2*h)")
     CONFIG = None  # no keys of its own today; its .d file carries only channels
-    CHANNELS = tuple(LiveEvapotranspiration.CHANNELS)
+    CHANNELS = (
+        SVP,
+        GVP,
+        VAP_HEAT,
+        SVP_SLOPE,
+        NET_IRR,
+        AIR_RES,
+        SOIL_HEAT_FLOW,
+        SURFACE_RES,
+        RAD_TERM,
+        AER_TERM,
+        EVAPOTRANSPIRATION,
+    )
 
 
 class SoilSimulation(ChannelNamespace):
     TYPE: str = "soil_simulation"
+
+    SIMULATION_STATE = Constant(bytes, "simulation_state", "Soil Simulation State", "-")
+    SOIL_PROGRESS_IMAGE = Constant(bytes, "soil_progress_image", "Soil Simulation Progress Image", "png")
+    WATER_TOP_IN = Constant(float, "top_in", "Top Water Input (Irrigation + Rain)", "kg/(m^2*h)", context="water")
+    WATER_TOP_OUT = Constant(float, "top_out", "Top Water Output (Evaporation)", "kg/(m^2*h)", context="water")
+    WATER_BOTTOM = Constant(float, "bottom_out", "Bottom Water Output (Drainage)", "kg/(m^2*h)", context="water")
+    WATER_TRANSP = Constant(float, "transpiration", "Plant Transpiration", "kg/(m^2*h)", context="water")
+    WATER_RUNOFF = Constant(float, "runoff", "Rejected Top Influx (Runoff)", "kg/(m^2*h)", context="water")
+    WATER_DEMAND_UNMET = Constant(float, "demand_unmet", "Unmet Evap+Transp Demand", "kg/(m^2*h)", context="water")
+    WATER_BALANCE_RESIDUAL = Constant(
+        float,
+        "balance_residual",
+        "Mass-Balance Residual (integral - direct)",
+        "kg/(m^2*h)",
+        context="water",
+    )
+    WATER_ANCHOR = Constant(float, "anchor", "Anchor Assimilation Increment", "kg/m", context="water")
+    WALK_SKIPPED_S = Constant(float, "skipped_s", "Skipped Walk Duration (dt_min Unsolvable)", "s", context="water")
+    WALK_RETRIES = Constant(float, "retries", "Walk Substep Retries", "-", context="water")
+    WEATHER_STALL = Constant(float, "weather_stall", "Consecutive Weather-Stall Ticks", "-", context="water")
+    TICK_FAILURES = Constant(float, "tick_failures", "Consecutive Tick Failures", "-", context="water")
+    IRRIGATION_FLOW_LPM: str = "irrigation_flow_lpm"
     CONFIG = SoilConfig
     CHANNELS = (
-        LiveSoilSimulation.SIMULATION_STATE,
-        LiveSoilSimulation.WATER_TOP_IN,
-        LiveSoilSimulation.WATER_TOP_OUT,
-        LiveSoilSimulation.WATER_BOTTOM,
-        LiveSoilSimulation.WATER_TRANSP,
-        LiveSoilSimulation.WATER_RUNOFF,
-        LiveSoilSimulation.WATER_DEMAND_UNMET,
-        LiveSoilSimulation.WATER_BALANCE_RESIDUAL,
-        LiveSoilSimulation.WATER_ANCHOR,
-        LiveSoilSimulation.WALK_SKIPPED_S,
-        LiveSoilSimulation.WALK_RETRIES,
-        LiveSoilSimulation.WEATHER_STALL,
-        LiveSoilSimulation.TICK_FAILURES,
+        SIMULATION_STATE,
+        WATER_TOP_IN,
+        WATER_TOP_OUT,
+        WATER_BOTTOM,
+        WATER_TRANSP,
+        WATER_RUNOFF,
+        WATER_DEMAND_UNMET,
+        WATER_BALANCE_RESIDUAL,
+        WATER_ANCHOR,
+        WALK_SKIPPED_S,
+        WALK_RETRIES,
+        WEATHER_STALL,
+        TICK_FAILURES,
         PLOT_STRIKES,
     )
-    PLOT_CHANNELS = (LiveSoilSimulation.SOIL_PROGRESS_IMAGE,)
+    PLOT_CHANNELS = (SOIL_PROGRESS_IMAGE,)
     DEFAULT_CONFIGS = _MEAN_LOGGED
     CHANNEL_CONFIGS = {
-        LiveSoilSimulation.SIMULATION_STATE: _STATE_BLOB,
-        LiveSoilSimulation.SOIL_PROGRESS_IMAGE: _SOIL_IMAGE,
+        SIMULATION_STATE: _STATE_BLOB,
+        SOIL_PROGRESS_IMAGE: _SOIL_IMAGE,
         PLOT_STRIKES: _LAST_MEMORY,
     }
 
@@ -190,21 +234,21 @@ class SoilPredictor(ChannelNamespace):
     CHANNELS = tuple(_WRITE_FAILURE_CHANNELS.values())
     DEFAULT_CONFIGS = _LAST_MEMORY
 
-    _HEADER_TABLE_NAME = LiveSoilPredictor._HEADER_TABLE_NAME
-    _HEADER_FORECAST_ID_KEY = LiveSoilPredictor._HEADER_FORECAST_ID_KEY
-    _HEADER_IS_RECOMMENDED_KEY = LiveSoilPredictor._HEADER_IS_RECOMMENDED_KEY
-    _HEADER_TOTAL_MIN_KEY = LiveSoilPredictor._HEADER_TOTAL_MIN_KEY
-    _HEADER_WEATHER_CREATION_KEY = LiveSoilPredictor._HEADER_WEATHER_CREATION_KEY
-    _DETAIL_TABLE_NAME = LiveSoilPredictor._DETAIL_TABLE_NAME
-    _DETAIL_TIMESTAMP_CREATION_SUFFIX = LiveSoilPredictor._DETAIL_TIMESTAMP_CREATION_SUFFIX
-    _DETAIL_FORECAST_ID_SUFFIX = LiveSoilPredictor._DETAIL_FORECAST_ID_SUFFIX
-    _IRRIGATION_TABLE_NAME = LiveSoilPredictor._IRRIGATION_TABLE_NAME
-    _IRRIGATION_STATE_KEY = LiveSoilPredictor._IRRIGATION_STATE_KEY
-    _IRRIGATION_TIMESTAMP_CREATION_KEY = LiveSoilPredictor._IRRIGATION_TIMESTAMP_CREATION_KEY
-    _IMAGE_TABLE_NAME = LiveSoilPredictor._IMAGE_TABLE_NAME
-    _IMAGE_KEY = LiveSoilPredictor._IMAGE_KEY
-    _IMAGE_COLUMN = LiveSoilPredictor._IMAGE_COLUMN
-    _IMAGE_TIMESTAMP_CREATION_KEY = LiveSoilPredictor._IMAGE_TIMESTAMP_CREATION_KEY
+    _HEADER_TABLE_NAME: str = "agri_field_forecast"
+    _HEADER_FORECAST_ID_KEY: str = "forecast_id"
+    _HEADER_IS_RECOMMENDED_KEY: str = "is_recommended"
+    _HEADER_TOTAL_MIN_KEY: str = "total_min"
+    _HEADER_WEATHER_CREATION_KEY: str = "weather_creation"
+    _DETAIL_TABLE_NAME: str = "agri_soil_forecast"
+    _DETAIL_TIMESTAMP_CREATION_SUFFIX: str = "_timestamp_creation"
+    _DETAIL_FORECAST_ID_SUFFIX: str = "_forecast_id"
+    _IRRIGATION_TABLE_NAME: str = "agri_field_forecast_irrigation"
+    _IRRIGATION_STATE_KEY: str = "irrigation_state"
+    _IRRIGATION_TIMESTAMP_CREATION_KEY: str = "irrigation_timestamp_creation"
+    _IMAGE_TABLE_NAME: str = "agri_field_forecast_image"
+    _IMAGE_KEY: str = "predict_image"
+    _IMAGE_COLUMN: str = "image"
+    _IMAGE_TIMESTAMP_CREATION_KEY: str = "predict_image_timestamp_creation"
 
     _logger_id: Optional[str] = None
     _max_windows: int = 0
@@ -265,35 +309,6 @@ class SoilPredictor(ChannelNamespace):
             logger.debug("%s: write-failure channel '%s' unavailable; count=%d.", self.name, constant, count)
 
 
-# --------------------------------------------------------------------------- field-level channels
-
-# TEMP_GROUND is registered but not written: only Evapotranspiration.evaluate's
-# per-segment publish path derives it, which ETModel does not reproduce.
-_VEGETATION_CHANNELS = tuple(LiveFieldSimulation.VEGETATION_CHANNELS)
-_VEGETATION_WRITE_CHANNELS = (
-    LiveFieldSimulation.LAI,
-    LiveFieldSimulation.ROUGHNESS,
-    LiveFieldSimulation.PLANT_HEIGHT,
-    LiveFieldSimulation.NDVI,
-)
-
-# Only SEG_GHI is derivable from ChainResult; the other two need seg_et.
-_SEGMENT_CHANNELS = tuple(LiveFieldSimulation.SEGMENT_CHANNELS)
-
-_ET_CHANNEL_KEYS = tuple(str(c) for c in LiveEvapotranspiration.CHANNELS)
-_SOIL_DIAGNOSTIC_CHANNELS = (
-    LiveSoilSimulation.WATER_TOP_IN,
-    LiveSoilSimulation.WATER_TOP_OUT,
-    LiveSoilSimulation.WATER_BOTTOM,
-    LiveSoilSimulation.WATER_TRANSP,
-    LiveSoilSimulation.WATER_RUNOFF,
-    LiveSoilSimulation.WATER_DEMAND_UNMET,
-    LiveSoilSimulation.WATER_BALANCE_RESIDUAL,
-    LiveSoilSimulation.WALK_SKIPPED_S,
-    LiveSoilSimulation.WALK_RETRIES,
-)
-
-
 class ChannelInputs:
     """``Inputs`` over lories connector reads. Every key is one ranged read;
     no decisions live here."""
@@ -316,11 +331,11 @@ class ChannelInputs:
         raise ValueError(f"unknown input key {key!r}")
 
     def load_state(self) -> Optional[SoilState]:
-        soil = self.field.soil
+        soil = self.field.soil_simulation
         if soil is None:
             return None
         try:
-            channel = soil.data[LiveSoilSimulation.SIMULATION_STATE]
+            channel = soil.data[SoilSimulation.SIMULATION_STATE]
         except Exception:  # noqa: BLE001
             return None
         if not channel.is_valid():
@@ -364,7 +379,7 @@ class ChannelInputs:
     def _read_irrigation(self, start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
         weather = self._read_weather(start, end)
         index = weather.index
-        column = LiveSoilSimulation.IRRIGATION_FLOW_LPM
+        column = SoilSimulation.IRRIGATION_FLOW_LPM
         if len(index) == 0:
             return pd.DataFrame(columns=[column])
         field = self.field
@@ -489,9 +504,9 @@ class ChannelOutputs:
             seg_cols = [c for c in shading_df.columns if c != "open_sky_ghi" and not c.startswith("ghi_")]
             for ts in shading_df.index:
                 factor = float(shading_df.loc[ts, seg_cols].mean()) if seg_cols else 1.0
-                self.shading.data[LiveGroundShading.SHADING_FACTOR].set(ts, factor)
+                self.shading.data[GroundShading.SHADING_FACTOR].set(ts, factor)
             if result.image is not None:
-                self.shading.data[LiveGroundShading.SHADING_PROGRESS_IMAGE].set(now, result.image)
+                self.shading.data[GroundShading.SHADING_PROGRESS_IMAGE].set(now, result.image)
 
             ghi_cols = {c[len("ghi_") :]: c for c in shading_df.columns if c.startswith("ghi_")}
             segment_names = list(self._top_segment_names())
@@ -500,7 +515,7 @@ class ChannelOutputs:
                     values = [
                         float(shading_df.loc[ts, ghi_cols[name]]) if name in ghi_cols else 0.0 for name in segment_names
                     ]
-                    self.field.data[LiveFieldSimulation.SEG_GHI].set(ts, values)
+                    self.field.data[FieldSimulation.SEG_GHI].set(ts, values)
 
         if self.et is not None and not et_df.empty:
             for key in _ET_CHANNEL_KEYS:
@@ -531,7 +546,7 @@ class ChannelOutputs:
         last_result = getattr(assimilator, "last_result", None)
         if last_result is not None and last_result.innovations:
             increment = float(sum(last_result.innovations.values()))
-            self.soil.data[LiveSoilSimulation.WATER_ANCHOR].set(ts, increment)
+            self.soil.data[SoilSimulation.WATER_ANCHOR].set(ts, increment)
 
     def plan(self, plan: Plan) -> None:
         if self.predictor is None:
@@ -549,7 +564,7 @@ class ChannelOutputs:
     def save_state(self, state: SoilState) -> None:
         if self.soil is None:
             return
-        self.soil.data[LiveSoilSimulation.SIMULATION_STATE].set(state.at, state.to_blob())
+        self.soil.data[SoilSimulation.SIMULATION_STATE].set(state.at, state.to_blob())
 
     def _top_segment_names(self) -> Sequence[str]:
         simulation = getattr(self.field, "simulation", None)
@@ -561,6 +576,17 @@ class FieldSimulation(Component):
     """Configure own section, let children configure theirs, bundle, assemble, own the thread."""
 
     TYPE: str = "field_simulation"
+
+    TEMP_GROUND = Constant(float, "temp_ground", "Ground Temperature", "°C")
+    LAI = Constant(float, "lai", "Leaf Area Index", "m^2/m^2")
+    ROUGHNESS = Constant(float, "roughness", "Roughness", "-")
+    PLANT_HEIGHT = Constant(float, "plant_height", "Plant Height", "m")
+    NDVI = Constant(float, "ndvi", "Normalized Difference Vegetation Index", "-")
+    SEG_GHI = Constant(list, "seg_ghi", "GHI (per segment)", "W/m^2")
+    SEG_EVAPOTRANSPIRATION = Constant(list, "seg_evapotranspiration", "Evapotranspiration (per segment)", "kg/(m^2*h)")
+    SEG_TEMP_GROUND = Constant(list, "seg_temp_ground", "Ground Temperature (per segment)", "°C")
+    VEGETATION_CHANNELS = (TEMP_GROUND, LAI, ROUGHNESS, PLANT_HEIGHT, NDVI)
+    SEGMENT_CHANNELS = (SEG_GHI, SEG_EVAPOTRANSPIRATION, SEG_TEMP_GROUND)
     CHILDREN: ClassVar[Sequence[Type[ChannelNamespace]]] = (
         GroundShading,
         Evapotranspiration,
@@ -582,9 +608,9 @@ class FieldSimulation(Component):
         defaults = Component._build_defaults(configs, includes=["model", "plot"], strict=True)
         self.ground_shading = self._child(GroundShading, configs, defaults)
         self.evapotranspiration = self._child(Evapotranspiration, configs, defaults)
-        self.soil = self._child(SoilSimulation, configs, defaults)
-        self.predictor = self._child(SoilPredictor, configs, defaults)
-        if self.soil is None or self.soil.config is None:
+        self.soil_simulation = self._child(SoilSimulation, configs, defaults)
+        self.soil_predictor = self._child(SoilPredictor, configs, defaults)
+        if self.soil_simulation is None or self.soil_simulation.config is None:
             raise ValueError(f"{self.id}: [soil_simulation] block is required")
 
         plots = None
@@ -594,14 +620,14 @@ class FieldSimulation(Component):
                 plots = PlotConfig()
                 plots.configure(plot_member)
 
-        soil: SoilConfig = self.soil.config
+        soil: SoilConfig = self.soil_simulation.config
         soil.mesh.derive(bay_width=field.bay_width)
         shading = self.ground_shading.config if self.ground_shading is not None else ShadingConfig.from_dict()
         self.setup = FieldSetup(
             field=field,
             soil=soil,
             shading=shading,
-            planner=self.predictor.config if self.predictor is not None else None,
+            planner=self.soil_predictor.config if self.soil_predictor is not None else None,
             plots=plots,
         )
 
@@ -623,7 +649,7 @@ class FieldSimulation(Component):
         self.weather = getattr(system, "weather", None)
         self.irrigation = getattr(self.context, "irrigation", None)
 
-        if self.evapotranspiration is None or self.soil is None:
+        if self.evapotranspiration is None or self.soil_simulation is None:
             return
         if self.weather is None:
             logger.warning("%s: no Weather component resolved; chain will never tick.", self.name)
@@ -653,13 +679,17 @@ class FieldSimulation(Component):
             probes_block = self.setup.soil.configs.get_member("probes", defaults={}, ensure_exists=True)
             config_probes = self.simulation.engine.probes(probes_block)
         for probe in config_probes:
-            self.soil.register_probe(probe)
+            self.soil_simulation.register_probe(probe)
 
-        if self.predictor is not None:
-            self.predictor.register_forecast_tables(self.soil.configs, list(self.setup.soil.probe_specs))
+        if self.soil_predictor is not None:
+            self.soil_predictor.register_forecast_tables(
+                self.soil_simulation.configs, list(self.setup.soil.probe_specs)
+            )
 
         self.inputs = ChannelInputs(self)
-        self.outputs = ChannelOutputs(self, self.ground_shading, self.evapotranspiration, self.soil, self.predictor)
+        self.outputs = ChannelOutputs(
+            self, self.ground_shading, self.evapotranspiration, self.soil_simulation, self.soil_predictor
+        )
         self.runner = FieldRunner(self.setup, self.simulation, self.inputs, self.outputs)
         self._register_state_listener()
         self.ticker = Ticker(self.setup, self.runner, tz=getattr(self.location, "timezone", None), name=self.name)
@@ -674,6 +704,41 @@ class FieldSimulation(Component):
     def snapshot(self) -> Snapshot:
         """What dash reads. Never a channel round-trip."""
         return self.simulation.snapshot()
+
+    def simulate(
+        self,
+        weather: pd.DataFrame,
+        start: Optional[dt.datetime] = None,
+        end: Optional[dt.datetime] = None,
+        prior: Optional[pd.DataFrame] = None,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Offline run over a weather frame; returns the per-row diagnostics."""
+        if self.soil_simulation is None or self.evapotranspiration is None:
+            return pd.DataFrame()
+        if start is not None:
+            weather = weather.loc[weather.index >= start]
+        if end is not None:
+            weather = weather.loc[weather.index <= end]
+        if weather.empty:
+            return pd.DataFrame()
+        simulation = self.simulation or Simulation.build(self.setup, name=self.name)
+        state = self._prior_state(prior)
+        if state is not None:
+            simulation.resume(state)
+        results, _ = simulation.run(weather, pd.Series(0.0, index=weather.index))
+        return pd.DataFrame.from_dict({r.state.at: dict(r.diagnostics) for r in results}, orient="index")
+
+    def _prior_state(self, prior: Optional[pd.DataFrame]) -> Optional[SoilState]:
+        if prior is None or prior.empty:
+            return None
+        column = self.soil_simulation.data[SoilSimulation.SIMULATION_STATE].id
+        if column not in prior.columns:
+            return None
+        blob = prior[column].iloc[-1]
+        if not isinstance(blob, (bytes, bytearray)) or len(blob) == 0:
+            return None
+        return SoilState.from_blob(bytes(blob), prior.index[-1])
 
     @classmethod
     def schema(cls) -> dict[str, Any]:
@@ -696,7 +761,7 @@ class FieldSimulation(Component):
     def _top_segment_names_from_config(self) -> list[str]:
         """Top-segment names from the resolved mesh config, needed before the
         FiPy engine exists to decide whether the per-segment channels exist."""
-        from sparcs.components.agriculture.simulation._soil import top_segment_names_from_mesh
+        from .core.pde import top_segment_names_from_mesh
 
         mesh = self.setup.soil.mesh
         if mesh.width is None:
@@ -720,12 +785,12 @@ class FieldSimulation(Component):
     # -- warm start ---------------------------------------------------------------
 
     def _register_state_listener(self) -> None:
-        soil_data = self.soil.data
+        soil_data = self.soil_simulation.data
         if not self._check_state_channel_warm_start(soil_data):
             return
         soil_data.register(
             self._on_state,
-            soil_data[LiveSoilSimulation.SIMULATION_STATE],
+            soil_data[SoilSimulation.SIMULATION_STATE],
             how="any",
             unique=True,
         )
@@ -733,7 +798,7 @@ class FieldSimulation(Component):
     def _check_state_channel_warm_start(self, soil_data: Any) -> bool:
         """Warn about a warm-start-breaking state-channel config; return whether
         a read-side connector is present, so the listener is worth registering."""
-        state_channel = soil_data[LiveSoilSimulation.SIMULATION_STATE]
+        state_channel = soil_data[SoilSimulation.SIMULATION_STATE]
         if not state_channel.has_logger():
             logger.warning(
                 "%s: SIMULATION_STATE has no logger configured; soil state will not "
@@ -848,3 +913,32 @@ class FieldSimulation(Component):
                 "connector). Wire a tensiometer or disable [anchor]."
             )
         return sensors, channels, data
+
+
+# --------------------------------------------------------------------------- field-level channels
+
+# TEMP_GROUND is registered but not written: only Evapotranspiration.evaluate's
+# per-segment publish path derives it, which ETModel does not reproduce.
+_VEGETATION_CHANNELS = FieldSimulation.VEGETATION_CHANNELS
+_VEGETATION_WRITE_CHANNELS = (
+    FieldSimulation.LAI,
+    FieldSimulation.ROUGHNESS,
+    FieldSimulation.PLANT_HEIGHT,
+    FieldSimulation.NDVI,
+)
+
+# Only SEG_GHI is derivable from ChainResult; the other two need seg_et.
+_SEGMENT_CHANNELS = FieldSimulation.SEGMENT_CHANNELS
+
+_ET_CHANNEL_KEYS = tuple(str(c) for c in Evapotranspiration.CHANNELS)
+_SOIL_DIAGNOSTIC_CHANNELS = (
+    SoilSimulation.WATER_TOP_IN,
+    SoilSimulation.WATER_TOP_OUT,
+    SoilSimulation.WATER_BOTTOM,
+    SoilSimulation.WATER_TRANSP,
+    SoilSimulation.WATER_RUNOFF,
+    SoilSimulation.WATER_DEMAND_UNMET,
+    SoilSimulation.WATER_BALANCE_RESIDUAL,
+    SoilSimulation.WALK_SKIPPED_S,
+    SoilSimulation.WALK_RETRIES,
+)

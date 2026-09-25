@@ -7,7 +7,7 @@ integration (discovery, advance() hook) is box-verified; this just pins the pars
 """
 
 import pandas as pd
-from sparcs.components.agriculture.simulation._anchor import SensorOverrides
+from sparcs.components.agriculture.fieldsim.core.anchor import SensorOverrides
 from sparcs.components.agriculture.simulation.soil import _parse_anchor_config
 
 

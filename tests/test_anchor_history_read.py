@@ -13,7 +13,7 @@ import types
 
 import numpy as np
 import pandas as pd
-from sparcs.components.agriculture.simulation._anchor import AnchorSensor, latest_reading_at
+from sparcs.components.agriculture.fieldsim.core.anchor import AnchorSensor, latest_reading_at
 
 
 def _series(pairs):

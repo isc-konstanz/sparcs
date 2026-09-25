@@ -14,7 +14,7 @@ import numpy as np
 
 pytestmark = pytest.mark.slow
 
-from sparcs.components.agriculture.simulation._soil import RHO_W, FluxRates  # noqa: E402
+from sparcs.components.agriculture.fieldsim.core.pde import RHO_W, FluxRates  # noqa: E402
 
 IC_SE = 0.9
 WINDOW_S = 600.0

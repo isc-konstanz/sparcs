@@ -22,7 +22,7 @@ import pytest
 
 soil_predictor = pytest.importorskip("sparcs.components.agriculture.simulation.soil_predictor")
 
-from sparcs.components.agriculture.simulation import _predictor_rollout  # noqa: E402
+from sparcs.components.agriculture.fieldsim.core import rollout as _predictor_rollout  # noqa: E402
 
 SoilPredictor = soil_predictor.SoilPredictor
 
@@ -78,7 +78,7 @@ def test_module_flux_functions_are_soil_functions():
     """W4.2: the keyed flux helpers live in ``_soil`` (shared by the sim's
     ``_compute_flux_rates`` delegation); ``_predictor_rollout`` keeps the
     pinned underscore names as import-aliases of the same function objects."""
-    from sparcs.components.agriculture.simulation import _soil
+    from sparcs.components.agriculture.fieldsim.core import pde as _soil
 
     assert _predictor_rollout._segment_flux_dicts is _soil.segment_flux_dicts
     assert _predictor_rollout._rain_flux is _soil.rain_flux

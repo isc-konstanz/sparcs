@@ -6,7 +6,7 @@ AttributeError, since from_configs does not exist before this unit.
 """
 
 from lories import Configurations
-from sparcs.components.agriculture.simulation._soil import FeddesConfig, PondingConfig
+from sparcs.components.agriculture.fieldsim.core.pde import FeddesConfig, PondingConfig
 
 
 def _configs(tmp_path, name="t.conf", **values) -> Configurations:

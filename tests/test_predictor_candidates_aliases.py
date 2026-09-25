@@ -25,7 +25,7 @@ import pytest
 
 soil_predictor = pytest.importorskip("sparcs.components.agriculture.simulation.soil_predictor")
 
-from sparcs.components.agriculture.simulation import _predictor_candidates  # noqa: E402
+from sparcs.components.agriculture.fieldsim.core import candidates as _predictor_candidates  # noqa: E402
 
 SoilPredictor = soil_predictor.SoilPredictor
 

@@ -24,14 +24,14 @@ import numpy as np
 import pandas as pd
 from lories.typing import Configurations
 
-from ._schedule import slot_floor
-from ._soil import (
+from .pde import (
     PDEConfig,
     apply_surface_forcing,
     design_flow_lpm,
     flow_m3s_per_m,
     resolve_pde_config,
 )
+from .schedule import slot_floor
 
 __all__ = [
     "WateringWindow",

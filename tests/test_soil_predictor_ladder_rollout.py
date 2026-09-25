@@ -26,7 +26,7 @@ import pandas as pd
 
 pytestmark = pytest.mark.slow
 
-from sparcs.components.agriculture.simulation._soil import FluxRates  # noqa: E402
+from sparcs.components.agriculture.fieldsim.core.pde import FluxRates  # noqa: E402
 from sparcs.components.agriculture.simulation.soil_predictor import (  # noqa: E402
     SoilPredictor,
     WateringWindow,

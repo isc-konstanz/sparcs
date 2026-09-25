@@ -114,7 +114,7 @@ class SolarSystem(Component, PVSystem):
                 for i in range(min(row_model["rows"], rows["count"])):
                     _array_configs = array.configs.copy()
                     _array_configs["key"] = f"{array.key}_{i}"
-                    _array_configs["name"] = f"{array.name} Row {i+1}"
+                    _array_configs["name"] = f"{array.name} Row {i + 1}"
 
                     _array_rows = _array_configs.get_member("rows")
                     _array_rows.update(rows.get_member(str(i), defaults={"modules": row_modules}))

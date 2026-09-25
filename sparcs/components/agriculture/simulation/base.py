@@ -23,8 +23,8 @@ from lories.util import to_timedelta
 from sparcs.components.agriculture.irrigation import Irrigation
 from sparcs.components.weather import validate_meteo_inputs
 
-from ._schedule import parse_tick_schedule, slot_ceil
-from ._soil import (
+from ..fieldsim.components import FieldSimulation as _FsFieldSimulation
+from ..fieldsim.core.pde import (
     _DEFAULT_BAY_WIDTH,
     FIELD_SIMULATION_ALLOWED_KEYS,
     DripConfig,
@@ -35,6 +35,7 @@ from ._soil import (
     top_segment_names_from_mesh,
     warn_unknown_keys,
 )
+from ..fieldsim.core.schedule import parse_tick_schedule, slot_ceil
 from .evapotranspiration import Evapotranspiration, SegmentProperties
 from .ground_shading import GroundShading
 from .soil import SoilSimulation
@@ -68,18 +69,18 @@ class FieldSimulation(Component):
     INCLUDES = [GroundShading.TYPE, Evapotranspiration.TYPE, SoilSimulation.TYPE, SoilPredictor.TYPE]
 
     # Vegetation/ground-surface state channels consumed by Evapotranspiration.
-    TEMP_GROUND = Constant(float, "temp_ground", "Ground Temperature", "°C")
-    LAI = Constant(float, "lai", "Leaf Area Index", "m^2/m^2")
-    ROUGHNESS = Constant(float, "roughness", "Roughness", "-")
-    PLANT_HEIGHT = Constant(float, "plant_height", "Plant Height", "m")
-    NDVI = Constant(float, "ndvi", "Normalized Difference Vegetation Index", "-")
+    TEMP_GROUND = _FsFieldSimulation.TEMP_GROUND
+    LAI = _FsFieldSimulation.LAI
+    ROUGHNESS = _FsFieldSimulation.ROUGHNESS
+    PLANT_HEIGHT = _FsFieldSimulation.PLANT_HEIGHT
+    NDVI = _FsFieldSimulation.NDVI
 
     VEGETATION_CHANNELS = [TEMP_GROUND, LAI, ROUGHNESS, PLANT_HEIGHT, NDVI]
 
     # Bundled per-segment channels, each holds a ``list[float]`` ordered by ``top_segment_names``.
-    SEG_GHI = Constant(list, "seg_ghi", "GHI (per segment)", "W/m^2")
-    SEG_EVAPOTRANSPIRATION = Constant(list, "seg_evapotranspiration", "Evapotranspiration (per segment)", "kg/(m^2*h)")
-    SEG_TEMP_GROUND = Constant(list, "seg_temp_ground", "Ground Temperature (per segment)", "°C")
+    SEG_GHI = _FsFieldSimulation.SEG_GHI
+    SEG_EVAPOTRANSPIRATION = _FsFieldSimulation.SEG_EVAPOTRANSPIRATION
+    SEG_TEMP_GROUND = _FsFieldSimulation.SEG_TEMP_GROUND
     SEGMENT_CHANNELS = [SEG_GHI, SEG_EVAPOTRANSPIRATION, SEG_TEMP_GROUND]
 
     ground_shading: Optional[GroundShading] = None

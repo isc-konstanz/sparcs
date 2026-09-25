@@ -21,7 +21,7 @@ import pytest
 import numpy as np
 
 base = pytest.importorskip("sparcs.components.agriculture.simulation.base")
-_soil = pytest.importorskip("sparcs.components.agriculture.simulation._soil")
+_soil = pytest.importorskip("sparcs.components.agriculture.fieldsim.core.pde")
 FieldSimulation = base.FieldSimulation
 ProbeSpec = _soil.ProbeSpec
 

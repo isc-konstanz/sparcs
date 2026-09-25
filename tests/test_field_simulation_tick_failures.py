@@ -42,7 +42,7 @@ FieldSimulation = _base.FieldSimulation
 soil = pytest.importorskip("sparcs.components.agriculture.simulation.soil")
 SoilSimulation = soil.SoilSimulation
 
-_soil_core = pytest.importorskip("sparcs.components.agriculture.simulation._soil")
+_soil_core = pytest.importorskip("sparcs.components.agriculture.fieldsim.core.pde")
 FluxRates = _soil_core.FluxRates
 ClipDiagnostics = _soil_core.ClipDiagnostics
 

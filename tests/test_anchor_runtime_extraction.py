@@ -24,7 +24,8 @@ import pytest
 
 soil = pytest.importorskip("sparcs.components.agriculture.simulation.soil")
 
-from sparcs.components.agriculture.simulation import _anchor, _anchor_runtime  # noqa: E402
+from sparcs.components.agriculture.fieldsim import anchor_runtime as _anchor_runtime  # noqa: E402
+from sparcs.components.agriculture.fieldsim.core import anchor as _anchor  # noqa: E402
 
 
 @pytest.mark.parametrize(

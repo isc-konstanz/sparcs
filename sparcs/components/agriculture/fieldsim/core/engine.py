@@ -13,7 +13,9 @@ import logging
 from typing import Any, Callable, Mapping, Optional
 
 import numpy as np
-from sparcs.components.agriculture.simulation._soil import (
+
+from .config import SoilConfig
+from .pde import (
     RHO_W,
     SE_MAX,
     SE_MIN,
@@ -26,8 +28,6 @@ from sparcs.components.agriculture.simulation._soil import (
     resolve_probe_from_sensor,
     resolve_probes,
 )
-
-from .config import SoilConfig
 from .state import Forcing, SoilState, StepResult
 
 logger = logging.getLogger(__name__)

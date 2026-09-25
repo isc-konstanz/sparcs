@@ -32,10 +32,12 @@ from lories.typing import Configurations
 from lories.util import to_timedelta
 from sparcs.components.agriculture.simulation.soil import SoilSimulation
 
-from . import _predictor_candidates, _predictor_rollout, _predictor_tables, plot_render, plot_style
-from ._predictor_candidates import WateringWindow
-from ._schedule import parse_tick_schedule
-from ._soil import (
+from ..fieldsim import forecast_tables as _predictor_tables
+from ..fieldsim.components import SoilPredictor as _FsSoilPredictor
+from ..fieldsim.core import candidates as _predictor_candidates
+from ..fieldsim.core import rollout as _predictor_rollout
+from ..fieldsim.core.candidates import WateringWindow
+from ..fieldsim.core.pde import (
     _DEFAULT_NOZZLE_COUNT,
     _DEFAULT_NOZZLE_FLOW_LPH,
     SOIL_PREDICTOR_ALLOWED_KEYS,
@@ -53,6 +55,8 @@ from ._soil import (
     resolve_probes,
     warn_unknown_keys,
 )
+from ..fieldsim.core.schedule import parse_tick_schedule
+from . import plot_render, plot_style
 
 logger = logging.getLogger(__name__)
 
@@ -160,11 +164,11 @@ class SoilPredictor(SoilBase):
     # no separate primary timestamp_creation channel is needed here, unlike the
     # detail table below). forecast_id is the per-row PK partner that
     # distinguishes one run's candidate rows from each other.
-    _HEADER_TABLE_NAME: str = "agri_field_forecast"
-    _HEADER_FORECAST_ID_KEY: str = "forecast_id"
-    _HEADER_IS_RECOMMENDED_KEY: str = "is_recommended"
-    _HEADER_TOTAL_MIN_KEY: str = "total_min"
-    _HEADER_WEATHER_CREATION_KEY: str = "weather_creation"
+    _HEADER_TABLE_NAME: str = _FsSoilPredictor._HEADER_TABLE_NAME
+    _HEADER_FORECAST_ID_KEY: str = _FsSoilPredictor._HEADER_FORECAST_ID_KEY
+    _HEADER_IS_RECOMMENDED_KEY: str = _FsSoilPredictor._HEADER_IS_RECOMMENDED_KEY
+    _HEADER_TOTAL_MIN_KEY: str = _FsSoilPredictor._HEADER_TOTAL_MIN_KEY
+    _HEADER_WEATHER_CREATION_KEY: str = _FsSoilPredictor._HEADER_WEATHER_CREATION_KEY
 
     # --- Detail table (direct connector write) ---------------------------------
     # `agri_soil_forecast`: ALL candidates' per-probe tension rows, indexed at
@@ -189,9 +193,9 @@ class SoilPredictor(SoilBase):
     # probe's tension channel AND both its twins (config-side identity stays
     # on the probe; the twins inherit it in code -- see
     # `_register_detail_channels`).
-    _DETAIL_TABLE_NAME: str = "agri_soil_forecast"
-    _DETAIL_TIMESTAMP_CREATION_SUFFIX: str = "_timestamp_creation"
-    _DETAIL_FORECAST_ID_SUFFIX: str = "_forecast_id"
+    _DETAIL_TABLE_NAME: str = _FsSoilPredictor._DETAIL_TABLE_NAME
+    _DETAIL_TIMESTAMP_CREATION_SUFFIX: str = _FsSoilPredictor._DETAIL_TIMESTAMP_CREATION_SUFFIX
+    _DETAIL_FORECAST_ID_SUFFIX: str = _FsSoilPredictor._DETAIL_FORECAST_ID_SUFFIX
 
     # --- Irrigation-plan table (direct connector write) ------------------------
     # `agri_field_forecast_irrigation`: the chosen candidate's watering schedule as
@@ -203,9 +207,9 @@ class SoilPredictor(SoilBase):
     # value channel is needed: this table has a single field per predictor
     # component (field_id cascades component-wide via config, not per-row), so
     # there is no per-probe soil_id to disambiguate.
-    _IRRIGATION_TABLE_NAME: str = "agri_field_forecast_irrigation"
-    _IRRIGATION_STATE_KEY: str = "irrigation_state"
-    _IRRIGATION_TIMESTAMP_CREATION_KEY: str = "irrigation_timestamp_creation"
+    _IRRIGATION_TABLE_NAME: str = _FsSoilPredictor._IRRIGATION_TABLE_NAME
+    _IRRIGATION_STATE_KEY: str = _FsSoilPredictor._IRRIGATION_STATE_KEY
+    _IRRIGATION_TIMESTAMP_CREATION_KEY: str = _FsSoilPredictor._IRRIGATION_TIMESTAMP_CREATION_KEY
 
     # --- Recommended-candidate field-plot image table (direct connector write) --
     # `agri_field_forecast_image`: the RECOMMENDED candidate's soil-saturation
@@ -216,10 +220,10 @@ class SoilPredictor(SoilBase):
     # per component, so no per-probe twins. Recommended candidate only. Reuses the
     # bytes already rendered for the in-memory `predict_plot` channel -- see
     # `_publish_results`/`predict`. Gated by `[plot] enabled` AND a configured logger.
-    _IMAGE_TABLE_NAME: str = "agri_field_forecast_image"
-    _IMAGE_KEY: str = "predict_image"
-    _IMAGE_COLUMN: str = "image"
-    _IMAGE_TIMESTAMP_CREATION_KEY: str = "predict_image_timestamp_creation"
+    _IMAGE_TABLE_NAME: str = _FsSoilPredictor._IMAGE_TABLE_NAME
+    _IMAGE_KEY: str = _FsSoilPredictor._IMAGE_KEY
+    _IMAGE_COLUMN: str = _FsSoilPredictor._IMAGE_COLUMN
+    _IMAGE_TIMESTAMP_CREATION_KEY: str = _FsSoilPredictor._IMAGE_TIMESTAMP_CREATION_KEY
 
     _horizon: pd.Timedelta
     # Chosen-candidate field-plot cadence lives in _plot_config (None = plotting off);

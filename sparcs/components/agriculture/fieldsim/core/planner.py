@@ -17,7 +17,9 @@ from typing import Any, Mapping, Optional, Sequence
 import numpy as np
 import pandas as pd
 from lories.core import ConfigurationError
-from sparcs.components.agriculture.simulation._predictor_candidates import (
+
+from ..forecast_tables import _merge_irrigation_intervals, forecast_ids
+from .candidates import (
     WateringWindow,
     build_candidate_grid,
     build_flow_schedule,
@@ -26,12 +28,10 @@ from sparcs.components.agriculture.simulation._predictor_candidates import (
     select_candidate,
     total_minutes,
 )
-from sparcs.components.agriculture.simulation._predictor_rollout import RolloutEngine
-from sparcs.components.agriculture.simulation._predictor_tables import _merge_irrigation_intervals, forecast_ids
-from sparcs.components.agriculture.simulation._soil import ProbeSpec
-
 from .config import DripConfig, PlannerConfig
 from .engine import SoilEngine
+from .pde import ProbeSpec
+from .rollout import RolloutEngine
 from .state import Plan, SoilState
 
 logger = logging.getLogger(__name__)

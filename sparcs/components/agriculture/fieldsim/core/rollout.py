@@ -27,10 +27,10 @@ from typing import Any, Callable, Optional
 import numpy as np
 import pandas as pd
 
-from ._predictor_candidates import WateringWindow, build_flow_schedule, resolve_window_start, split_interval
-from ._soil import ClipDiagnostics, FluxRates, MeshConfig, PDEConfig, ProbeSpec, SoilPDECore, ensure_mesh
-from ._soil import rain_flux as _rain_flux
-from ._soil import segment_flux_dicts as _segment_flux_dicts
+from .candidates import WateringWindow, build_flow_schedule, resolve_window_start, split_interval
+from .pde import ClipDiagnostics, FluxRates, MeshConfig, PDEConfig, ProbeSpec, SoilPDECore, ensure_mesh
+from .pde import rain_flux as _rain_flux
+from .pde import segment_flux_dicts as _segment_flux_dicts
 
 logger = logging.getLogger(__name__)
 

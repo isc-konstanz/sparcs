@@ -39,8 +39,8 @@ WateringWindow = soil_predictor.WateringWindow
 
 from lories import Configurations  # noqa: E402
 from lories.components.weather import Weather  # noqa: E402
-from sparcs.components.agriculture.simulation import _predictor_rollout  # noqa: E402
-from sparcs.components.agriculture.simulation._soil import (  # noqa: E402
+from sparcs.components.agriculture.fieldsim.core import rollout as _predictor_rollout  # noqa: E402
+from sparcs.components.agriculture.fieldsim.core.pde import (  # noqa: E402
     MeshConfig,
     PDEConfig,
     ProbeSpec,

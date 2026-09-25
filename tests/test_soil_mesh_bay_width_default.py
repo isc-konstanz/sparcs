@@ -15,7 +15,7 @@ this exercises the pure resolution seam without building a mesh.
 import types
 
 from lories import Configurations
-from sparcs.components.agriculture.simulation._soil import _DEFAULT_BAY_WIDTH, MeshConfig
+from sparcs.components.agriculture.fieldsim.core.pde import _DEFAULT_BAY_WIDTH, MeshConfig
 from sparcs.components.agriculture.simulation.soil import _resolve_mesh_config
 
 

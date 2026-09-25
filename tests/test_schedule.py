@@ -30,7 +30,7 @@ import pytest
 
 import pandas as pd
 
-_schedule = pytest.importorskip("sparcs.components.agriculture.simulation._schedule")
+_schedule = pytest.importorskip("sparcs.components.agriculture.fieldsim.core.schedule")
 parse_tick_schedule = _schedule.parse_tick_schedule
 slot_ceil = _schedule.slot_ceil
 slot_floor = _schedule.slot_floor
