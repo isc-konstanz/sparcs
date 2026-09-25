@@ -96,8 +96,12 @@ def test_unknown_top_level_key_is_hard_error():
 
 
 def test_unknown_key_inside_declared_group_is_hard_error():
-    with pytest.raises(ConfigurationError, match=r"ShadingConfig.tracker.typo"):
-        ShadingConfig.from_dict({"tracker": {"typo": 1}})
+    # ShadingConfig's geometry keys are flat (mirroring the live
+    # GroundShading parser, which never nests them under a [tracker] table);
+    # PlannerConfig.state is the nearest declared-children group left to
+    # exercise the same recursive-into-a-group check.
+    with pytest.raises(ConfigurationError, match=r"PlannerConfig.state.typo"):
+        PlannerConfig.from_dict({"state": {"typo": 1}})
 
 
 def test_section_given_where_scalar_expected():

@@ -145,9 +145,14 @@ def _unknown_keys(configs: Any, params: Mapping[str, _Parameter], allowed: set, 
 
 
 class PlotConfig(Config):
-    """``[plot]``: progress-image settings, field-level default cascaded to every child."""
+    """``[plot]``: progress-image settings, field-level default cascaded to every child.
 
-    enabled = Parameter(type=bool, default=False, desc="Render progress images")
+    Whether plotting is on is the section's own ``enabled`` key, which lories
+    reserves as the table's on/off switch: a ``[plot]`` with ``enabled = false``
+    must not be configured at all (the adapter passes ``plots=None``), so no
+    ``enabled`` parameter is declared here.
+    """
+
     interval = DurationParameter(default="1h", desc="Minimum time between two rendered frames")
     disable_after_failures = Parameter(
         type=int, default=5, min=1, desc="Consecutive render failures before plotting stops"

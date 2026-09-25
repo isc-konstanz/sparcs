@@ -52,7 +52,9 @@ class _Shading:
 
 class _ET:
     def evaluate(self, weather, segments):
-        return pd.DataFrame({"et_top": 0.1}, index=weather.index)
+        bulk = pd.DataFrame({"et_top": 0.1}, index=weather.index)
+        seg_et = {"top": pd.DataFrame({"et": 0.1, "evap": 0.1, "transp": 0.0}, index=weather.index)}
+        return bulk, seg_et
 
 
 class _Chain(WeatherChain):
@@ -65,13 +67,16 @@ class _Chain(WeatherChain):
     def _forcings(self, weather, shading, et, irrigation_lpm):
         return [Forcing(t.to_pydatetime(), 3600.0) for t in weather.index]
 
+    def horizon_inputs(self, forecast):
+        return forecast, {}
+
 
 class _NoAssimilation:
     enabled = False
 
 
 class _Planner:
-    def plan(self, state, horizon):
+    def plan(self, state, weather, seg_et, horizon_start, horizon_end, *, run_timestamp, weather_creation=None):
         return Plan(
             chosen=("06:00", 30),
             trajectories={},

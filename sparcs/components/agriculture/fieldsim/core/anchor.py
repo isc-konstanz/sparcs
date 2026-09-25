@@ -1,5 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Pure constant-gain analysis update for anchoring the soil saturation field.
+"""
+sparcs.components.agriculture.fieldsim.core.anchor
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Verbatim copy of ``simulation._anchor`` (pure numpy) so the core does not import
+the live package. Pure constant-gain analysis update for anchoring the soil
+saturation field.
 
 The simulation runs Richards forward from weather and irrigation alone, so it
 drifts from the real bay over a season. This nudges the simulated
