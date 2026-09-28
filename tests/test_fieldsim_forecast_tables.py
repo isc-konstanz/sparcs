@@ -40,6 +40,7 @@ class _RecordingAdds:
 def _bare(monkeypatch=None, data=None, connectors=None, **extra) -> SoilPredictor:
     predictor = object.__new__(SoilPredictor)
     predictor._name = "test_predictor"
+    predictor._id = "agri.field_1.field_simulation.soil_predictor"
     for key, value in extra.items():
         setattr(predictor, key, value)
     if monkeypatch is not None and data is not None:
@@ -357,7 +358,7 @@ class _RecordingConnector:
 
 
 def _connectors(connector):
-    return types.SimpleNamespace(db=connector)
+    return types.SimpleNamespace(context={"db": connector})
 
 
 def _header_keys(predictor) -> list:
@@ -405,13 +406,18 @@ def test_write_image_table_skips_when_logger_not_configured():
     predictor.tables().write_image_table(_frame(SoilPredictor._IMAGE_KEY, _PNG_A))
 
 
-def test_write_detail_table_skips_when_connector_missing(monkeypatch, caplog):
-    class _NoConnectors:
-        def __getitem__(self, item):
-            raise KeyError(item)
+class _NoConnectors:
+    """Component-scoped lookups that find nothing, over ``context``."""
 
+    def __init__(self, context=None):
+        self.context = dict(context or {})
+
+    def __getitem__(self, item):
+        raise KeyError(item)
+
+
+def test_write_detail_table_skips_when_connector_missing(monkeypatch, caplog):
     predictor = _bare(monkeypatch, connectors=_NoConnectors(), _logger_id="db", _traj_channel_keys={})
-    predictor._logger_connector_from_channel = lambda: None
 
     with caplog.at_level("WARNING"):
         predictor.tables().write_detail_table(_frame("traj_root_20", 0.9))
@@ -419,20 +425,14 @@ def test_write_detail_table_skips_when_connector_missing(monkeypatch, caplog):
     assert any("not found" in message for message in caplog.messages)
 
 
-def test_write_detail_table_uses_channel_resolved_connector(monkeypatch):
+def test_write_detail_table_uses_a_root_level_connector(monkeypatch):
     """A nested predictor references a ROOT-level connector: the component-scoped
-    id lookup cannot resolve the bare id, but the header's forecast_id channel
-    already bound it at registration, and that anchor serves BOTH tables."""
+    id lookup cannot resolve the bare id, the walk up the predictor's id path does."""
     connector = _RecordingConnector()
-
-    class _Logger:
-        def _get_registrator(self):
-            return connector
 
     class _Channel:
         def __init__(self, channel_id):
             self.id = channel_id
-            self.logger = _Logger()
 
     class _Data:
         def __init__(self, keys):
@@ -441,13 +441,9 @@ def test_write_detail_table_uses_channel_resolved_connector(monkeypatch):
         def __getitem__(self, key):
             return self._channels[key]
 
-    class _NoConnectors:
-        def __getitem__(self, item):
-            raise KeyError(item)
-
     predictor = _bare(
         monkeypatch,
-        connectors=_NoConnectors(),
+        connectors=_NoConnectors({"mariadb": connector}),
         _logger_id="mariadb",
         _traj_channel_keys={"root_20": "traj_root_20"},
         _detail_creation_keys={},
@@ -459,7 +455,7 @@ def test_write_detail_table_uses_channel_resolved_connector(monkeypatch):
 
     predictor.tables().write_detail_table(_frame("traj_root_20", 0.9))
 
-    assert connector.written, "must write via the connector the header channel resolved"
+    assert connector.written, "must write via the root-level connector"
 
 
 def test_header_and_detail_writes_rename_to_ids_and_never_call_set(monkeypatch):
@@ -549,7 +545,6 @@ class _RaisingConnector:
 def _failing(monkeypatch, data, connector=None) -> SoilPredictor:
     predictor = _bare(monkeypatch, connectors=_connectors(connector or _RaisingConnector()), _logger_id="db")
     predictor._write_failures = None
-    predictor._logger_connector_from_channel = lambda: None  # force the id-based fallback
     monkeypatch.setattr(SoilPredictor, "data", property(lambda self: data))
     return predictor
 

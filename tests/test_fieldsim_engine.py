@@ -6,6 +6,8 @@
 """
 
 import datetime as dt
+import io
+import types
 
 import pytest
 
@@ -13,9 +15,11 @@ import numpy as np
 
 pytestmark = pytest.mark.slow
 
+from sparcs.components.agriculture.fieldsim.core.anchor import AnchorSensor  # noqa: E402
 from sparcs.components.agriculture.fieldsim.core.config import SoilConfig  # noqa: E402
 from sparcs.components.agriculture.fieldsim.core.engine import SoilEngine  # noqa: E402
 from sparcs.components.agriculture.fieldsim.core.pde import FluxRates, SoilPDECore  # noqa: E402
+from sparcs.components.agriculture.fieldsim.core.simulation import Simulation  # noqa: E402
 from sparcs.components.agriculture.fieldsim.core.state import Forcing, SoilState  # noqa: E402
 
 UTC = dt.timezone.utc
@@ -158,6 +162,61 @@ def test_state_blob_round_trip(engine):
     assert np.array_equal(from_core_blob.se, result.state.se)
     assert np.array_equal(from_core_blob.se_old, result.state.se_old)
     assert from_core_blob.surface_h == result.state.surface_h
+
+
+def test_core_blob_is_the_state_blob(engine):
+    """One codec: the core persists exactly the bytes ``SoilState.to_blob`` writes."""
+    state = engine.initial_state(dt.datetime(2026, 1, 1, tzinfo=UTC))
+    engine.load(state)
+
+    assert engine.pde.save_state_blob() == state.to_blob()
+
+
+def test_a_blob_that_needs_pickle_is_refused(engine):
+    n = int(engine.pde.rel_sat.value.shape[0])
+    buf = io.BytesIO()
+    np.savez(
+        buf, rel_sat=np.full(n, 0.5), surface_names=np.array(["WateringTopSegment"], dtype=object), surface_h=[0.0]
+    )
+
+    with pytest.raises(ValueError, match="allow_pickle"):
+        SoilState.from_blob(buf.getvalue(), dt.datetime(2026, 1, 1, tzinfo=UTC))
+    with pytest.raises(ValueError, match="allow_pickle"):
+        engine.pde.load_state_blob(buf.getvalue())
+
+
+def test_a_state_from_another_mesh_decodes_but_is_refused_at_resume(engine):
+    n = int(engine.pde.rel_sat.value.shape[0])
+    at = dt.datetime(2026, 1, 1, tzinfo=UTC)
+    blob = SoilState(np.full(n + 2, 0.5), np.full(n + 2, 0.5), {}, at).to_blob()
+    stale = SoilState.from_blob(blob, at)
+    simulation = Simulation(None, engine, chain=None, assimilator=None)
+
+    with pytest.raises(ValueError, match="cells"):
+        simulation.resume(stale)
+    assert simulation.state is None
+
+
+def test_probe_from_sensor_takes_an_anchor_sensor(engine):
+    probe = engine.probe_from_sensor(AnchorSensor(key="bay1_30cm", x_offset_cm=0.0, depth_cm=30.0))
+
+    assert probe.channel_id == "bay1_30cm"
+    assert len(probe.cell_indices) == 1
+
+
+def test_load_marks_the_state_current():
+    """A loaded state is not loaded again for the samples that follow."""
+    loads: list = []
+    pde = types.SimpleNamespace(soil_model=types.SimpleNamespace(psi_from_se=lambda se: -se), sample=lambda probe: 0.5)
+    pde.load_state_blob = loads.append
+    engine = SoilEngine(types.SimpleNamespace(mesh=None), types.SimpleNamespace(), pde)
+    state = SoilState(np.full(3, 0.5), np.full(3, 0.5), {}, dt.datetime(2026, 1, 1, tzinfo=UTC))
+
+    engine.load(state)
+    engine.tension_at(state, object())
+    engine.tension_at(state, object())
+
+    assert len(loads) == 1
 
 
 def test_cancel_holds_input_state_then_resumes(engine):

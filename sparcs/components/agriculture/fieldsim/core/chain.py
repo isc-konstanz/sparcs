@@ -18,6 +18,7 @@ from sparcs.components.weather import validate_meteo_inputs
 
 from .config import FieldSetup
 from .evapotranspiration import ETModel, SegmentProperties
+from .pde import flow_m3s_per_m, rain_flux, segment_flux_dicts
 from .plots import PlotConfig, render_due
 from .shading import ShadingModel
 from .state import ChainResult, Forcing
@@ -44,46 +45,6 @@ _LAI = "lai"
 _ROUGHNESS = "roughness"
 _PLANT_HEIGHT = "plant_height"
 _NDVI = "ndvi"
-
-
-def design_flow_lpm(nozzle_count: int, nozzle_flow_lph: float) -> float:
-    """Whole-field design flow [l/min] from the drip layout."""
-    return nozzle_count * nozzle_flow_lph / 60.0
-
-
-def flow_m3s_per_m(flow_lpm: float, total_drip_line_length_m: float) -> float:
-    """Whole-field flow [l/min] as m^3/s per out-of-plane metre of row."""
-    return flow_lpm / (60_000.0 * total_drip_line_length_m)
-
-
-def segment_flux_dicts(
-    seg_et: Mapping[str, pd.DataFrame],
-    ts: pd.Timestamp,
-) -> tuple[dict[str, float], dict[str, float]]:
-    """Per-segment ET flux dicts at ``ts``, negatives clipped and zero-flux segments skipped."""
-    seg_evap: dict[str, float] = {}
-    seg_transp: dict[str, float] = {}
-    for name, frame in seg_et.items():
-        if ts not in frame.index:
-            continue
-        evap = max(0.0, float(frame.loc[ts, "evap"]))
-        transp = max(0.0, float(frame.loc[ts, "transp"]))
-        if evap > 0.0:
-            seg_evap[name] = evap
-        if transp > 0.0:
-            seg_transp[name] = transp
-    return seg_evap, seg_transp
-
-
-def rain_flux(weather: pd.DataFrame, ts: pd.Timestamp, elapsed_s: float) -> float:
-    """Rain flux density [kg/(m^2 s)] for the interval ending at ``ts``."""
-    col = Weather.PRECIPITATION
-    if elapsed_s <= 0 or col not in weather.columns or ts not in weather.index:
-        return 0.0
-    precip = weather.loc[ts, col]
-    if pd.isna(precip) or precip <= 0:
-        return 0.0
-    return float(precip) / elapsed_s  # mm/s == kg/(m^2*s)
 
 
 class WeatherChain:

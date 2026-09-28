@@ -21,6 +21,13 @@ from lories.core.configs.parameters import Parameter, SelectParameter
 
 from .config import Config
 from .pv import (
+    _GROUND_SHADING_N_ROWS,
+    _VALID_MODES,
+    _ZENITH_DAYTIME_LIMIT,
+    MODE_AS_IS,
+    MODE_FREE_FIELD,
+    MODE_HORIZONTAL,
+    MODE_TRACKABLE,
     _combine_grounds,
     _open_sky_ghi,
     _patch_pvfactors_numpy2_compat,
@@ -34,18 +41,6 @@ logger = logging.getLogger(__name__)
 
 _patch_pvfactors_numpy2_compat()
 
-MODE_AS_IS = "as_is"  # fixed-tilt rows as configured; supports mirrored
-MODE_HORIZONTAL = "horizontal"  # row geometry forced flat (surface_tilt = 0)
-MODE_TRACKABLE = "trackable"  # single-axis tracker via pvlib.tracking.singleaxis
-MODE_FREE_FIELD = "free_field"  # no PV array; open-sky reference baseline
-MODES = (MODE_AS_IS, MODE_HORIZONTAL, MODE_TRACKABLE, MODE_FREE_FIELD)
-
-# 7 rows (3 on each side of the centre) gives the middle row representative inter-row shading.
-_N_ROWS = 7
-
-# Solar zenith [deg] above which pvfactors is unstable; skip and treat as open sky.
-_ZENITH_DAYTIME_LIMIT = 89.0
-
 
 class ShadingConfig(Config):
     """``[ground_shading]`` plus the PV geometry it is evaluated against.
@@ -58,7 +53,9 @@ class ShadingConfig(Config):
 
     _CONFIGS_RESERVED_KEYS = Config._CONFIGS_RESERVED_KEYS | {"plot"}
 
-    mode = SelectParameter(choices=list(MODES), default=MODE_AS_IS, desc="as_is, horizontal, trackable or free_field")
+    mode = SelectParameter(
+        choices=list(_VALID_MODES), default=MODE_AS_IS, desc="as_is, horizontal, trackable or free_field"
+    )
     albedo = Parameter(type=float, default=0.2, min=0.0, max=1.0, desc="Ground albedo")
     height = Parameter(type=float, default=3.770, min=0.0, desc="PV row mounting height (m)")
     width = Parameter(type=float, default=1.134, min=0.0, desc="PV row/module width (m)")
@@ -105,6 +102,8 @@ class ShadingConfig(Config):
 class ShadingModel:
     """Per-row pvfactors evaluation, aggregated to soil segments."""
 
+    SHADING_FACTOR = "shading_factor"
+
     def __init__(self, config: ShadingConfig) -> None:
         self.config = config
         self._setups: list[_PVSetup] = []
@@ -118,8 +117,9 @@ class ShadingModel:
             self._build_setups()
 
     def evaluate(self, weather: pd.DataFrame) -> pd.DataFrame:
-        """One row per weather row: a shade factor in [0, 1] per soil top segment,
-        ``open_sky_ghi`` and a ``ghi_<segment>`` column each.
+        """One row per weather row: the bulk ``shading_factor`` (length-weighted over
+        the bay centred on the middle PV row), a shade factor in [0, 1] per soil top
+        segment, ``open_sky_ghi`` and a ``ghi_<segment>`` column each.
 
         Free-field mode and any pvfactors exception fall back to the open-sky result.
         """
@@ -161,6 +161,7 @@ class ShadingModel:
 
         out = pd.DataFrame(index=weather.index, dtype=float)
         out["open_sky_ghi"] = float(np.mean(ghi_open)) if ghi_open.size else 0.0
+        out[self.SHADING_FACTOR] = self._bay_mean_factor(combined_per_t, ghi_open)
         for name, factor in seg_factors.items():
             out[name] = factor
             out[f"ghi_{name}"] = seg_ghi.get(name, 0.0)
@@ -176,7 +177,7 @@ class ShadingModel:
         distance = cfg.distance if cfg.distance is not None else cfg.bay_width
         surface_azimuth = cfg.resolved_surface_azimuth()
         common = dict(
-            n_rows=_N_ROWS,
+            n_rows=_GROUND_SHADING_N_ROWS,
             height=cfg.height,
             width=cfg.width,
             distance=distance,
@@ -241,11 +242,31 @@ class ShadingModel:
             seg_ghi[name] = float(np.mean(ghi_vals)) if ghi_vals else 0.0
         return seg_factors, seg_ghi
 
+    def _bay_mean_factor(self, combined_per_t: list[list[tuple]], ghi_open: np.ndarray) -> float:
+        """Length-weighted mean shade factor over one inter-row bay centred on the
+        middle row, averaged over sun-up timesteps."""
+        if not self._setups:
+            return 1.0
+        middles = [(setup.n_rows - 1) / 2.0 * setup.distance + setup.offset_x for setup in self._setups]
+        center_x = float(np.mean(middles))
+        distance = self._setups[0].distance
+        bay_lo = center_x - distance / 2.0
+        bay_hi = center_x + distance / 2.0
+
+        vals: list[float] = []
+        for t, ground in enumerate(combined_per_t):
+            ref = ghi_open[t]
+            if ref <= 0 or not ground:
+                continue
+            vals.append(min(1.0, _qinc_in_range(ground, bay_lo, bay_hi) / ref))
+        return float(np.mean(vals)) if vals else 1.0
+
     def _open_sky_result(self, weather: pd.DataFrame) -> pd.DataFrame:
         """Factor 1.0 everywhere, per-segment GHI = open-sky GHI."""
         ghi = weather[Weather.GHI]
         out = pd.DataFrame(index=weather.index)
         out["open_sky_ghi"] = ghi
+        out[self.SHADING_FACTOR] = 1.0
         for name in self.config.segment_ranges or {}:
             out[name] = 1.0
             out[f"ghi_{name}"] = ghi

@@ -5,12 +5,14 @@
 The lories layer of the fieldsim skeleton: ``Simulation.build`` assembling
 engine/chain/assimilator/planner from a configured ``FieldSetup`` (against
 the tmp-mesh recipe shared with ``test_fieldsim_planner.py``), and
-``ChannelInputs``/``ChannelOutputs`` as adapters over fakes -- no lories
-Component is instantiated here, only the plain config/value objects and
-hand-built fakes that stand in for one.
+``ChannelInputs``/``ChannelOutputs`` as adapters over fakes, and the offline
+``FieldSimulation.simulate`` session -- no lories Component is configured
+here, only the plain config/value objects and hand-built fakes that stand in
+for one.
 """
 
 import datetime as dt
+import io
 from types import SimpleNamespace
 
 import pytest
@@ -21,12 +23,11 @@ from lories import Constant
 from lories.components.weather import Weather, WeatherProvider
 from lories.data import Channels
 from sparcs.components.agriculture.fieldsim import components
-from sparcs.components.agriculture.fieldsim.core.anchor import AnchorResult, AnchorSensor
+from sparcs.components.agriculture.fieldsim.core.anchor import AnchorSensor
 from sparcs.components.agriculture.fieldsim.core.assimilator import parse_anchor_config
 from sparcs.components.agriculture.fieldsim.core.config import FieldConfig, FieldSetup, PlannerConfig, SoilConfig
 from sparcs.components.agriculture.fieldsim.core.simulation import Simulation
 from sparcs.components.agriculture.fieldsim.core.state import ChainResult, Plan, SoilState, StepResult
-from sparcs.components.agriculture.fieldsim.runtime.ports import InputKey
 from sparcs.components.agriculture.simulation import Evapotranspiration as LiveET
 from sparcs.components.agriculture.simulation import FieldSimulation as LiveField
 from sparcs.components.agriculture.simulation import GroundShading as LiveGroundShading
@@ -204,11 +205,11 @@ def test_channel_inputs_weather_trims_and_validates():
 
     start = field.data.weather_frame.index[0]
     end = field.data.weather_frame.index[1]
-    got = inputs.read(InputKey.WEATHER, start.to_pydatetime(), end.to_pydatetime())
+    got = inputs.weather(start.to_pydatetime(), end.to_pydatetime())
     assert list(got.index) == [end]  # (start, end]
 
     field.data.weather_frame = field.data.weather_frame.drop(columns=[Weather.GHI])
-    got_invalid = inputs.read(InputKey.WEATHER, start.to_pydatetime(), end.to_pydatetime())
+    got_invalid = inputs.weather(start.to_pydatetime(), end.to_pydatetime())
     assert got_invalid.empty
     assert Weather.GHI in inputs._last_invalid_weather_columns
 
@@ -231,31 +232,26 @@ def test_channel_inputs_irrigation_measured_then_state_then_empty():
     inputs = components.ChannelInputs(field)
     start, end = weather.index[0].to_pydatetime(), weather.index[-1].to_pydatetime()
 
-    # measured flow present -> wins
+    # measured flow present -> wins, as the raw samples
     measured_frame = pd.DataFrame({"flow": [1.2]}, index=[weather.index[0]])
     data.bind(flow_channel, measured_frame)
-    got = inputs.read(InputKey.IRRIGATION, start, end)
-    assert list(got.columns) == ["irrigation_flow_lpm"]
-    assert (got["irrigation_flow_lpm"] == 1.2).all()
+    got = inputs.irrigation(start, end)
+    assert got.tolist() == [1.2]
 
     # measured absent -> state x design flow
     data.bind(flow_channel, pd.DataFrame())
     state_frame = pd.DataFrame({"state": [1.0]}, index=[weather.index[0]])
     data.bind(state_channel, state_frame)
-    got = inputs.read(InputKey.IRRIGATION, start, end)
-    assert got["irrigation_flow_lpm"].tolist() == pytest.approx([5.0])
+    got = inputs.irrigation(start, end)
+    assert got.tolist() == pytest.approx([5.0])
 
-    # state wired but not explicit -> never fabricate a forcing from it: 0.0
+    # state wired but not explicit -> never fabricate a forcing from it: empty
     soil.drip.explicit = False
-    got = inputs.read(InputKey.IRRIGATION, start, end)
-    assert not got.empty
-    assert (got["irrigation_flow_lpm"] == 0.0).all()
+    assert inputs.irrigation(start, end).empty
 
-    # no meter and no state channel at all -> 0.0 on the weather index
+    # no meter and no state channel at all -> empty (the runner reads it as 0.0)
     field._irrigation_state_channel = None
-    got = inputs.read(InputKey.IRRIGATION, start, end)
-    assert not got.empty
-    assert (got["irrigation_flow_lpm"] == 0.0).all()
+    assert inputs.irrigation(start, end).empty
 
 
 def test_channel_inputs_tension_one_column_per_sensor_nan_where_absent():
@@ -274,15 +270,13 @@ def test_channel_inputs_tension_one_column_per_sensor_nan_where_absent():
     )
     inputs = components.ChannelInputs(field)
 
-    got = inputs.read(
-        InputKey.TENSION, dt.datetime(2026, 6, 21, 7, tzinfo=UTC), dt.datetime(2026, 6, 21, 10, tzinfo=UTC)
-    )
+    got = inputs.tension(dt.datetime(2026, 6, 21, 7, tzinfo=UTC), dt.datetime(2026, 6, 21, 10, tzinfo=UTC))
     assert set(got.columns) == {"s1", "s2"}
     assert got["s1"].dropna().tolist() == [-50.0, -55.0]
     assert got["s2"].isna().all()
 
 
-def test_channel_inputs_forecast_spans_start_end():
+def test_channel_inputs_forecast_spans_start_to_end_inclusive():
     idx = pd.date_range("2026-06-21 00:00", periods=6, freq="1h", tz="UTC")
     forecast_frame = pd.DataFrame({Weather.GHI: 100.0}, index=idx)
     forecast_sub = SimpleNamespace(
@@ -294,10 +288,8 @@ def test_channel_inputs_forecast_spans_start_end():
     field = _fake_field(weather=provider)
     inputs = components.ChannelInputs(field)
 
-    got = inputs.read(
-        InputKey.FORECAST, dt.datetime(2026, 6, 21, 2, tzinfo=UTC), dt.datetime(2026, 6, 21, 4, tzinfo=UTC)
-    )
-    assert list(got.index.hour) == [2, 3]
+    got = inputs.forecast(dt.datetime(2026, 6, 21, 2, tzinfo=UTC), dt.datetime(2026, 6, 21, 4, tzinfo=UTC))
+    assert list(got.index.hour) == [2, 3, 4]
 
 
 def test_channel_inputs_load_state_from_blob():
@@ -318,6 +310,17 @@ def test_channel_inputs_load_state_from_blob():
     assert inputs.load_state() is None
 
 
+def test_channel_inputs_load_state_refuses_a_blob_that_needs_pickle():
+    buf = io.BytesIO()
+    np.savez(buf, rel_sat=np.array([0.5, 0.6]), surface_names=np.array(["a"], dtype=object), surface_h=[0.0])
+    at = dt.datetime(2026, 6, 21, tzinfo=UTC)
+    channel = _FakeChannel(valid=True, value=buf.getvalue(), timestamp=at)
+    inputs = components.ChannelInputs(_fake_field(soil_simulation=SimpleNamespace(data={"simulation_state": channel})))
+
+    with pytest.raises(ValueError, match="allow_pickle"):
+        inputs.load_state()
+
+
 # --------------------------------------------------------------------------- ChannelOutputs
 
 
@@ -327,6 +330,11 @@ class _RecordingChannel:
 
     def set(self, ts, value) -> None:
         self.calls.append((ts, value))
+
+
+def _rows(channel) -> list:
+    """Each recorded set as ``(timestamp, value)`` rows; a Series value expands to its rows."""
+    return [list(value.items()) if isinstance(value, pd.Series) else [(ts, value)] for ts, value in channel.calls]
 
 
 class _RecordingData(dict):
@@ -351,7 +359,7 @@ class _FakeConnector:
         self.written.append(frame)
 
 
-def test_channel_outputs_step_writes_diagnostics_probes_and_anchor():
+def test_channel_outputs_steps_write_diagnostics_probes_and_anchor():
     soil_ns = _NS(
         [
             "top_in",
@@ -367,11 +375,7 @@ def test_channel_outputs_step_writes_diagnostics_probes_and_anchor():
             "strip",
         ]
     )
-    assimilator = SimpleNamespace(
-        last_result=AnchorResult(se_new=np.array([0.5]), anchored_at={}, innovations={"strip": 0.07})
-    )
-    field = SimpleNamespace(simulation=SimpleNamespace(assimilator=assimilator))
-    outputs = components.ChannelOutputs(field, shading=None, et=None, soil=soil_ns, predictor=None)
+    outputs = components.ChannelOutputs(SimpleNamespace(), shading=None, et=None, soil=soil_ns, predictor=None)
 
     ts = dt.datetime(2026, 6, 21, 9, tzinfo=UTC)
     result = StepResult(
@@ -386,37 +390,62 @@ def test_channel_outputs_step_writes_diagnostics_probes_and_anchor():
             "balance_residual": 7.0,
             "skipped_s": 0.0,
             "retries": 0.0,
+            "anchor": 0.07,
             "water_total": 999.0,  # not a channel key; must be ignored, not raise
             "walk_ok": 1.0,
         },
         probe_tension={"strip": -120.0, "sensor_only": -80.0},  # sensor_only has no registered channel
     )
 
-    outputs.step(result)
+    outputs.steps([result])
 
-    assert soil_ns.data["top_in"].calls == [(ts, 1.0)]
-    assert soil_ns.data["balance_residual"].calls == [(ts, 7.0)]
-    assert soil_ns.data["strip"].calls == [(ts, -120.0)]
-    assert soil_ns.data["anchor"].calls == [(ts, 0.07)]
+    assert _rows(soil_ns.data["top_in"]) == [[(ts, 1.0)]]
+    assert _rows(soil_ns.data["balance_residual"]) == [[(ts, 7.0)]]
+    assert _rows(soil_ns.data["strip"]) == [[(ts, -120.0)]]
+    assert _rows(soil_ns.data["anchor"]) == [[(ts, 0.07)]]
 
 
-def test_channel_outputs_step_writes_the_stall_and_failure_tallies():
+def test_channel_outputs_steps_set_each_channel_once_per_chunk_with_every_row():
+    """Two rows of one chunk reach each channel as ONE set whose Series carries
+    both rows, stamped with the first; a NaN row is left out."""
+    soil_ns = _NS(["top_in", "runoff", "strip"])
+    outputs = components.ChannelOutputs(SimpleNamespace(), shading=None, et=None, soil=soil_ns, predictor=None)
+    t0, t1 = pd.Timestamp("2026-06-21 09:00", tz="UTC"), pd.Timestamp("2026-06-21 10:00", tz="UTC")
+    results = [
+        StepResult(
+            state=SoilState(se=np.array([0.5]), se_old=np.array([0.5]), surface_h={}, at=t.to_pydatetime()),
+            diagnostics={"top_in": value, "runoff": runoff},
+            probe_tension={"strip": -100.0 - value},
+        )
+        for t, value, runoff in ((t0, 1.0, 0.0), (t1, 2.0, float("nan")))
+    ]
+
+    outputs.steps(results)
+
+    assert [ts for ts, _ in soil_ns.data["top_in"].calls] == [t0]
+    assert _rows(soil_ns.data["top_in"]) == [[(t0, 1.0), (t1, 2.0)]]
+    assert _rows(soil_ns.data["strip"]) == [[(t0, -101.0), (t1, -102.0)]]
+    assert _rows(soil_ns.data["runoff"]) == [[(t0, 0.0)]]
+
+
+def test_channel_outputs_steps_write_the_stall_and_failure_tallies():
     """The runner's per-tick tallies ride the row's diagnostics, so the row a
     healing tick commits carries the count that preceded it."""
     soil_ns = _NS(["weather_stall", "tick_failures"])
-    field = SimpleNamespace(simulation=SimpleNamespace(assimilator=None))
-    outputs = components.ChannelOutputs(field, shading=None, et=None, soil=soil_ns, predictor=None)
+    outputs = components.ChannelOutputs(SimpleNamespace(), shading=None, et=None, soil=soil_ns, predictor=None)
 
     ts = dt.datetime(2026, 6, 21, 9, tzinfo=UTC)
-    outputs.step(
-        StepResult(
-            state=SoilState(se=np.array([0.5]), se_old=np.array([0.5]), surface_h={}, at=ts),
-            diagnostics={"weather_stall": 3.0, "tick_failures": 2.0},
-        )
+    outputs.steps(
+        [
+            StepResult(
+                state=SoilState(se=np.array([0.5]), se_old=np.array([0.5]), surface_h={}, at=ts),
+                diagnostics={"weather_stall": 3.0, "tick_failures": 2.0},
+            )
+        ]
     )
 
-    assert soil_ns.data["weather_stall"].calls == [(ts, 3.0)]
-    assert soil_ns.data["tick_failures"].calls == [(ts, 2.0)]
+    assert _rows(soil_ns.data["weather_stall"]) == [[(ts, 3.0)]]
+    assert _rows(soil_ns.data["tick_failures"]) == [[(ts, 2.0)]]
 
 
 def test_channel_outputs_save_state_writes_simulation_state():
@@ -432,7 +461,7 @@ def test_channel_outputs_save_state_writes_simulation_state():
     assert blob == state.to_blob()
 
 
-def test_channel_outputs_chain_writes_shading_et_and_vegetation_per_row():
+def test_channel_outputs_chain_writes_one_series_per_channel_and_the_last_segment_ghi():
     shading_ns = _NS(["shading_factor", "shading_progress_image"])
     et_ns = _NS(list(components._ET_CHANNEL_KEYS))
     field_ns = _NS(["seg_ghi", "lai", "roughness", "plant_height", "ndvi"])
@@ -442,6 +471,7 @@ def test_channel_outputs_chain_writes_shading_et_and_vegetation_per_row():
     idx = pd.date_range("2026-06-21 08:00", periods=2, freq="1h", tz="UTC")
     shading_df = pd.DataFrame(
         {
+            "shading_factor": [1.0, 0.65],
             "seg1": [1.0, 0.8],
             "seg2": [1.0, 0.6],
             "ghi_seg1": [500.0, 400.0],
@@ -463,11 +493,11 @@ def test_channel_outputs_chain_writes_shading_et_and_vegetation_per_row():
 
     outputs.chain(idx[-1].to_pydatetime(), ChainResult(shading=shading_df, evapotranspiration=et_df, image=b"png"))
 
-    assert [v for _, v in shading_ns.data["shading_factor"].calls] == [pytest.approx(1.0), pytest.approx(0.7)]
-    assert shading_ns.data["shading_progress_image"].calls == [(idx[-1].to_pydatetime(), b"png")]
-    assert [v for _, v in field_ns.data["seg_ghi"].calls] == [[500.0, 500.0], [400.0, 300.0]]
-    assert [v for _, v in et_ns.data["evapotranspiration"].calls] == [0.1, 0.2]
-    assert [v for _, v in field_ns.data["lai"].calls] == [1.0, 1.0]
+    assert _rows(shading_ns.data["shading_factor"]) == [[(idx[0], pytest.approx(1.0)), (idx[1], pytest.approx(0.65))]]
+    assert shading_ns.data["shading_progress_image"].calls == [(idx[-1], b"png")]
+    assert field_ns.data["seg_ghi"].calls == [(idx[-1], [400.0, 300.0])]
+    assert _rows(et_ns.data["evapotranspiration"]) == [[(idx[0], 0.1), (idx[1], 0.2)]]
+    assert _rows(field_ns.data["lai"]) == [[(idx[0], 1.0), (idx[1], 1.0)]]
 
 
 class _FakePredictorData(dict):
@@ -503,14 +533,14 @@ class _FakePredictor:
     tables = components.SoilPredictor.tables
     _write_direct_frame = components.SoilPredictor._write_direct_frame
     _resolve_logger_connector = components.SoilPredictor._resolve_logger_connector
-    _logger_connector_from_channel = components.SoilPredictor._logger_connector_from_channel
     _bump_write_failure = components.SoilPredictor._bump_write_failure
 
     def __init__(self, connector):
         self.name = "fieldsim_test.soil_predictor"
+        self.path = ["fieldsim_test", "soil_predictor"]
         self._logger_id = "db"
         self._write_failures = None
-        self.connectors = {"db": connector}
+        self.connectors = SimpleNamespace(context={"db": connector})
         self.data = _FakePredictorData()
 
 
@@ -561,6 +591,63 @@ def test_channel_outputs_plan_skips_a_connector_without_write():
     outputs.plan(plan)  # skipped, not raised
 
     assert predictor._write_failures is None
+
+
+# --------------------------------------------------------------------------- FieldSimulation.simulate
+
+
+class _OfflineSession:
+    """What ``Simulation.build`` returns in the simulate tests: each ``run``
+    advances one hour per weather row, counting on from its own last row."""
+
+    def __init__(self):
+        self.rows = 0
+
+    def run(self, weather, irrigation_lpm):
+        results = []
+        for ts in weather.index:
+            self.rows += 1
+            state = SoilState(se=np.zeros(1), se_old=np.zeros(1), surface_h={}, at=ts.to_pydatetime())
+            results.append(StepResult(state=state, diagnostics={"top_in": float(self.rows), "water_total": 9.0}))
+        return results, None
+
+
+def _offline_field(monkeypatch):
+    builds: list = []
+
+    def build(setup, **kwargs):
+        builds.append(_OfflineSession())
+        return builds[-1]
+
+    monkeypatch.setattr(components.Simulation, "build", staticmethod(build))
+    field = object.__new__(components.FieldSimulation)
+    field._name = "field_sim"
+    field.setup = object()
+    field.simulation = SimpleNamespace(run=lambda *a, **k: pytest.fail("simulate must not run the live session"))
+    field.soil_simulation = SimpleNamespace(data={"top_in": SimpleNamespace(id="agri.field_1.soil.top_in")})
+    return field, builds
+
+
+def test_simulate_returns_the_soil_channel_ids_and_drops_the_rest(monkeypatch):
+    field, builds = _offline_field(monkeypatch)
+
+    frame = field.simulate(_weather_frame(2))
+
+    assert list(frame.columns) == ["agri.field_1.soil.top_in"]
+    assert frame["agri.field_1.soil.top_in"].tolist() == [1.0, 2.0]
+    assert len(builds) == 1
+
+
+def test_simulate_continues_its_session_only_for_a_chained_slice(monkeypatch):
+    field, builds = _offline_field(monkeypatch)
+    first, second = _weather_frame(2), _weather_frame(4).iloc[2:]
+
+    chained = field.simulate(second, prior=field.simulate(first))
+    fresh = field.simulate(first)
+
+    assert chained.iloc[:, 0].tolist() == [3.0, 4.0]
+    assert fresh.iloc[:, 0].tolist() == [1.0, 2.0]
+    assert len(builds) == 2
 
 
 # --------------------------------------------------------------------------- CHANNELS

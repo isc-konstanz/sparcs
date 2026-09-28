@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from types import SimpleNamespace
 from typing import Any, Mapping, Optional, Sequence
 
 import pandas as pd
@@ -22,8 +21,10 @@ from .chain import WeatherChain
 from .config import FieldSetup
 from .engine import Cancel, SoilEngine
 from .evapotranspiration import ETModel
+from .pde import top_segment_count
 from .planner import IrrigationPlanner
-from .shading import _N_ROWS, MODE_FREE_FIELD, ShadingModel
+from .pv import _GROUND_SHADING_N_ROWS
+from .shading import MODE_FREE_FIELD, ShadingModel
 from .state import ChainResult, Forcing, Plan, Snapshot, SoilState, StepResult
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ def _resolve_segment_ranges(mesh, shading_config, bay_width: float) -> Optional[
     dx = mesh.dx
     plant_width = mesh.plant_width
     watering_width = mesh.watering_width
-    n_pv_segments = int((mesh.width - plant_width) / (2 * dx))
+    n_pv_segments = top_segment_count(mesh)
 
     plant_left = n_pv_segments * dx
     plant_right = plant_left + plant_width
@@ -46,7 +47,7 @@ def _resolve_segment_ranges(mesh, shading_config, bay_width: float) -> Optional[
 
     if shading_config.mode != MODE_FREE_FIELD:
         distance = shading_config.distance if shading_config.distance is not None else bay_width
-        pv_center = (_N_ROWS - 1) * distance / 2.0
+        pv_center = (_GROUND_SHADING_N_ROWS - 1) * distance / 2.0
         shift = plant_center - pv_center
     else:
         shift = plant_center
@@ -134,13 +135,12 @@ class Simulation:
         when sensor probes are on or anchoring is live."""
         self.assimilator.set_sensors(sensors)
         if self.setup.soil.discover_sensor_probes or self.assimilator.enabled:
-            # probe_from_sensor reads the SoilMoisture attribute names.
-            self.probes += [
-                self.engine.probe_from_sensor(SimpleNamespace(key=s.key, x_offset=s.x_offset_cm, depth=s.depth_cm))
-                for s in sensors
-            ]
+            self.probes += [self.engine.probe_from_sensor(sensor) for sensor in sensors]
 
     def resume(self, state: SoilState) -> None:
+        """Continue from ``state``; ``ValueError`` when the engine cannot load it, the
+        session then keeps its current state."""
+        self.engine.load(state)
         self.state = state
 
     def run(
@@ -168,19 +168,21 @@ class Simulation:
 
         if self.state is None and forcing:
             cold = forcing[0]
-            self.state = self.engine.initial_state(cold.at)
+            initial = self.engine.initial_state(cold.at)
             if cold.dt_s > 0:
                 logger.info("cold start spin-up: %.0fs with weather at %s", cold.dt_s, cold.at)
-                result = self._advance(cold, extra, cancel)
+                result = self._advance(initial, cold, extra, cancel)
                 if result is None:
                     logger.info("cold start cancelled at %s", cold.at)
                     return results, chain
                 results.append(result)
+            else:
+                self.state = initial
 
         for step in forcing:
             if step.at <= self.state.at:
                 continue
-            result = self._advance(step, extra, cancel)
+            result = self._advance(self.state, step, extra, cancel)
             if result is None:
                 logger.info("advance cancelled at %s, %d rows committed", step.at, len(results))
                 break
@@ -189,22 +191,24 @@ class Simulation:
             self._last_step = results[-1]
         return results, chain
 
-    def _advance(self, step: Forcing, extra: Mapping[str, float], cancel: Cancel) -> Optional[StepResult]:
-        """One committed row; ``None`` when the walk was cancelled."""
-        result = self.engine.advance(self.state, step, cancel=cancel)
+    def _advance(
+        self, state: SoilState, step: Forcing, extra: Mapping[str, float], cancel: Cancel
+    ) -> Optional[StepResult]:
+        """One committed row from ``state``; ``None`` when the walk was cancelled. With
+        anchoring live, ``anchor`` carries the summed innovations of this row's update."""
+        result = self.engine.advance(state, step, cancel=cancel)
         if result.cancelled:
             return None
         state = result.state
+        diagnostics = {**result.diagnostics, **extra}
         if self.assimilator.enabled:
+            previous = self.assimilator.last_result
             state = self.assimilator.update(state, step.end)
+            anchored = self.assimilator.last_result
+            diagnostics["anchor"] = float(sum(anchored.innovations.values())) if anchored is not previous else 0.0
         tension = {p.channel_id: self.engine.tension_at(state, p) for p in self.probes}
         self.state = state
-        return replace(
-            result,
-            state=state,
-            probe_tension=tension,
-            diagnostics={**result.diagnostics, **extra},
-        )
+        return replace(result, state=state, probe_tension=tension, diagnostics=diagnostics)
 
     def plan(self, forecast: pd.DataFrame) -> Optional[Plan]:
         """Roll the planner over a forecast horizon from the current state."""

@@ -5,21 +5,27 @@
 A copperhead-shaped conf tree loaded through ``sparcs.load()``: the field
 simulation configures under a real ``lories`` system, its probe and
 forecast-table channels exist before any connector connects, and ``activate``
-starts the ticker from the system's weather and location. A duplicate probe
+starts the ticker from the system's weather and location. ``ChannelOutputs``
+hands every row of a chunk to the real channels. A duplicate probe
 ``soil_id`` is refused at configure even without a predictor, and a system
 without weather is refused at activate.
 """
 
+import datetime as dt
 import signal
 import sys
 from argparse import ArgumentParser
 
 import pytest
 
+import numpy as np
+import pandas as pd
 import sparcs
 from lories.application.settings import Settings
 from lories.core import ConfigurationError, ConfigurationUnavailableError
-from sparcs.components.agriculture.fieldsim.components import FieldSimulation
+from lories.data import Channels
+from sparcs.components.agriculture.fieldsim.components import ChannelOutputs, FieldSimulation
+from sparcs.components.agriculture.fieldsim.core.state import SoilState, StepResult
 
 pytestmark = pytest.mark.slow  # builds a Gmsh mesh
 
@@ -244,6 +250,32 @@ def test_field_simulation_configures_registers_its_channels_and_ticks(load):
     finally:
         simulation.deactivate()
     assert not simulation.ticker.scheduler.is_running()
+
+
+def test_channel_outputs_hand_every_row_of_a_chunk_to_the_real_channels(load):
+    """One set per channel per chunk: the lories channel holds both rows, and the
+    frame the log task writes from it has both."""
+    simulation = load().components.get_first(FieldSimulation)
+    soil = simulation.soil_simulation
+    outputs = ChannelOutputs(simulation, simulation.ground_shading, simulation.evapotranspiration, soil, None)
+    t0 = dt.datetime(2026, 6, 21, 9, tzinfo=dt.timezone.utc)
+    results = [
+        StepResult(
+            state=SoilState(np.zeros(1), np.zeros(1), {}, t0 + dt.timedelta(hours=i)),
+            diagnostics={"top_in": float(i + 1)},
+            probe_tension={"strip": -100.0 - i},
+        )
+        for i in range(2)
+    ]
+
+    outputs.steps(results)
+    outputs.save_state(results[-1].state)
+
+    top_in, strip = soil.data["top_in"], soil.data["strip"]
+    assert top_in.to_series().tolist() == [1.0, 2.0]
+    assert strip.to_series().tolist() == [-100.0, -101.0]
+    assert len(Channels([top_in, strip]).to_frame(unique=True)) == 2
+    assert soil.data["simulation_state"].timestamp == pd.Timestamp(results[-1].state.at)
 
 
 def test_duplicate_probe_soil_id_is_refused_without_a_predictor(tmp_path, load):

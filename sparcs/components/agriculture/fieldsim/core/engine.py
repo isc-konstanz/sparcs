@@ -14,6 +14,7 @@ from typing import Any, Callable, Mapping, Optional
 
 import numpy as np
 
+from .anchor import AnchorSensor
 from .config import SoilConfig
 from .pde import (
     RHO_W,
@@ -25,8 +26,8 @@ from .pde import (
     SoilPDECore,
     ensure_mesh,
     resolve_pde_config,
-    resolve_probe_from_sensor,
     resolve_probes,
+    resolve_sensor_probe,
 )
 from .state import Forcing, SoilState, StepResult
 
@@ -96,7 +97,7 @@ class SoilEngine:
     def advance(self, state: SoilState, forcing: Forcing, *, cancel: Cancel = None) -> StepResult:
         """Walk one forcing window; a cancelled result carries the input state."""
         if state is not self._current:
-            self._load(state)
+            self.load(state)
         storage_before = self.pde.total_water() + self.pde.surface_water()
         rates = FluxRates(
             seg_evap=dict(forcing.seg_evap),
@@ -135,7 +136,7 @@ class SoilEngine:
     def tension_at(self, state: SoilState, probe: Any) -> float:
         """Sample Se at a probe and convert to signed negative hPa."""
         if state is not self._current:
-            self._load(state)
+            self.load(state)
         se = self.pde.sample(probe)
         return float(self.model.psi_from_se(se))
 
@@ -146,7 +147,7 @@ class SoilEngine:
     def diagnostics(self, state: SoilState) -> Mapping[str, float]:
         """The state-only summary: total water and surface water."""
         if state is not self._current:
-            self._load(state)
+            self.load(state)
         return {"water_total": self.pde.total_water(), "surface_water": self.pde.surface_water()}
 
     def probes(self, probes_block: Any) -> list:
@@ -154,11 +155,13 @@ class SoilEngine:
             return []
         return resolve_probes(probes_block, self.pde.mesh, self.mesh_config)
 
-    def probe_from_sensor(self, sensor: Any) -> Any:
-        return resolve_probe_from_sensor(sensor, self.pde.mesh, self.mesh_config)
+    def probe_from_sensor(self, sensor: AnchorSensor) -> Any:
+        return resolve_sensor_probe(sensor.key, sensor.x_offset_cm, sensor.depth_cm, self.pde.mesh, self.mesh_config)
 
-    def _load(self, state: SoilState) -> None:
+    def load(self, state: SoilState) -> None:
+        """Put ``state`` into the live core; ``ValueError`` when its cell count does not fit the mesh."""
         self.pde.load_state_blob(state.to_blob())
+        self._current = state
 
     def _read_back(self, at: dt.datetime) -> SoilState:
         return SoilState(

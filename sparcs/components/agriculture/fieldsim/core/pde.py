@@ -13,7 +13,6 @@ Both :class:`SoilSimulation` (live solver) and :class:`SoilPredictor`
 
 from __future__ import annotations
 
-import io
 import logging
 import os
 import warnings
@@ -47,6 +46,8 @@ from sparcs.components.agriculture.soil import (
     SoilModel,
     create_soil_model,
 )
+
+from .state import decode_state_blob, encode_state_blob
 
 logging.getLogger("fipy").setLevel(logging.WARNING)
 
@@ -470,24 +471,35 @@ def _coords_to_cell(
     return _nearest_cell_m(cell_x, cell_y, x_m, depth_m, x_offset)
 
 
-def resolve_probe_from_sensor(
-    sensor: Any,
+def resolve_sensor_probe(
+    key: str,
+    x_offset_cm: float,
+    depth_cm: float,
     mesh_fipy: "Gmsh2D",
     mesh_config: "MeshConfig",
 ) -> ProbeSpec:
     """Build a point :class:`ProbeSpec` at a sensor's location.
 
-    A sensor is a probe that also carries measured data: its ``x_offset`` and
-    ``depth`` (both cm, bay-centered) resolve to a single mesh cell exactly as a
+    A sensor is a probe that also carries measured data: its ``x_offset_cm`` and
+    ``depth_cm`` (bay-centered) resolve to a single mesh cell exactly as a
     configured point probe would. ``channel_id`` is the sensor key.
     """
-    idx = _coords_to_cell(mesh_fipy, mesh_config, sensor.x_offset, sensor.depth)
+    idx = _coords_to_cell(mesh_fipy, mesh_config, x_offset_cm, depth_cm)
     return ProbeSpec(
-        name=f"Sensor {sensor.key} (x_offset={sensor.x_offset:.1f}cm, depth={sensor.depth:.1f}cm)",
-        channel_id=sensor.key,
+        name=f"Sensor {key} (x_offset={x_offset_cm:.1f}cm, depth={depth_cm:.1f}cm)",
+        channel_id=key,
         cell_indices=np.array([idx], dtype=int),
         weights=np.array([1.0]),
     )
+
+
+def resolve_probe_from_sensor(
+    sensor: Any,
+    mesh_fipy: "Gmsh2D",
+    mesh_config: "MeshConfig",
+) -> ProbeSpec:
+    """:func:`resolve_sensor_probe` for a ``SoilMoisture`` sensor (``key``, ``x_offset``, ``depth``)."""
+    return resolve_sensor_probe(sensor.key, sensor.x_offset, sensor.depth, mesh_fipy, mesh_config)
 
 
 def resolve_probes(
@@ -530,10 +542,14 @@ def resolve_probes(
     return probes
 
 
+def top_segment_count(mesh: "MeshConfig") -> int:
+    """Bare top segments per side of the root zone, rounded the way ``create_mesh`` lays them out."""
+    return round((mesh.width - mesh.plant_width) / (2 * mesh.dx))
+
+
 def top_segment_names_from_mesh(mesh: "MeshConfig") -> list[str]:
     """Top-segment names derived from MeshConfig (left bare strips, plant tops, right bare strips)."""
-    n_pv_segments = int((mesh.width - mesh.plant_width) / (2 * mesh.dx))
-    open_sky = [f"{side}TopSegment_{i}" for i in range(n_pv_segments) for side in ("Left", "Right")]
+    open_sky = [f"{side}TopSegment_{i}" for i in range(top_segment_count(mesh)) for side in ("Left", "Right")]
     return [*open_sky, "PlantTopLeftSegment", "PlantTopRightSegment"]
 
 
@@ -1050,7 +1066,7 @@ class SoilPDECore:
         lo, hi = center - shadow / 2.0, center + shadow / 2.0
 
         dx = mc.dx
-        n_pv = int((mc.width - mc.plant_width) / (2 * dx))
+        n_pv = top_segment_count(mc)
         plant_left = n_pv * dx
         plant_right = plant_left + mc.plant_width
         watering_left = plant_left + (mc.plant_width - mc.watering_width) / 2.0
@@ -1549,25 +1565,12 @@ class SoilPDECore:
             self.rel_sat._old.setValue(arr)
 
     def save_state_blob(self) -> bytes:
-        buf = io.BytesIO()
-        # Fixed-width unicode (not object) dtype, so the blob needs no pickle.
-        surface_names = np.array(list(self.surface_h.keys()), dtype=np.str_)
-        surface_values = np.array([self.surface_h[k] for k in surface_names], dtype=float)
-        np.savez(
-            buf,
-            rel_sat=self.rel_sat.value.copy(),
-            rel_sat_old=self.rel_sat._old.value.copy(),
-            surface_names=surface_names,
-            surface_h=surface_values,
-        )
-        return buf.getvalue()
+        return encode_state_blob(self.rel_sat.value, self.rel_sat._old.value, self.surface_h)
 
     def load_state_blob(self, raw: bytes) -> None:
-        buf = io.BytesIO(raw)
-        # allow_pickle stays for legacy blobs whose surface_names were saved
-        # with object dtype; new blobs are pickle-free.
-        arrays = np.load(buf, allow_pickle=True)
-        rel_sat = np.asarray(arrays["rel_sat"])
+        """Load an ``encode_state_blob`` blob; ``ValueError`` when it needs pickle or
+        carries a different cell count than this mesh."""
+        rel_sat, rel_sat_old, surface_h = decode_state_blob(raw)
         expected = np.asarray(self.rel_sat.value).shape
         if rel_sat.shape != expected:
             raise ValueError(
@@ -1575,20 +1578,13 @@ class SoilPDECore:
                 "stale blob from a different mesh configuration"
             )
         self.rel_sat.setValue(rel_sat)
-        # Legacy blobs (pre soil-refactor B3) wrote ONLY `rel_sat` via
-        # `np.savez(buf, rel_sat=rel_sat)` -- no `rel_sat_old`, no surface fields.
-        # Fall back to `rel_sat` itself so those pre-fix debug blobs stay loadable.
-        rel_sat_old = arrays["rel_sat_old"] if "rel_sat_old" in arrays.files else rel_sat
         self.rel_sat._old.setValue(rel_sat_old)
-        if "surface_names" in arrays.files and "surface_h" in arrays.files:
-            names = arrays["surface_names"]
-            values = arrays["surface_h"]
-            # Merge over zeroed defaults: blobs from before the watering pond
-            # existed lack its key, and every known bucket must stay addressable.
-            self.surface_h = {
-                **{name: 0.0 for name in [*self.open_sky_segment_names, "WateringTopSegment"]},
-                **{str(n): float(v) for n, v in zip(names, values)},
-            }
+        # Merge over zeroed defaults: blobs from before the watering pond
+        # existed lack its key, and every known bucket must stay addressable.
+        self.surface_h = {
+            **{name: 0.0 for name in [*self.open_sky_segment_names, "WateringTopSegment"]},
+            **surface_h,
+        }
 
 
 class SoilBase(Component):

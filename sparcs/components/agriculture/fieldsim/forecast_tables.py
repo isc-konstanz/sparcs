@@ -684,20 +684,22 @@ class ForecastTablePublisher:
     def resolve_logger_connector(self, logger_id: str) -> "Optional[Any]":
         """Resolve the connector for the header/detail direct-writes.
 
-        Prefer the connector the direct-write channels already bound at
-        registration: ``ChannelConnector`` walks the component path to reach a
-        root-level ``[connectors.<id>]`` connector (the common case for a shared
-        SQL logger). ``predictor.connectors``' bare-key/id lookup is **component
-        scoped** -- ``RegistratorAccess.__getattr__`` only sees this component's
-        own connector map and ``__getitem__`` prefixes a dot-less id with this
-        component's id -- so a root-level connector is unreachable from a nested
-        predictor that way. Reusing the channel's resolution is what makes
-        ``logger = "<bare id>"`` work for a deeply nested predictor; the id-based
-        lookups stay as fallbacks (a full dotted ``logger`` value, or before the
-        channels are bound).
+        A bare id is tried against every prefix of the predictor's id path,
+        innermost first, then as given, the way a channel resolves its own
+        connector, so a root-level ``[connectors.<id>]`` (the common case for a
+        shared SQL logger) resolves for a nested predictor. The component-scoped
+        attribute and item lookups on ``predictor.connectors`` stay as fallbacks.
         """
         p = self._predictor
-        connector = p._logger_connector_from_channel()
+        context = p.connectors.context
+        connector_id = logger_id
+        if "." not in connector_id:
+            for i in reversed(range(1, len(p.path) + 1)):
+                candidate = ".".join([*p.path[:i], logger_id])
+                if candidate in context.keys():
+                    connector_id = candidate
+                    break
+        connector = context.get(connector_id, None)
         if connector is not None:
             return connector
         try:

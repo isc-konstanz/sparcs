@@ -45,7 +45,7 @@ from .core.shading import MODE_FREE_FIELD, ShadingConfig
 from .core.simulation import Simulation
 from .core.state import ChainResult, Plan, Snapshot, SoilState, StepResult
 from .forecast_tables import ForecastTablePublisher
-from .runtime.ports import InputKey
+from .runtime.ports import IRRIGATION_LOOKBACK
 from .runtime.runner import FieldRunner
 from .runtime.scheduler import Ticker
 
@@ -292,14 +292,6 @@ class SoilPredictor(ChannelNamespace):
     def _write_direct_frame(self, frame: pd.DataFrame, id_by_key_fn: Any, table_label: str) -> None:
         self.tables().write_direct_frame(frame, id_by_key_fn, table_label)
 
-    def _logger_connector_from_channel(self) -> Optional[Any]:
-        """The connector the header's ``forecast_id`` channel already resolved
-        against the root context; ``None`` degrades to the id fallbacks."""
-        try:
-            return self.data[self._HEADER_FORECAST_ID_KEY].logger._get_registrator()
-        except Exception:  # noqa: BLE001
-            return None
-
     def _bump_write_failure(self, table_label: str) -> None:
         if self._write_failures is None:
             self._write_failures = {}
@@ -315,25 +307,11 @@ class SoilPredictor(ChannelNamespace):
 
 
 class ChannelInputs:
-    """``Inputs`` over lories connector reads. Every key is one ranged read;
-    no decisions live here."""
-
-    _FLOW_LOOKBACK: dt.timedelta = dt.timedelta(days=1)
+    """``Inputs`` over lories connector reads; no decisions live here."""
 
     def __init__(self, field: "FieldSimulation") -> None:
         self.field = field
         self._last_invalid_weather_columns: list[str] = []
-
-    def read(self, key: InputKey, start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
-        if key is InputKey.WEATHER:
-            return self._read_weather(start, end)
-        if key is InputKey.IRRIGATION:
-            return self._read_irrigation(start, end)
-        if key is InputKey.TENSION:
-            return self._read_tension(start, end)
-        if key is InputKey.FORECAST:
-            return self._read_forecast(start, end)
-        raise ValueError(f"unknown input key {key!r}")
 
     def load_state(self) -> Optional[SoilState]:
         soil = self.field.soil_simulation
@@ -352,7 +330,7 @@ class ChannelInputs:
 
     # -- WEATHER -----------------------------------------------------------
 
-    def _read_weather(self, start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
+    def weather(self, start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
         field = self.field
         frame = field.data.read(field._weather_channels, start=start, end=end)
         frame = self._trim_span(frame, start, end)
@@ -387,55 +365,37 @@ class ChannelInputs:
 
     # -- IRRIGATION ----------------------------------------------------------
 
-    def _read_irrigation(self, start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
-        weather = self._read_weather(start, end)
-        index = weather.index
-        column = SoilSimulation.IRRIGATION_FLOW_LPM
-        if len(index) == 0:
-            return pd.DataFrame(columns=[column])
+    def irrigation(self, start: dt.datetime, end: dt.datetime) -> pd.Series:
         field = self.field
-        measured = self._read_measured_flow(start, end, index)
+        measured = self._read_measured_flow(start, end)
         if measured is not None:
-            series = measured
-        elif field._irrigation_state_channel is not None and field.setup.soil.drip.explicit:
-            series = self._read_state_span(start, end, index) * field.setup.soil.drip.design_flow_lpm
-        else:
-            # Unwired: not watering, never a fabricated forcing.
-            series = pd.Series(0.0, index=index)
-        return series.to_frame(column)
+            return measured
+        if field._irrigation_state_channel is not None and field.setup.soil.drip.explicit:
+            return self._read_state_span(start, end) * field.setup.soil.drip.design_flow_lpm
+        # Unwired: not watering, never a fabricated forcing.
+        return pd.Series(dtype=float)
 
-    def _read_measured_flow(self, start: dt.datetime, end: dt.datetime, index: pd.Index) -> Optional[pd.Series]:
-        field = self.field
-        if field._irrigation_flow_channel is None:
+    def _read_measured_flow(self, start: dt.datetime, end: dt.datetime) -> Optional[pd.Series]:
+        channel = self.field._irrigation_flow_channel
+        if channel is None:
             return None
-        frame = field.data.read(
-            Channels([field._irrigation_flow_channel]), start=start - self._FLOW_LOOKBACK, end=end, unique=True
-        )
-        if frame.empty or frame.iloc[:, 0].isna().all():
+        samples = self._read_samples(channel, start, end)
+        if samples.empty or samples.isna().all():
             return None
-        return self._align_flow(frame, index)
+        return samples
 
-    def _read_state_span(self, start: dt.datetime, end: dt.datetime, index: pd.Index) -> pd.Series:
-        field = self.field
-        if field._irrigation_state_channel is None:
-            return pd.Series(0.0, index=index)
-        frame = field.data.read(
-            Channels([field._irrigation_state_channel]), start=start - self._FLOW_LOOKBACK, end=end, unique=True
-        )
-        return self._align_flow(frame, index)
+    def _read_state_span(self, start: dt.datetime, end: dt.datetime) -> pd.Series:
+        return self._read_samples(self.field._irrigation_state_channel, start, end).astype(float)
 
-    @staticmethod
-    def _align_flow(frame: pd.DataFrame, index: pd.Index) -> pd.Series:
+    def _read_samples(self, channel: Any, start: dt.datetime, end: dt.datetime) -> pd.Series:
+        frame = self.field.data.read(Channels([channel]), start=start - IRRIGATION_LOOKBACK, end=end, unique=True)
         if frame.empty:
-            return pd.Series(0.0, index=index)
-        series = frame.iloc[:, 0].sort_index()
-        series = series[~series.index.duplicated(keep="last")]
-        aligned = series.reindex(index, method="ffill")
-        return aligned.fillna(0.0).astype(float)
+            return pd.Series(dtype=float)
+        return frame.iloc[:, 0]
 
     # -- TENSION ---------------------------------------------------------------
 
-    def _read_tension(self, start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
+    def tension(self, start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
         field = self.field
         channels = field._anchor_channels
         if not channels:
@@ -457,7 +417,7 @@ class ChannelInputs:
 
     # -- FORECAST -----------------------------------------------------------
 
-    def _read_forecast(self, start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
+    def forecast(self, start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
         weather = self.field.weather
         forecast_sub = weather.forecast if isinstance(weather, WeatherProvider) else None
         if forecast_sub is None or not forecast_sub.is_enabled():
@@ -469,12 +429,20 @@ class ChannelInputs:
             return pd.DataFrame()
         if frame.empty:
             return frame
-        return frame.loc[(frame.index >= start) & (frame.index < end)]
+        return frame.loc[(frame.index >= start) & (frame.index <= end)]
+
+
+def _set_series(channel: Any, series: pd.Series) -> None:
+    """One ``set`` carrying every non-NaN row; lories logs a ``Series`` value row by row."""
+    series = series.dropna().astype(float)
+    if not series.empty:
+        channel.set(series.index[0], series)
 
 
 class ChannelOutputs:
-    """``Outputs`` over channel sets and logger tables. Fans a ``ChainResult``
-    out per row; the forecast tables go through ``ForecastTablePublisher``."""
+    """``Outputs`` over channel sets and logger tables: one ``Series`` per channel
+    per chunk, which the logger writes row by row. The forecast tables go through
+    ``ForecastTablePublisher``."""
 
     def __init__(
         self,
@@ -495,51 +463,40 @@ class ChannelOutputs:
         et_df = result.evapotranspiration
 
         if self.shading is not None and not shading_df.empty:
-            seg_cols = [c for c in shading_df.columns if c != "open_sky_ghi" and not c.startswith("ghi_")]
-            for ts in shading_df.index:
-                factor = float(shading_df.loc[ts, seg_cols].mean()) if seg_cols else 1.0
-                self.shading.data[GroundShading.SHADING_FACTOR].set(ts, factor)
+            if GroundShading.SHADING_FACTOR in shading_df.columns:
+                _set_series(self.shading.data[GroundShading.SHADING_FACTOR], shading_df[GroundShading.SHADING_FACTOR])
             if result.image is not None:
-                self.shading.data[GroundShading.SHADING_PROGRESS_IMAGE].set(now, result.image)
+                self.shading.data[GroundShading.SHADING_PROGRESS_IMAGE].set(pd.Timestamp(now), result.image)
 
             ghi_cols = {c[len("ghi_") :]: c for c in shading_df.columns if c.startswith("ghi_")}
             segment_names = list(self._top_segment_names())
             if ghi_cols and segment_names:
-                for ts in shading_df.index:
-                    values = [
-                        float(shading_df.loc[ts, ghi_cols[name]]) if name in ghi_cols else 0.0 for name in segment_names
-                    ]
-                    self.field.data[FieldSimulation.SEG_GHI].set(ts, values)
+                ts = shading_df.index[-1]
+                values = [
+                    float(shading_df.loc[ts, ghi_cols[name]]) if name in ghi_cols else 0.0 for name in segment_names
+                ]
+                self.field.data[FieldSimulation.SEG_GHI].set(ts, values)
 
         if self.et is not None and not et_df.empty:
             for key in _ET_CHANNEL_KEYS:
-                if key not in et_df.columns:
-                    continue
-                for ts in et_df.index:
-                    self.et.data[key].set(ts, float(et_df.loc[ts, key]))
+                if key in et_df.columns:
+                    _set_series(self.et.data[key], et_df[key])
             for constant in _VEGETATION_WRITE_CHANNELS:
-                if constant not in et_df.columns:
-                    continue
-                for ts in et_df.index:
-                    self.field.data[constant].set(ts, float(et_df.loc[ts, constant]))
+                if constant in et_df.columns:
+                    _set_series(self.field.data[constant], et_df[constant])
 
-    def step(self, result: StepResult) -> None:
-        if self.soil is None:
+    def steps(self, results: Sequence[StepResult]) -> None:
+        if self.soil is None or not results:
             return
-        ts = result.state.at
+        index = pd.DatetimeIndex([r.state.at for r in results])
+        diagnostics = pd.DataFrame([dict(r.diagnostics) for r in results], index=index)
         for constant in _SOIL_DIAGNOSTIC_CHANNELS:
-            if constant in result.diagnostics:
-                self.soil.data[constant].set(ts, float(result.diagnostics[constant]))
-        for probe_id, tension in result.probe_tension.items():
-            if probe_id not in self.soil.data:
-                continue  # sensor-derived probe: sample-only, no registered channel
-            self.soil.data[probe_id].set(ts, float(tension))
-
-        assimilator = self.field.simulation.assimilator
-        last_result = assimilator.last_result if assimilator is not None else None
-        if last_result is not None and last_result.innovations:
-            increment = float(sum(last_result.innovations.values()))
-            self.soil.data[SoilSimulation.WATER_ANCHOR].set(ts, increment)
+            if constant in diagnostics.columns:
+                _set_series(self.soil.data[constant], diagnostics[constant])
+        tension = pd.DataFrame([dict(r.probe_tension) for r in results], index=index)
+        for probe_id in tension.columns:
+            if probe_id in self.soil.data:  # sensor-derived probes are sample-only
+                _set_series(self.soil.data[probe_id], tension[probe_id])
 
     def plan(self, plan: Plan) -> None:
         if self.predictor is None:
@@ -557,7 +514,7 @@ class ChannelOutputs:
     def save_state(self, state: SoilState) -> None:
         if self.soil is None:
             return
-        self.soil.data[SoilSimulation.SIMULATION_STATE].set(state.at, state.to_blob())
+        self.soil.data[SoilSimulation.SIMULATION_STATE].set(pd.Timestamp(state.at), state.to_blob())
 
     def _top_segment_names(self) -> Sequence[str]:
         return self.field.simulation.engine.top_segment_names
@@ -589,6 +546,7 @@ class FieldSimulation(Component):
     location: Any = None
     weather: Any = None
     irrigation: Any = None
+    _offline: Optional[Simulation] = None
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
@@ -697,27 +655,23 @@ class FieldSimulation(Component):
         prior: Optional[pd.DataFrame] = None,
         **kwargs: Any,
     ) -> pd.DataFrame:
-        """Offline run over a weather frame; returns the per-row diagnostics."""
+        """Offline run over a weather frame on a session of its own, never the live one.
+
+        A slice chained by ``lories simulate`` (``prior`` set) continues the previous
+        slice's session; without ``prior`` the run starts cold. Returns the per-row
+        diagnostics that have a ``soil_simulation`` channel, under their channel ids.
+        """
         weather = self._get_range(weather, start, end)
         if weather.empty:
             return pd.DataFrame()
-        simulation = self.simulation
-        state = self._prior_state(prior)
-        if state is not None:
-            simulation.resume(state)
-        results, _ = simulation.run(weather, pd.Series(0.0, index=weather.index))
-        return pd.DataFrame.from_dict({r.state.at: dict(r.diagnostics) for r in results}, orient="index")
-
-    def _prior_state(self, prior: Optional[pd.DataFrame]) -> Optional[SoilState]:
-        if prior is None or prior.empty:
-            return None
-        column = self.soil_simulation.data[SoilSimulation.SIMULATION_STATE].id
-        if column not in prior.columns:
-            return None
-        blob = prior[column].iloc[-1]
-        if not isinstance(blob, (bytes, bytearray)) or len(blob) == 0:
-            return None
-        return SoilState.from_blob(bytes(blob), prior.index[-1])
+        if prior is None or self._offline is None:
+            self._offline = Simulation.build(self.setup, name=self.name)
+        results, _ = self._offline.run(weather, pd.Series(0.0, index=weather.index))
+        index = pd.DatetimeIndex([r.state.at for r in results])
+        frame = pd.DataFrame([dict(r.diagnostics) for r in results], index=index)
+        soil = self.soil_simulation.data
+        ids = {key: soil[key].id for key in frame.columns if key in soil}
+        return frame[list(ids)].rename(columns=ids)
 
     def _child(self, cls: Type[_C], configs: Configurations, defaults: dict[str, Any]) -> Optional[_C]:
         """Build one channel namespace and its configured section from its ``.d`` member, if present."""
@@ -900,6 +854,7 @@ _SOIL_DIAGNOSTIC_CHANNELS = (
     SoilSimulation.WATER_RUNOFF,
     SoilSimulation.WATER_DEMAND_UNMET,
     SoilSimulation.WATER_BALANCE_RESIDUAL,
+    SoilSimulation.WATER_ANCHOR,
     SoilSimulation.WALK_SKIPPED_S,
     SoilSimulation.WALK_RETRIES,
     SoilSimulation.WEATHER_STALL,

@@ -13,14 +13,10 @@ import numpy as np
 import pandas as pd
 from lories.components.weather import Weather
 from lories.core.configs.configurations import Configurations
-from sparcs.components.agriculture.fieldsim.core.chain import (
-    WeatherChain,
-    flow_m3s_per_m,
-    rain_flux,
-    segment_flux_dicts,
-)
+from sparcs.components.agriculture.fieldsim.core.chain import WeatherChain
 from sparcs.components.agriculture.fieldsim.core.config import FieldConfig, FieldSetup, SoilConfig
 from sparcs.components.agriculture.fieldsim.core.evapotranspiration import ETModel, SegmentProperties
+from sparcs.components.agriculture.fieldsim.core.pde import flow_m3s_per_m, rain_flux, segment_flux_dicts
 from sparcs.components.agriculture.fieldsim.core.shading import ShadingConfig, ShadingModel
 
 _GROUND_SHADING_CONF = Path(
@@ -83,6 +79,32 @@ def test_free_field_shading_all_ones_and_open_sky_ghi_equals_ghi():
     assert (out["seg1"] == 1.0).all()
     assert (out["open_sky_ghi"] == weather[Weather.GHI]).all()
     assert (out["ghi_seg1"] == weather[Weather.GHI]).all()
+
+
+def test_free_field_shading_factor_is_one():
+    config = ShadingConfig.from_dict({"mode": "free_field"}).derive(bay_width=3.5, segment_ranges={"seg1": (0.0, 1.0)})
+
+    out = ShadingModel(config).evaluate(_weather_frame())
+
+    assert (out[ShadingModel.SHADING_FACTOR] == 1.0).all()
+
+
+def test_bay_mean_factor_is_length_weighted_over_the_middle_bay_and_sun_up_rows():
+    """Seven rows 3.4 m apart put the middle row at x=10.2 and the bay at [8.5, 11.9]:
+    the 0.85 m and 2.55 m pieces inside it weight to 650 W/m^2 (a plain mean of the
+    two would give 500), the ground outside the bay and the night row do not count."""
+    model = ShadingModel(ShadingConfig.from_dict({"mode": "as_is"}).derive(bay_width=3.4))
+    ground_day = [
+        ((0.0, 0.0), (8.5, 0.0), {"qinc": 1000.0}),
+        ((8.5, 0.0), (9.35, 0.0), {"qinc": 200.0}),
+        ((9.35, 0.0), (11.9, 0.0), {"qinc": 800.0}),
+        ((11.9, 0.0), (30.0, 0.0), {"qinc": 1000.0}),
+    ]
+    ground_night = [((0.0, 0.0), (30.0, 0.0), {"qinc": 0.0})]
+
+    factor = model._bay_mean_factor([ground_day, ground_night], np.array([1000.0, 0.0]))
+
+    assert factor == pytest.approx(0.65)
 
 
 # --------------------------------------------------------------------------- ETModel

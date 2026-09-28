@@ -15,7 +15,6 @@ from types import SimpleNamespace
 import pandas as pd
 from sparcs.components.agriculture.fieldsim import components
 from sparcs.components.agriculture.fieldsim.core.config import SoilConfig
-from sparcs.components.agriculture.fieldsim.runtime.ports import InputKey
 
 COMPONENTS_LOGGER = "sparcs.components.agriculture.fieldsim.components"
 
@@ -56,7 +55,7 @@ def test_weather_span_reads_the_connector_not_a_logger():
 
     start = dt.datetime(2026, 7, 12, 10, tzinfo=dt.timezone.utc)
     end = dt.datetime(2026, 7, 12, 11, tzinfo=dt.timezone.utc)
-    inputs.read(InputKey.WEATHER, start, end)
+    inputs.weather(start, end)
 
     assert data.calls == [("read", start, end, False)]
 
@@ -92,8 +91,8 @@ def test_invalid_chunk_names_the_missing_column_at_warning_once(caplog):
     end = dt.datetime(2026, 7, 12, 12, tzinfo=dt.timezone.utc)
 
     with caplog.at_level(logging.WARNING, logger=COMPONENTS_LOGGER):
-        assert inputs.read(InputKey.WEATHER, start, end).empty
-        assert inputs.read(InputKey.WEATHER, start, end).empty
+        assert inputs.weather(start, end).empty
+        assert inputs.weather(start, end).empty
 
     warnings = [r for r in caplog.records if "temp_air" in r.getMessage()]
     assert len(warnings) == 1

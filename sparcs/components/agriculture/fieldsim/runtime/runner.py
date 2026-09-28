@@ -4,8 +4,9 @@ sparcs.components.agriculture.fieldsim.runtime.runner
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Live tick policy: frontier and intake delay, midnight-aligned catch-up
-chunks, reads through ``Inputs``, writes through ``Outputs``, the daily
-planner gate. The per-row sequence lives in ``core.simulation``.
+chunks, reads through ``Inputs``, one write per output per chunk through
+``Outputs``, the planner gate on the ``[soil_predictor]`` interval/offset.
+The per-row sequence lives in ``core.simulation``.
 """
 
 from __future__ import annotations
@@ -13,15 +14,17 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import threading
-from typing import Iterator, Mapping
+from typing import Iterator, Mapping, Optional, Sequence
 
 import pandas as pd
+import pytz
 
 from ..core.config import FieldSetup
 from ..core.engine import Cancel
+from ..core.schedule import slot_floor
 from ..core.simulation import Simulation
-from ..core.state import SoilState, StepResult
-from .ports import InputKey, Inputs, Outputs
+from ..core.state import ChainResult, SoilState, StepResult
+from .ports import Inputs, Outputs
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +40,8 @@ class FieldRunner:
         self.weather_stall_ticks: float = 0.0
         self.tick_failures: float = 0.0
         self._resumed = False
-        self._last_planned: dt.date | None = None
-        self._last_plan_warned: dt.date | None = None
+        self._last_planned: Optional[pd.Timestamp] = None
+        self._last_plan_warned: Optional[pd.Timestamp] = None
         self._pending_lock = threading.Lock()
         self._pending_state: SoilState | None = None
 
@@ -54,10 +57,8 @@ class FieldRunner:
         """
         cutoff = now - self.setup.field.intake_delay
         if not self._resumed:
-            state = self.inputs.load_state()
-            if state is not None:
-                self.simulation.resume(state)
             self._resumed = True
+            self._resume_persisted()
         self._apply_pending()
 
         frontier = self.simulation.state.at if self.simulation.state is not None else None
@@ -70,16 +71,14 @@ class FieldRunner:
         extra = {"weather_stall": float(self.weather_stall_ticks), "tick_failures": float(self.tick_failures)}
         processed = False
         for chunk_start, chunk_end in self._day_chunks(start, cutoff):
-            weather = self.inputs.read(InputKey.WEATHER, chunk_start, chunk_end)
-            if weather.empty:
-                continue
-            irrigation = self._irrigation_lpm(chunk_start, chunk_end, weather.index)
-            tension = self._tension_history(chunk_start, chunk_end)
-            results, chain = self.simulation.run(weather, irrigation, tension, cancel, extra_diagnostics=extra)
-            self.outputs.chain(chunk_end, chain)
-            for result in results:
-                self._write(result)
-                processed = True
+            weather = self.inputs.weather(chunk_start, chunk_end)
+            if not weather.empty:
+                irrigation = self._align_flow(self.inputs.irrigation(chunk_start, chunk_end), weather.index)
+                tension = self._tension_history(chunk_start, chunk_end)
+                results, chain = self.simulation.run(weather, irrigation, tension, cancel, extra_diagnostics=extra)
+                self._publish(chunk_end, chain, results)
+                if results:
+                    processed = True
             if cancel is not None and cancel():
                 break
 
@@ -97,17 +96,17 @@ class FieldRunner:
                 logger.error("weather feed stalled for %d consecutive ticks", WEATHER_STALL_ERROR_TICKS)
             return False
 
-        if self._planner_due(now):
-            forecast = self.inputs.read(InputKey.FORECAST, now, now + self.setup.planner.horizon)
-            plan = self.simulation.plan(forecast)
-            if plan is None:
-                if self._last_plan_warned != now.date():
-                    logger.warning("planner skipped: empty forecast or no state")
-                    self._last_plan_warned = now.date()
-            else:
-                self.outputs.plan(plan)
-                self._last_planned = now.date()
+        if self.setup.planner is not None:
+            self._plan(now)
         return processed
+
+    def _resume_persisted(self) -> None:
+        try:
+            state = self.inputs.load_state()
+            if state is not None:
+                self.simulation.resume(state)
+        except ValueError as e:
+            logger.warning("persisted soil state is incompatible, cold start instead: %s", e)
 
     def _apply_pending(self) -> None:
         with self._pending_lock:
@@ -115,39 +114,69 @@ class FieldRunner:
         if state is None:
             return
         current = self.simulation.state
-        if current is None or state.at > current.at:
-            self.simulation.resume(state)
-        else:
+        if current is not None and state.at <= current.at:
             logger.info("restored state at %s is not newer than the frontier %s; dropped", state.at, current.at)
-
-    def _write(self, result: StepResult) -> None:
+            return
         try:
-            self.outputs.step(result)
-            self.outputs.save_state(result.state)
-        except Exception:
-            logger.exception("outputs failed for the row at %s; continuing", result.state.at)
+            self.simulation.resume(state)
+        except ValueError as e:
+            logger.warning("restored state at %s is incompatible; dropped: %s", state.at, e)
 
-    def _irrigation_lpm(self, start: dt.datetime, end: dt.datetime, index: pd.Index) -> pd.Series:
-        frame = self.inputs.read(InputKey.IRRIGATION, start, end)
-        if frame.empty:
-            return pd.Series(0.0, index=index)  # rain-fed field, or no usable input
-        return frame.iloc[:, 0]
+    def _publish(self, end: pd.Timestamp, chain: ChainResult, results: Sequence[StepResult]) -> None:
+        """Hand one chunk to the outputs; a failing output never stops the frontier."""
+        writes = [(self.outputs.chain, (end, chain))]
+        if results:
+            writes += [(self.outputs.steps, (results,)), (self.outputs.save_state, (results[-1].state,))]
+        for write, args in writes:
+            try:
+                write(*args)
+            except Exception:
+                logger.exception("%s output for the chunk up to %s failed; continuing", write.__name__, end)
+
+    @staticmethod
+    def _align_flow(flow: pd.Series, index: pd.Index) -> pd.Series:
+        """The flow in force at each weather row: the last sample at or before it, 0.0
+        where there is none or it is NaN."""
+        if flow.empty:
+            return pd.Series(0.0, index=index)
+        flow = flow.sort_index()
+        flow = flow[~flow.index.duplicated(keep="last")]
+        return flow.reindex(index, method="ffill").fillna(0.0).astype(float)
 
     def _tension_history(self, start: dt.datetime, end: dt.datetime) -> Mapping[str, pd.Series]:
         if not self.simulation.assimilator.enabled:
             return {}
-        frame = self.inputs.read(InputKey.TENSION, start, end)
+        frame = self.inputs.tension(start, end)
         return {str(c): frame[c].dropna() for c in frame.columns}
 
-    def _planner_due(self, now: dt.datetime) -> bool:
-        return self.setup.planner is not None and self._last_planned != now.date()
+    def _plan(self, now: dt.datetime) -> None:
+        """Plan once per ``[soil_predictor]`` interval/offset slot the frontier is in,
+        aligned in the site timezone."""
+        planner = self.setup.planner
+        location = self.setup.location
+        boundary = slot_floor(
+            pd.Timestamp(self.simulation.state.at),
+            location.timezone if location is not None else pytz.UTC,
+            planner.interval,
+            planner.offset,
+        )
+        if boundary == self._last_planned:
+            return
+        plan = self.simulation.plan(self.inputs.forecast(now, now + planner.horizon))
+        if plan is None:
+            if self._last_plan_warned != boundary:
+                logger.warning("planner skipped: empty forecast or no state")
+                self._last_plan_warned = boundary
+            return
+        self.outputs.plan(plan)
+        self._last_planned = boundary
 
     @staticmethod
     def _day_chunks(start: dt.datetime, end: dt.datetime) -> Iterator[tuple[pd.Timestamp, pd.Timestamp]]:
-        """Split a catch-up span into ``(start, end]`` chunks broken at midnight."""
+        """Split a catch-up span into ``(start, end]`` chunks broken at midnight in the span's zone."""
         cursor = pd.Timestamp(start)
         stop = pd.Timestamp(end)
         while cursor < stop:
-            nxt = min((cursor + pd.Timedelta(days=1)).normalize(), stop)
+            nxt = min(cursor.normalize() + pd.DateOffset(days=1), stop)
             yield cursor, nxt
             cursor = nxt

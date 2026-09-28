@@ -3,7 +3,8 @@
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``Simulation.run`` over the real ``WeatherChain`` and a stub engine: cold-start
-spin-up, the already-simulated guard and the ``extra_diagnostics`` merge; and
+spin-up (and its cancellation), the already-simulated guard, the
+``extra_diagnostics`` merge and the per-row anchor increment; and
 ``Simulation.add_sensors`` handing discovered tensiometers to the assimilator.
 """
 
@@ -62,7 +63,7 @@ class _StubEngine:
         return -100.0
 
     def probe_from_sensor(self, sensor):
-        return types.SimpleNamespace(channel_id=sensor.key, at=(sensor.x_offset, sensor.depth))
+        return types.SimpleNamespace(channel_id=sensor.key, at=(sensor.x_offset_cm, sensor.depth_cm))
 
 
 class _StubAssimilator:
@@ -71,6 +72,7 @@ class _StubAssimilator:
     def __init__(self, anchor_enabled: bool = False) -> None:
         self.anchor_enabled = anchor_enabled
         self.sensors: list = []
+        self.last_result = None
 
     @property
     def enabled(self) -> bool:
@@ -165,6 +167,48 @@ def test_probe_tension_is_keyed_by_channel_id():
     results, _ = _run(sim, _weather_frame(hours=2))
 
     assert results[-1].probe_tension == {"strip": pytest.approx(-100.0)}
+
+
+def test_cancelled_cold_start_spin_up_leaves_no_state():
+    """A spin-up cancelled mid-walk has not produced a state: the next run must
+    cold-start again, not continue from an initial condition that never advanced."""
+    sim = _simulation(cold_start_s=3 * _HOUR, cancel_after=0)
+
+    results, _ = _run(sim, _weather_frame(hours=3))
+
+    assert results == []
+    assert sim.state is None
+
+
+class _AnchoringAssimilator(_StubAssimilator):
+    """Anchors on the rows listed in ``anchor_at``, with fixed innovations."""
+
+    def __init__(self, anchor_at) -> None:
+        super().__init__(anchor_enabled=True)
+        self.sensors = [_sensor("s1")]
+        self.anchor_at = set(anchor_at)
+
+    def update(self, state: SoilState, now) -> SoilState:
+        if pd.Timestamp(now) not in self.anchor_at:
+            return state
+        self.last_result = types.SimpleNamespace(innovations={"s1": 0.03, "s2": -0.01})
+        return SoilState(se=state.se + 0.1, se_old=state.se + 0.1, surface_h={}, at=now)
+
+
+def test_each_row_carries_its_own_anchor_increment():
+    weather = _weather_frame(hours=4)
+    sim = _simulation(cold_start_s=0.0)
+    sim.assimilator = _AnchoringAssimilator(anchor_at=[weather.index[2]])
+
+    results, _ = _run(sim, weather)
+
+    assert [r.diagnostics["anchor"] for r in results] == [0.0, pytest.approx(0.02), 0.0]
+
+
+def test_no_anchor_increment_without_anchoring():
+    results, _ = _run(_simulation(cold_start_s=0.0), _weather_frame(hours=3))
+
+    assert all("anchor" not in r.diagnostics for r in results)
 
 
 def test_cancelled_advance_keeps_the_committed_rows():

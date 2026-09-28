@@ -2,9 +2,11 @@
 """tests.test_fieldsim_ticker
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``Ticker``: the lories scheduler it wraps, the consecutive-failure tally, the
-pre-tick handoff of that tally to the runner, and the cancel signal ``stop``
-raises. Every test drives ``_on_slot`` directly; no thread is started.
+``Ticker``: the lories scheduler it wraps and what it hands the runner --
+a UTC clock, the scheduler's consecutive-failure count before each tick and
+the scheduler's interrupt as the cancel signal. Failures are counted and
+logged once by ``TickScheduler._run_slot``, which the tests drive directly;
+no thread is started.
 """
 
 import datetime as dt
@@ -17,7 +19,7 @@ from sparcs.components.agriculture.fieldsim import components
 from sparcs.components.agriculture.fieldsim.core.config import FieldConfig, FieldSetup, SoilConfig
 from sparcs.components.agriculture.fieldsim.runtime import Ticker
 
-SCHEDULER_LOGGER = "sparcs.components.agriculture.fieldsim.runtime.scheduler"
+LORIES_SCHEDULER_LOGGER = "lories.scheduler"
 
 
 def _setup(interval: int = 30, offset: int = 10) -> FieldSetup:
@@ -29,15 +31,17 @@ def _setup(interval: int = 30, offset: int = 10) -> FieldSetup:
 
 
 class _StubRunner:
-    """Records the pre-tick ``tick_failures`` it was handed and the cancel
-    callable it was called with; raises for its first ``failures`` ticks."""
+    """Records the clock, the pre-tick ``tick_failures`` and the cancel callable
+    of every tick; raises for its first ``failures`` ticks."""
 
     def __init__(self, failures: int = 0):
         self.failures_left = failures
+        self.nows: list = []
         self.seen_failures: list = []
         self.cancels: list = []
 
     def run_tick(self, now, cancel=None) -> bool:
+        self.nows.append(now)
         self.seen_failures.append(self.tick_failures)
         self.cancels.append(cancel)
         if self.failures_left > 0:
@@ -55,47 +59,53 @@ def test_ticker_wraps_a_lories_tick_scheduler():
     assert ticker.scheduler._on_slot == ticker._on_slot
 
 
-def test_ticker_normalises_the_timezone():
-    assert Ticker(_setup(), _StubRunner(), tz=None).timezone is pytz.UTC
-    assert Ticker(_setup(), _StubRunner(), tz=dt.timezone.utc).timezone is pytz.UTC
-    assert Ticker(_setup(), _StubRunner(), tz="Europe/Berlin").timezone == pytz.timezone("Europe/Berlin")
+def test_ticker_schedules_in_the_site_timezone():
+    assert Ticker(_setup(), _StubRunner(), tz=None).scheduler._timezone is pytz.UTC
+    assert Ticker(_setup(), _StubRunner(), tz="Europe/Berlin").scheduler._timezone == pytz.timezone("Europe/Berlin")
 
 
-def test_ticker_counts_consecutive_failures_and_resets_on_success():
+def test_ticker_hands_the_runner_a_utc_clock():
+    runner = _StubRunner()
+    ticker = Ticker(_setup(), runner, tz="Europe/Berlin")
+
+    ticker._on_slot()
+
+    assert runner.nows[0].utcoffset() == dt.timedelta(0)
+
+
+def test_scheduler_counts_consecutive_failures_and_resets_on_success():
     ticker = Ticker(_setup(), _StubRunner(failures=2))
 
-    ticker._on_slot()
-    assert ticker.failed_ticks == 1
-    ticker._on_slot()
-    assert ticker.failed_ticks == 2
-    ticker._on_slot()
-    assert ticker.failed_ticks == 0
+    ticker.scheduler._run_slot()
+    assert ticker.scheduler.failures == 1
+    ticker.scheduler._run_slot()
+    assert ticker.scheduler.failures == 2
+    ticker.scheduler._run_slot()
+    assert ticker.scheduler.failures == 0
 
 
-def test_ticker_hands_the_pre_tick_failure_tally_to_the_runner():
+def test_ticker_hands_the_pre_tick_failure_count_to_the_runner():
     runner = _StubRunner(failures=2)
     ticker = Ticker(_setup(), runner)
 
     for _ in range(3):
-        ticker._on_slot()
+        ticker.scheduler._run_slot()
 
     assert runner.seen_failures == [0, 1, 2]
     assert runner.tick_failures == 2
 
 
-def test_ticker_failure_log_carries_the_consecutive_count(caplog):
-    """A one-off transient and a deterministic every-tick crash must be
-    distinguishable in the log, not two identical tracebacks."""
+def test_a_failed_tick_is_logged_once_with_the_consecutive_count(caplog):
     ticker = Ticker(_setup(), _StubRunner(failures=2), name="field")
 
-    with caplog.at_level(logging.ERROR, logger=SCHEDULER_LOGGER):
-        ticker._on_slot()
-        ticker._on_slot()
+    with caplog.at_level(logging.ERROR):
+        ticker.scheduler._run_slot()
+        ticker.scheduler._run_slot()
 
-    failures = [r for r in caplog.records if "tick failed" in r.getMessage()]
-    assert [r.levelno for r in failures] == [logging.ERROR, logging.ERROR]
-    assert "(1 consecutive)" in failures[0].getMessage()
-    assert "(2 consecutive)" in failures[1].getMessage()
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert [r.name for r in errors] == [LORIES_SCHEDULER_LOGGER, LORIES_SCHEDULER_LOGGER]
+    assert "(1 consecutive)" in errors[0].getMessage()
+    assert "(2 consecutive)" in errors[1].getMessage()
 
 
 def test_ticker_stop_raises_the_cancel_signal_run_tick_reads():

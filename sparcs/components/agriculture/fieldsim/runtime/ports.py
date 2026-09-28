@@ -4,35 +4,46 @@ sparcs.components.agriculture.fieldsim.runtime.ports
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The two protocols between the runner and the outside world: ``Inputs`` is
-one keyed ranged read plus the persisted state, ``Outputs`` one method per
-result type.
+four ranged reads plus the persisted state, ``Outputs`` one method per result
+type; ``chain``, ``steps`` and ``save_state`` are called once per weather
+chunk, ``plan`` once per planner slot.
 """
 
 from __future__ import annotations
 
 import datetime as dt
-import enum
-from typing import Protocol
+from typing import Protocol, Sequence
 
 import pandas as pd
 
 from ..core.state import ChainResult, Plan, SoilState, StepResult
 
-
-class InputKey(enum.Enum):
-    WEATHER = "weather"  # ranged connector read of the weather channels
-    IRRIGATION = "irrigation"  # flow l/min: meter, else valve state x design flow, else empty
-    TENSION = "tension"  # one column per anchor sensor, measured tension in hPa
-    FORECAST = "forecast"  # weather forecast frame for the planner horizon
+# How far before a chunk the irrigation read reaches, so the sample in force at
+# the chunk start is part of the series.
+IRRIGATION_LOOKBACK = dt.timedelta(days=1)
 
 
 class Inputs(Protocol):
-    def read(self, key: InputKey, start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
-        """Rows in ``(start, end]``; empty frame when nothing is available."""
+    def weather(self, start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
+        """Weather rows in ``(start, end]``; empty when nothing usable is available."""
+        ...
+
+    def irrigation(self, start: dt.datetime, end: dt.datetime) -> pd.Series:
+        """Raw flow samples [l/min] in ``(start - IRRIGATION_LOOKBACK, end]``, not aligned
+        to the weather: the metered flow, else the valve state times the design flow,
+        else an empty series (not watering)."""
+        ...
+
+    def tension(self, start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
+        """Measured tension [hPa], one column per anchor sensor."""
+        ...
+
+    def forecast(self, start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
+        """Weather forecast rows in ``[start, end]``."""
         ...
 
     def load_state(self) -> SoilState | None:
-        """Last persisted state, or None on a cold start."""
+        """Last persisted state, or None on a cold start; ``ValueError`` when it cannot be decoded."""
         ...
 
 
@@ -41,12 +52,14 @@ class Outputs(Protocol):
         """Shading and ET outputs for one weather chunk."""
         ...
 
-    def step(self, result: StepResult) -> None:
-        """Mass-balance, walk and probe outputs for one advanced row."""
+    def steps(self, results: Sequence[StepResult]) -> None:
+        """Mass-balance, walk and probe outputs for the rows one chunk advanced."""
         ...
 
     def plan(self, plan: Plan) -> None:
         """Forecast header / detail / irrigation / image tables."""
         ...
 
-    def save_state(self, state: SoilState) -> None: ...
+    def save_state(self, state: SoilState) -> None:
+        """The state after the last row of a chunk."""
+        ...
