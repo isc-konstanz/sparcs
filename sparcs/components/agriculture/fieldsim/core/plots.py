@@ -159,17 +159,35 @@ def render_due(last: Optional[pd.Timestamp], now: pd.Timestamp, config: Optional
     return config is not None and (last is None or now - last >= config.interval)
 
 
+def count_render_failure(logger: logging.Logger, what: str, strikes: int, disable_after: int) -> tuple[int, bool]:
+    """Count one render failure and log it with the active traceback (call from the
+    except block). Returns ``(strikes, disable)``; the caller owns the disable and
+    the reset on the next successful render."""
+    strikes += 1
+    if strikes >= disable_after:
+        logger.exception(
+            "%s render failed (%d consecutive); disabling plotting for the rest of the run.", what, strikes
+        )
+        return strikes, True
+    logger.exception(
+        "%s render failed (strike %d of %d); skipping the rest of this tick's rendering.", what, strikes, disable_after
+    )
+    return strikes, False
+
+
 # --------------------------------------------------------------------------- shading envelope
 
 
 @dataclass(frozen=True)
 class ShadingEnvelope:
     """Static plot extent, computed once so PNG size stays stable (port of
-    ``GroundShading._compute_plot_envelope``)."""
+    ``GroundShading._compute_plot_envelope``). ``center_x`` is the middle
+    row's x in pvfactors coordinates; the frame is drawn relative to it."""
 
     x_half: float
     y_min: float
     y_max: float
+    center_x: float = 0.0
 
 
 def shading_envelope(
@@ -180,6 +198,7 @@ def shading_envelope(
     surface_tilt: float,
     bay_width: float,
     mesh_height: float,
+    center_x: float = 0.0,
 ) -> ShadingEnvelope:
     """3 bays around the middle row, worst-case panel height above, soil
     bottom below (exact port of ``GroundShading._compute_plot_envelope``
@@ -201,7 +220,7 @@ def shading_envelope(
         y_max = 1.0
 
     y_min = -mesh_height - 0.5
-    return ShadingEnvelope(x_half=x_half, y_min=y_min, y_max=y_max)
+    return ShadingEnvelope(x_half=x_half, y_min=y_min, y_max=y_max, center_x=center_x)
 
 
 # --------------------------------------------------------------------------- renderers
@@ -217,11 +236,11 @@ def render_shading_png(
     title: str = "Ground shading",
     tz: Any = None,
 ) -> bytes:
-    """Shading pattern frame: ground coloured by qinc, PV rows in black,
-    shadow projection lines (port of ``GroundShading._render_progress``,
-    minus the middle-row re-centring and soil cross-section rectangles,
-    which need geometry this pure function isn't given). Figure is created
-    and closed per call."""
+    """Shading pattern frame with x = 0 on the middle row: ground coloured by
+    qinc, PV rows in black, shadow projection lines (port of
+    ``GroundShading._render_progress`` minus the soil cross-section
+    rectangles, which need geometry this pure function isn't given). Figure
+    is created and closed per call."""
     _ensure_safe_backend()
     x_extent = 2.0 * envelope.x_half
     y_extent = envelope.y_max - envelope.y_min
@@ -234,12 +253,15 @@ def render_shading_png(
         fig.colorbar(sm, ax=ax, shrink=_CBAR_SHRINK, label="incident irradiance [W/m²]")
         _apply_subplots_adjust(fig)
 
+        def rx(x: float) -> float:
+            return x - envelope.center_x
+
         ax.axhline(y=0.0, color="black", linewidth=0.8, zorder=0.5)
 
         for seg in ground:
             qinc = max(0.0, seg[2]["qinc"])
             ax.plot(
-                [seg[0][0], seg[1][0]],
+                [rx(seg[0][0]), rx(seg[1][0])],
                 [0.0, 0.0],
                 color=cmap(norm(qinc)),
                 linewidth=6,
@@ -262,7 +284,7 @@ def render_shading_png(
                     seen.add(key)
                     shadow_x = px - py * sun_x_per_y
                     ax.plot(
-                        [px, shadow_x],
+                        [rx(px), rx(shadow_x)],
                         [py, 0.0],
                         color="gray",
                         linewidth=0.6,
@@ -273,7 +295,7 @@ def render_shading_png(
 
         for seg in pv_rows:
             ax.plot(
-                [seg[0][0], seg[1][0]],
+                [rx(seg[0][0]), rx(seg[1][0])],
                 [seg[0][1], seg[1][1]],
                 color="black",
                 linewidth=2,

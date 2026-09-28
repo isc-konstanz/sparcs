@@ -12,7 +12,7 @@ import datetime as dt
 import io
 import zipfile
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -96,11 +96,16 @@ class Forcing:
 
 @dataclass(frozen=True)
 class ChainResult:
-    """Outputs of one ``WeatherChain.forcing_series`` call."""
+    """Outputs of one ``WeatherChain.forcing_series`` call, plus what the shading
+    progress image is drawn from: the last sun-up ground pieces, the PV rows,
+    ``(solar_zenith, solar_azimuth, axis_azimuth)`` and the static plot envelope."""
 
     shading: pd.DataFrame
     evapotranspiration: pd.DataFrame
-    image: bytes | None = None
+    ground: Sequence[tuple] = field(default_factory=list)
+    pv_rows: Sequence[tuple] = field(default_factory=list)
+    sun_state: tuple = (90.0, 0.0, None)
+    envelope: Any = None
 
 
 @dataclass(frozen=True)

@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import pandas as pd
 from lories import Component, Configurations
 from lories.core import ConfigurationUnavailableError
 from sparcs.components.agriculture.fieldsim.components import ChannelNamespace, FieldSimulation, SoilSimulation
@@ -53,7 +54,7 @@ def _child_block(tmp_path, child_type: str, **values) -> Configurations:
 def test_field_plot_enabled_cascades_to_a_child_without_its_own_block(tmp_path):
     block = _child_block(tmp_path, "soil_simulation", plot={"enabled": False}, soil_simulation={})
 
-    assert ChannelNamespace._plot_enabled(block) is False
+    assert ChannelNamespace._plot_config(block) is None
 
 
 def test_child_plot_block_overrides_the_field_default(tmp_path):
@@ -61,13 +62,23 @@ def test_child_plot_block_overrides_the_field_default(tmp_path):
         tmp_path, "ground_shading", plot={"enabled": False}, ground_shading={"plot": {"enabled": True}}
     )
 
-    assert ChannelNamespace._plot_enabled(block) is True
+    assert ChannelNamespace._plot_config(block) is not None
 
 
 def test_no_field_plot_block_leaves_plotting_on(tmp_path):
     block = _child_block(tmp_path, "soil_simulation", soil_simulation={})
 
-    assert ChannelNamespace._plot_enabled(block) is True
+    assert ChannelNamespace._plot_config(block) is not None
+
+
+def test_field_plot_interval_cascades_and_the_child_overrides_it(tmp_path):
+    field_default = _child_block(tmp_path, "soil_simulation", plot={"interval": "30min"}, soil_simulation={})
+    overridden = _child_block(
+        tmp_path, "ground_shading", plot={"interval": "30min"}, ground_shading={"plot": {"interval": "2h"}}
+    )
+
+    assert ChannelNamespace._plot_config(field_default).interval == pd.Timedelta(minutes=30)
+    assert ChannelNamespace._plot_config(overridden).interval == pd.Timedelta(hours=2)
 
 
 # --------------------------------------------------------------------------- irrigation input

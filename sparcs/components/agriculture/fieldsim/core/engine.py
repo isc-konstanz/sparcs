@@ -63,8 +63,13 @@ class SoilEngine:
         return cls(soil, ode, pde)
 
     @property
+    def mesh(self) -> Any:
+        """The live FiPy mesh the state arrays are laid out on."""
+        return self.pde.mesh
+
+    @property
     def cell_centers(self) -> np.ndarray:
-        return np.asarray(self.pde.mesh.cellCenters)
+        return np.asarray(self.mesh.cellCenters)
 
     @property
     def se_bounds(self) -> tuple[float, float]:

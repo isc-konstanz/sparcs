@@ -136,7 +136,8 @@ enabled = true
 mode = "as_is"
 
 [plot]
-enabled = false
+enabled = true
+interval = "30min"
 """,
     )
     _write(children / "evapotranspiration.conf", 'type = "evapotranspiration"\nenabled = true\n')
@@ -236,6 +237,11 @@ def test_field_simulation_configures_registers_its_channels_and_ticks(load):
     ]
     assert all(child.config is not None for child in children)
     assert simulation.soil_predictor.config.drip.nozzle_count == simulation.setup.soil.drip.nozzle_count
+
+    assert simulation.ground_shading.plot_config.interval == pd.Timedelta(minutes=30)
+    assert "shading_progress_image" in simulation.ground_shading.data
+    assert simulation.soil_simulation.plot_config is None
+    assert "soil_progress_image" not in simulation.soil_simulation.data
 
     soil = simulation.soil_simulation.data
     assert "strip" in soil

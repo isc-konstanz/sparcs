@@ -4,16 +4,19 @@ tests.test_fieldsim_plots
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Progress-image renderers of the ``fieldsim`` skeleton as pure functions
-from data to PNG bytes: no FiPy, no Gmsh, no lories channel/component state.
+from data to PNG bytes, plus the pure strike counter: no FiPy, no Gmsh, no
+lories channel/component state.
 """
 
 import datetime as dt
+import logging
 
 import numpy as np
 import pandas as pd
 from sparcs.components.agriculture.fieldsim.core.config import PlotConfig
 from sparcs.components.agriculture.fieldsim.core.plots import (
     ShadingEnvelope,
+    count_render_failure,
     render_due,
     render_rel_sat_png,
     render_shading_png,
@@ -160,6 +163,65 @@ def test_shading_envelope_trackable_uses_tracker_max_angle():
     assert envelope.x_half == setup.distance * 1.5
     assert envelope.y_max == expected_y_max
     assert envelope.y_min == -mesh_height - 0.5
+
+
+def test_render_shading_png_recentres_on_the_middle_row():
+    """The same scene shifted by ``center_x`` renders the identical frame."""
+    ground = [((-100.0, 0.0), (-1.0, 0.0), {"qinc": 200.0}), ((-1.0, 0.0), (100.0, 0.0), {"qinc": 850.0})]
+    pv_rows = [((-1.0, 0.0), (-1.0, 3.77), {})]
+    sun_state = (30.0, 170.0, 100.0)
+    ts = pd.Timestamp("2026-06-01 12:00", tz=UTC)
+    envelope = ShadingEnvelope(x_half=5.25, y_min=-5.5, y_max=4.77)
+
+    centred = render_shading_png(ts, ground, pv_rows, sun_state, envelope)
+    shift = 10.2
+    shifted = render_shading_png(
+        ts,
+        [((a + shift, b), (c + shift, d), q) for (a, b), (c, d), q in ground],
+        [((a + shift, b), (c + shift, d), q) for (a, b), (c, d), q in pv_rows],
+        sun_state,
+        ShadingEnvelope(x_half=5.25, y_min=-5.5, y_max=4.77, center_x=shift),
+    )
+
+    assert shifted == centred
+
+
+def test_count_render_failure_disables_at_n(caplog):
+    log = logging.getLogger("test.plot_policy")
+    strikes = 0
+    with caplog.at_level(logging.ERROR, logger="test.plot_policy"):
+        try:
+            raise RuntimeError("boom")
+        except RuntimeError:
+            strikes, disable1 = count_render_failure(log, "c", strikes, 3)
+            assert (strikes, disable1) == (1, False)
+        try:
+            raise RuntimeError("boom")
+        except RuntimeError:
+            strikes, disable2 = count_render_failure(log, "c", strikes, 3)
+            assert (strikes, disable2) == (2, False)
+        try:
+            raise RuntimeError("boom")
+        except RuntimeError:
+            strikes, disable3 = count_render_failure(log, "c", strikes, 3)
+            assert (strikes, disable3) == (3, True)
+
+    assert all(r.levelno == logging.ERROR for r in caplog.records)
+    assert all(r.exc_info is not None for r in caplog.records)
+    disable_records = [r for r in caplog.records if "disabling" in r.getMessage()]
+    assert len(disable_records) == 1  # only the Nth announces the disable
+
+
+def test_count_render_failure_threshold_is_a_parameter(caplog):
+    log = logging.getLogger("test.plot_policy")
+    with caplog.at_level(logging.ERROR, logger="test.plot_policy"):
+        try:
+            raise RuntimeError("boom")
+        except RuntimeError:
+            assert count_render_failure(log, "c", 0, 1) == (1, True)
+
+    [record] = caplog.records
+    assert "disabling" in record.getMessage()
 
 
 def test_render_due_true_when_never_rendered_and_enabled():

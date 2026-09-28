@@ -20,6 +20,7 @@ from lories.components.weather import Weather
 from lories.core.configs.parameters import Parameter, SelectParameter
 
 from .config import Config
+from .plots import ShadingEnvelope, shading_envelope
 from .pv import (
     _GROUND_SHADING_N_ROWS,
     _VALID_MODES,
@@ -40,6 +41,9 @@ from .pv import (
 logger = logging.getLogger(__name__)
 
 _patch_pvfactors_numpy2_compat()
+
+# (solar_zenith, solar_azimuth, axis_azimuth) with no sun up: the frame draws no shadows.
+_NIGHT_SUN_STATE: tuple[float, float, Optional[float]] = (90.0, 0.0, None)
 
 
 class ShadingConfig(Config):
@@ -112,29 +116,36 @@ class ShadingModel:
         self._surface_tilt: float = config.surface_tilt
         self._surface_azimuth: float = config.resolved_surface_azimuth()
         self._last_pv_rows: list[tuple] = []
+        self._last_ground: list[tuple] = []
+        self._last_sun_state: tuple[float, float, Optional[float]] = _NIGHT_SUN_STATE
         self._pvfactors_failure_warned = False
         if config.mode != MODE_FREE_FIELD:
             self._build_setups()
 
-    def evaluate(self, weather: pd.DataFrame) -> pd.DataFrame:
+    def evaluate(self, weather: pd.DataFrame, *, remember: bool = True) -> pd.DataFrame:
         """One row per weather row: the bulk ``shading_factor`` (length-weighted over
         the bay centred on the middle PV row), a shade factor in [0, 1] per soil top
         segment, ``open_sky_ghi`` and a ``ghi_<segment>`` column each.
 
         Free-field mode and any pvfactors exception fall back to the open-sky result.
+        With ``remember`` the last row's ground, PV rows and sun position are kept for
+        the progress image; the planner's horizon roll passes ``False``.
         """
         if weather.empty:
             return pd.DataFrame(index=weather.index)
         if self.config.mode == MODE_FREE_FIELD or not self._setups:
+            self._remember_open_sky(remember)
             return self._open_sky_result(weather)
 
         pv_df = self._build_pvfactors_input(weather)
         if pv_df.empty:
+            self._remember_open_sky(remember)
             return self._open_sky_result(weather)
 
         try:
             ghi_open = _open_sky_ghi(pv_df)
             per_setup_ground: list[list[list[tuple]]] = []
+            per_setup_pv_rows: list[list[list[tuple]]] = []
             for setup in self._setups:
                 if self.config.mode == MODE_TRACKABLE:
                     setup_df = pv_df
@@ -144,19 +155,20 @@ class ShadingModel:
                     setup_df["surface_azimuth"] = setup.surface_azimuth
                 report = setup.run(setup_df)
                 per_setup_ground.append(list(report["ground"].values))
-                pv_rows = list(report["pv_rows"].values)
-                if pv_rows and pv_rows[-1]:
-                    self._last_pv_rows = pv_rows[-1]
+                per_setup_pv_rows.append(list(report["pv_rows"].values))
         except Exception:  # noqa: BLE001
             if not self._pvfactors_failure_warned:
                 logger.warning("ShadingModel: pvfactors raised; falling back to open-sky.", exc_info=True)
                 self._pvfactors_failure_warned = True
+            self._remember_open_sky(remember)
             return self._open_sky_result(weather)
 
         n_t = len(pv_df.index)
         combined_per_t = [
             _combine_grounds([per_setup_ground[s][t] for s in range(len(per_setup_ground))]) for t in range(n_t)
         ]
+        if remember:
+            self._remember_sun_up(pv_df, combined_per_t, per_setup_pv_rows)
         seg_factors, seg_ghi = self._aggregate_per_segment(combined_per_t, ghi_open)
 
         out = pd.DataFrame(index=weather.index, dtype=float)
@@ -170,6 +182,47 @@ class ShadingModel:
     def pv_rows_at(self, ts: pd.Timestamp) -> list[tuple]:
         """PV-row geometry for the plot at ``ts``; night frames reuse the last sun-up geometry."""
         return self._last_pv_rows if self._last_pv_rows else self._synthesize_pv_rows()
+
+    def render_inputs_at(self, ts: pd.Timestamp) -> tuple[list[tuple], list[tuple], tuple]:
+        """What ``plots.render_shading_png`` draws at ``ts``: the remembered ground,
+        the PV rows and the sun state; a night frame has no ground and no shadows."""
+        return self._last_ground, self.pv_rows_at(ts), self._last_sun_state
+
+    def envelope(self, mesh_height: float) -> ShadingEnvelope:
+        """The static plot extent over this geometry and a soil mesh ``mesh_height`` deep."""
+        return shading_envelope(
+            mode=self.config.mode,
+            pv_setups=self._setups,
+            tracker=self._tracker,
+            surface_tilt=self._surface_tilt,
+            bay_width=self.config.bay_width,
+            mesh_height=mesh_height,
+            center_x=self._middle_row_x(),
+        )
+
+    def _remember_sun_up(
+        self, pv_df: pd.DataFrame, combined_per_t: list[list[tuple]], per_setup_pv_rows: list[list[list[tuple]]]
+    ) -> None:
+        self._last_ground = combined_per_t[-1] if combined_per_t else []
+        pv_rows = [row for rows in per_setup_pv_rows if rows for row in rows[-1]]
+        if pv_rows:
+            self._last_pv_rows = pv_rows
+        self._last_sun_state = (
+            float(pv_df["solar_zenith"].iloc[-1]),
+            float(pv_df["solar_azimuth"].iloc[-1]),
+            self._setups[0].axis_azimuth,
+        )
+
+    def _remember_open_sky(self, remember: bool) -> None:
+        if remember:
+            self._last_ground = []
+            self._last_sun_state = _NIGHT_SUN_STATE
+
+    def _middle_row_x(self) -> float:
+        """x of the middle PV row in pvfactors coordinates, averaged over the setups."""
+        if not self._setups:
+            return 0.0
+        return float(np.mean([(s.n_rows - 1) / 2.0 * s.distance + s.offset_x for s in self._setups]))
 
     def _build_setups(self) -> None:
         """One ``_PVSetup`` per row arrangement, chosen by ``config.mode``."""
@@ -247,8 +300,7 @@ class ShadingModel:
         middle row, averaged over sun-up timesteps."""
         if not self._setups:
             return 1.0
-        middles = [(setup.n_rows - 1) / 2.0 * setup.distance + setup.offset_x for setup in self._setups]
-        center_x = float(np.mean(middles))
+        center_x = self._middle_row_x()
         distance = self._setups[0].distance
         bay_lo = center_x - distance / 2.0
         bay_hi = center_x + distance / 2.0

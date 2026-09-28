@@ -17,12 +17,13 @@ import io
 from types import SimpleNamespace
 
 import pytest
-from conftest import MESH_KW
+from conftest import MESH_KW, load_configs
 
 import numpy as np
 import pandas as pd
 from lories import Constant
 from lories.components.weather import Weather, WeatherProvider
+from lories.core import ConfigurationError
 from lories.data import Channels
 from sparcs.components.agriculture.fieldsim import components
 from sparcs.components.agriculture.fieldsim.core.anchor import AnchorSensor
@@ -336,6 +337,13 @@ class _RecordingData(dict):
 
 
 class _NS:
+    """A channel namespace with plotting off, as a child whose ``[plot]`` block is disabled."""
+
+    name = "ns"
+    plot_config = None
+    _last_plot_ts = None
+    _plot_strikes = 0
+
     def __init__(self, keys):
         self.data = _RecordingData({k: _RecordingChannel() for k in keys})
 
@@ -483,10 +491,10 @@ def test_channel_outputs_chain_writes_one_series_per_channel_and_the_last_segmen
         index=idx,
     )
 
-    outputs.chain(idx[-1].to_pydatetime(), ChainResult(shading=shading_df, evapotranspiration=et_df, image=b"png"))
+    outputs.chain(idx[-1].to_pydatetime(), ChainResult(shading=shading_df, evapotranspiration=et_df))
 
     assert _rows(shading_ns.data["shading_factor"]) == [[(idx[0], pytest.approx(1.0)), (idx[1], pytest.approx(0.65))]]
-    assert shading_ns.data["shading_progress_image"].calls == [(idx[-1], b"png")]
+    assert shading_ns.data["shading_progress_image"].calls == []  # plotting off: no frame
     assert field_ns.data["seg_ghi"].calls == [(idx[-1], [400.0, 300.0])]
     assert _rows(et_ns.data["evapotranspiration"]) == [[(idx[0], 0.1), (idx[1], 0.2)]]
     assert _rows(field_ns.data["lai"]) == [[(idx[0], 1.0), (idx[1], 1.0)]]
@@ -737,3 +745,33 @@ def test_register_channels_skips_the_image_channels_when_plot_is_disabled():
         added = _added(namespace, plot_enabled=False)
         assert set(added) == {str(c) for c in namespace.CHANNELS}
         assert set(added).isdisjoint({str(c) for c in namespace.PLOT_CHANNELS})
+
+
+# --------------------------------------------------------------------------- [plot]
+
+
+def _plot_config(tmp_path, **child):
+    return components.ChannelNamespace._plot_config(load_configs(tmp_path, "child.conf", **child))
+
+
+def test_plot_config_reads_the_childs_own_plot_block(tmp_path):
+    config = _plot_config(tmp_path, plot={"enabled": True, "interval": "30min", "disable_after_failures": 2})
+
+    assert config.interval == pd.Timedelta(minutes=30)
+    assert config.disable_after_failures == 2
+
+
+def test_plot_config_is_none_when_the_block_is_disabled(tmp_path):
+    assert _plot_config(tmp_path, plot={"enabled": False, "interval": "30min"}) is None
+
+
+def test_plot_config_defaults_to_hourly_frames_without_a_block(tmp_path):
+    config = _plot_config(tmp_path)
+
+    assert config.interval == pd.Timedelta(hours=1)
+    assert config.disable_after_failures == 3
+
+
+def test_plot_config_rejects_an_unknown_key(tmp_path):
+    with pytest.raises(ConfigurationError, match="unknown configuration keys"):
+        _plot_config(tmp_path, plot={"every": "30min"})

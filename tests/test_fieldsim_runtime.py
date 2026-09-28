@@ -68,8 +68,14 @@ class _Engine:
 
 
 class _Shading:
-    def evaluate(self, weather):
+    def evaluate(self, weather, *, remember=True):
         return pd.DataFrame({"top": 1.0}, index=weather.index)
+
+    def render_inputs_at(self, ts):
+        return [], [], (90.0, 0.0, None)
+
+    def envelope(self, mesh_height):
+        return None
 
 
 class _ET:

@@ -89,7 +89,6 @@ class Simulation:
             setup,
             shading,
             ETModel(),
-            setup.plots,
             top_segment_names=engine.top_segment_names,
             segment_face_length=engine.segment_face_length,
         )

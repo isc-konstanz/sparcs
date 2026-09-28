@@ -12,6 +12,7 @@ import pytest
 
 from sparcs.components.agriculture.fieldsim.core.chain import WeatherChain, flow_m3s_per_m
 from sparcs.components.agriculture.fieldsim.core.config import FieldConfig, FieldSetup, SoilConfig
+from sparcs.components.agriculture.fieldsim.core.shading import ShadingConfig, ShadingModel
 
 CHAIN_LOGGER = "sparcs.components.agriculture.fieldsim.core.chain"
 
@@ -21,7 +22,7 @@ def _chain(drip_line_length_m: float) -> WeatherChain:
         {"mesh": {"dl": 0.05, "watering_width": 0.05}, "total_drip_line_length_m": drip_line_length_m}
     )
     setup = FieldSetup(field=FieldConfig.from_dict(), soil=soil, shading=None)
-    return WeatherChain(setup, shading=None, et=None)
+    return WeatherChain(setup, shading=ShadingModel(ShadingConfig.from_dict({"mode": "free_field"})), et=None)
 
 
 def test_default_length_keeps_per_metre_reading():

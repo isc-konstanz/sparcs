@@ -19,7 +19,6 @@ from sparcs.components.weather import validate_meteo_inputs
 from .config import FieldSetup
 from .evapotranspiration import ETModel, SegmentProperties
 from .pde import flow_m3s_per_m, rain_flux, segment_flux_dicts
-from .plots import PlotConfig, render_due
 from .shading import ShadingModel
 from .state import ChainResult, Forcing
 
@@ -53,7 +52,6 @@ class WeatherChain:
         setup: FieldSetup,
         shading: ShadingModel,
         et: ETModel,
-        plots: Optional[PlotConfig] = None,
         *,
         top_segment_names: Sequence[str] = (),
         segment_face_length: Optional[Mapping[str, float]] = None,
@@ -61,10 +59,9 @@ class WeatherChain:
         self.setup = setup
         self.shading = shading
         self.et = et
-        self.plots = plots
         self._top_segment_names = tuple(top_segment_names)
         self._segment_face_length = dict(segment_face_length or {})
-        self._last_plot: Optional[pd.Timestamp] = None
+        self._envelope = shading.envelope(setup.soil.mesh.height)
         self._strip_flux_warned = False
         self._vegetation_placeholder_warned = False
         self._weather_default_warned: set[str] = set()
@@ -86,18 +83,22 @@ class WeatherChain:
         segments = self._segments(df, shading)
         bulk, seg_et = self.et.evaluate(df, segments)
         forcing = self._forcings(df, shading, seg_et, irrigation_lpm, frontier=frontier, first_dt_s=first_dt_s)
-
-        if self.plots is not None and not df.empty:
-            ts = df.index[-1]
-            if render_due(self._last_plot, ts, self.plots):
-                self._last_plot = ts
-
-        return forcing, ChainResult(shading=shading, evapotranspiration=bulk, image=None)
+        ground, pv_rows, sun_state = self.shading.render_inputs_at(df.index[-1])
+        result = ChainResult(
+            shading=shading,
+            evapotranspiration=bulk,
+            ground=ground,
+            pv_rows=pv_rows,
+            sun_state=sun_state,
+            envelope=self._envelope,
+        )
+        return forcing, result
 
     def horizon_inputs(self, forecast: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
-        """The prepared forecast frame and the per-segment ET frames the planner rolls over."""
+        """The prepared forecast frame and the per-segment ET frames the planner rolls
+        over; the shading model keeps the live tick's frame inputs."""
         df = self._prepare_weather(forecast)
-        shading = self.shading.evaluate(df)
+        shading = self.shading.evaluate(df, remember=False)
         segments = self._segments(df, shading)
         _, seg_et = self.et.evaluate(df, segments)
         return df, dict(seg_et)

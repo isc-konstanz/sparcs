@@ -19,7 +19,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 from copy import deepcopy
-from typing import Any, ClassVar, Mapping, Optional, Sequence, Type, TypeVar
+from typing import Any, Callable, ClassVar, Mapping, Optional, Sequence, Type, TypeVar
 
 import pandas as pd
 from lories import Constant, System
@@ -30,6 +30,7 @@ from lories.data import Channels
 from lories.util import get_context
 from sparcs.components.agriculture.irrigation import Irrigation
 
+from .core import plots
 from .core.anchor import AnchorSensor
 from .core.config import (
     Config,
@@ -81,7 +82,11 @@ _SHADING_IMAGE: Mapping[str, Any] = {"aggregate": "last", "logger": {"enabled": 
 
 class ChannelNamespace(Component):
     """A Component that exists to own channels under its id. ``FieldSimulation``
-    validates its ``.d`` file against ``CONFIG`` and sets ``config``. No logic."""
+    validates its ``.d`` file against ``CONFIG`` and sets ``config``. No logic.
+
+    ``plot_config`` is the child's own ``[plot]`` block (the field-level block
+    cascades into it as defaults), ``None`` when disabled or once the render
+    failure policy switched plotting off for the rest of the process."""
 
     CHANNELS: ClassVar[Sequence[Constant]] = ()
     # Registered only when the child's own [plot] block is enabled.
@@ -92,10 +97,14 @@ class ChannelNamespace(Component):
 
     config: Optional[Config] = None
     plot_enabled: bool = True
+    plot_config: Optional[PlotConfig] = None
+    _last_plot_ts: Optional[pd.Timestamp] = None
+    _plot_strikes: int = 0
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
-        self.plot_enabled = self._plot_enabled(configs)
+        self.plot_config = self._plot_config(configs)
+        self.plot_enabled = self.plot_config is not None
         self.register_channels(self.data, plot_enabled=self.plot_enabled)
 
     @classmethod
@@ -108,8 +117,13 @@ class ChannelNamespace(Component):
             data.add(constant, **deepcopy(dict(cls.CHANNEL_CONFIGS.get(constant, cls.DEFAULT_CONFIGS))))
 
     @staticmethod
-    def _plot_enabled(configs: Configurations) -> bool:
-        return configs.get_member("plot", defaults={}, ensure_exists=True).get_bool("enabled", default=True)
+    def _plot_config(configs: Configurations) -> Optional[PlotConfig]:
+        plot = configs.get_member("plot", defaults={}, ensure_exists=True)
+        if not plot.get_bool("enabled", default=True):
+            return None
+        config = PlotConfig()
+        config.configure(plot)
+        return config
 
 
 class GroundShading(ChannelNamespace):
@@ -442,7 +456,8 @@ def _set_series(channel: Any, series: pd.Series) -> None:
 class ChannelOutputs:
     """``Outputs`` over channel sets and logger tables: one ``Series`` per channel
     per chunk, which the logger writes row by row. The forecast tables go through
-    ``ForecastTablePublisher``."""
+    ``ForecastTablePublisher``. Progress images are rendered here, one ``set`` per
+    frame, so a render failure is counted against the child and never escapes."""
 
     def __init__(
         self,
@@ -465,8 +480,18 @@ class ChannelOutputs:
         if self.shading is not None and not shading_df.empty:
             if GroundShading.SHADING_FACTOR in shading_df.columns:
                 _set_series(self.shading.data[GroundShading.SHADING_FACTOR], shading_df[GroundShading.SHADING_FACTOR])
-            if result.image is not None:
-                self.shading.data[GroundShading.SHADING_PROGRESS_IMAGE].set(pd.Timestamp(now), result.image)
+            ts = pd.Timestamp(now)
+            self._render_progress(
+                self.shading,
+                GroundShading.SHADING_PROGRESS_IMAGE,
+                ts,
+                plots.render_shading_png,
+                ts,
+                result.ground,
+                result.pv_rows,
+                result.sun_state,
+                result.envelope,
+            )
 
             ghi_cols = {c[len("ghi_") :]: c for c in shading_df.columns if c.startswith("ghi_")}
             segment_names = list(self._top_segment_names())
@@ -497,6 +522,58 @@ class ChannelOutputs:
         for probe_id in tension.columns:
             if probe_id in self.soil.data:  # sensor-derived probes are sample-only
                 _set_series(self.soil.data[probe_id], tension[probe_id])
+
+        if self.soil.plot_config is not None:
+            mesh = self.field.simulation.engine.mesh
+            geometry = self.field.setup.soil.mesh
+            for result in results:
+                ts = pd.Timestamp(result.state.at)
+                self._render_progress(
+                    self.soil,
+                    SoilSimulation.SOIL_PROGRESS_IMAGE,
+                    ts,
+                    plots.render_rel_sat_png,
+                    mesh,
+                    result.state.se,
+                    ts,
+                    width_m=geometry.width,
+                    height_m=geometry.height,
+                )
+
+    def _render_progress(
+        self,
+        child: ChannelNamespace,
+        constant: Constant,
+        ts: pd.Timestamp,
+        render: Callable[..., bytes],
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """``render(*args, tz=<site tz>, **kwargs)`` into ``child``'s image channel
+        when its ``[plot]`` interval is due. A failure counts a strike on
+        ``PLOT_STRIKES``; after ``disable_after_failures`` in a row the child's
+        plotting is off for the rest of the process, a success resets the count."""
+        config = child.plot_config
+        if not plots.render_due(child._last_plot_ts, ts, config):
+            return
+        child._last_plot_ts = ts
+        try:
+            png = render(*args, tz=self._timezone(), **kwargs)
+        except Exception:  # noqa: BLE001
+            child._plot_strikes, disable = plots.count_render_failure(
+                logger, f"{child.name} progress image", child._plot_strikes, config.disable_after_failures
+            )
+            child.data[PLOT_STRIKES].set(ts, float(child._plot_strikes))
+            if disable:
+                child.plot_config = None
+            return
+        child.data[constant].set(ts, png)
+        child._plot_strikes = 0
+        child.data[PLOT_STRIKES].set(ts, 0.0)
+
+    def _timezone(self) -> Any:
+        location = self.field.setup.location
+        return location.timezone if location is not None else None
 
     def plan(self, plan: Plan) -> None:
         if self.predictor is None:
@@ -565,13 +642,6 @@ class FieldSimulation(Component):
         self.evapotranspiration = self._child(Evapotranspiration, configs, defaults)
         self.soil_predictor = self._child(SoilPredictor, configs, {**defaults, "drip": soil.drip.values()})
 
-        plots = None
-        if configs.has_member("plot"):
-            plot_member = configs.get_member("plot")
-            if plot_member.get_bool("enabled", default=True):
-                plots = PlotConfig()
-                plots.configure(plot_member)
-
         soil.mesh.derive(bay_width=field.bay_width)
         if self.ground_shading is not None:
             shading = self.ground_shading.config
@@ -582,7 +652,6 @@ class FieldSimulation(Component):
             soil=soil,
             shading=shading,
             planner=self.soil_predictor.config if self.soil_predictor is not None else None,
-            plots=plots,
             location=self.location,
         )
         self.simulation = Simulation.build(self.setup, name=self.name)

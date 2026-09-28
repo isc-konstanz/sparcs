@@ -177,6 +177,7 @@ class PlotConfig(Config):
     """``[plot]``: progress-image settings. ``enabled`` is lories' own table switch."""
 
     interval = DurationParameter(default="1h", desc="Minimum time between two rendered frames")
+    # Declared for the conf and unconsumed here: progress images go to their DB blob channel only.
     dir = Parameter(
         type=str, default=None, required=False, desc="Directory the images are written to; defaults to the data dir"
     )
@@ -271,6 +272,7 @@ class SoilConfig(Config):
     discover_sensor_probes = Parameter(
         type=bool, default=False, desc="Register a probe per discovered SoilMoisture sensor"
     )
+    # Declared for the conf and unconsumed here: the mesh-structure plot is not ported.
     plot_structure = Parameter(type=bool, default=False, desc="Render the mesh structure plot once at configure")
 
     def _on_configure(self, configs: Configurations) -> None:
@@ -371,5 +373,4 @@ class FieldSetup:
     soil: SoilConfig
     shading: Any  # shading.ShadingConfig; typed Any to avoid an import cycle
     planner: Optional[PlannerConfig] = None
-    plots: Optional[PlotConfig] = None
     location: Any = None  # lories Location of the field; None offline

@@ -46,7 +46,7 @@ def _weather_frame(hours: int = 24) -> pd.DataFrame:
 def _setup(total_drip_line_length_m: float = 12.6) -> FieldSetup:
     field = FieldConfig.from_dict({"lai_type": "grass", "bay_width": 3.5})
     soil = SoilConfig.from_dict({"mesh": {}, "total_drip_line_length_m": total_drip_line_length_m})
-    return FieldSetup(field=field, soil=soil, shading=None, planner=None, plots=None, location=None)
+    return FieldSetup(field=field, soil=soil, shading=None, planner=None, location=None)
 
 
 # --------------------------------------------------------------------------- ShadingConfig / real geometry
@@ -208,7 +208,10 @@ def test_forcing_series_dt_flow_rain_and_segment_fluxes():
 
     assert chain_result.evapotranspiration.index.equals(weather.index)
     assert chain_result.shading.index.equals(weather.index)
-    assert chain_result.image is None
+    # free field: nothing to draw but the envelope
+    assert (list(chain_result.ground), list(chain_result.pv_rows)) == ([], [])
+    assert chain_result.sun_state == (90.0, 0.0, None)
+    assert chain_result.envelope.y_min == -setup.soil.mesh.height - 0.5
 
 
 def test_forcing_windows_reach_backwards_from_their_row():
