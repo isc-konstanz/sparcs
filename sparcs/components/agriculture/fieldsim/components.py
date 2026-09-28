@@ -453,6 +453,14 @@ def _set_series(channel: Any, series: pd.Series) -> None:
         channel.set(series.index[0], series)
 
 
+def _set_strikes(child: ChannelNamespace, ts: pd.Timestamp, strikes: int) -> None:
+    """Best effort: the count on ``child`` is the record, the channel only shows it."""
+    try:
+        child.data[PLOT_STRIKES].set(ts, float(strikes))
+    except Exception:  # noqa: BLE001
+        logger.debug("%s: plot_strikes channel write failed; count %d kept in memory", child.name, strikes)
+
+
 class ChannelOutputs:
     """``Outputs`` over channel sets and logger tables: one ``Series`` per channel
     per chunk, which the logger writes row by row. The forecast tables go through
@@ -550,26 +558,27 @@ class ChannelOutputs:
         **kwargs: Any,
     ) -> None:
         """``render(*args, tz=<site tz>, **kwargs)`` into ``child``'s image channel
-        when its ``[plot]`` interval is due. A failure counts a strike on
-        ``PLOT_STRIKES``; after ``disable_after_failures`` in a row the child's
-        plotting is off for the rest of the process, a success resets the count."""
+        when its ``[plot]`` interval is due. A failing render or image write counts
+        a strike on ``PLOT_STRIKES``; after ``disable_after_failures`` in a row the
+        child's plotting is off for the rest of the process, a success resets the
+        count. Nothing raised here leaves this method."""
         config = child.plot_config
         if not plots.render_due(child._last_plot_ts, ts, config):
             return
         child._last_plot_ts = ts
         try:
             png = render(*args, tz=self._timezone(), **kwargs)
+            child.data[constant].set(ts, png)
         except Exception:  # noqa: BLE001
             child._plot_strikes, disable = plots.count_render_failure(
                 logger, f"{child.name} progress image", child._plot_strikes, config.disable_after_failures
             )
-            child.data[PLOT_STRIKES].set(ts, float(child._plot_strikes))
             if disable:
                 child.plot_config = None
+            _set_strikes(child, ts, child._plot_strikes)
             return
-        child.data[constant].set(ts, png)
         child._plot_strikes = 0
-        child.data[PLOT_STRIKES].set(ts, 0.0)
+        _set_strikes(child, ts, 0)
 
     def _timezone(self) -> Any:
         location = self.field.setup.location

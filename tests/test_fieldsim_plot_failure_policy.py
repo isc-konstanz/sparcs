@@ -9,9 +9,10 @@ render is logged with its traceback and skipped, ``disable_after_failures``
 consecutive failures switch the child's plotting off for the rest of the
 process with one ERROR announcing it, a successful render resets the count,
 every count reaches the child's in-memory ``plot_strikes`` channel, a failing
-render never writes a frame, and ``[plot] interval`` collapses chunks to one
-frame per interval. Fake renderers stand in for matplotlib; the real ones run
-in ``test_fieldsim_plots_wiring``.
+render never writes a frame, a failing image write is a failed render, a
+failing ``plot_strikes`` write never escapes, and ``[plot] interval`` collapses
+chunks to one frame per interval. Fake renderers stand in for matplotlib; the
+real ones run in ``test_fieldsim_plots_wiring``.
 """
 
 import logging
@@ -38,6 +39,11 @@ class _Channel:
         self.calls.append((ts, value))
 
 
+class _BrokenChannel(_Channel):
+    def set(self, ts, value):
+        raise RuntimeError("channel write failed")
+
+
 class _Child:
     """A ``GroundShading``/``SoilSimulation`` with plotting on and, at interval 0, every frame due."""
 
@@ -47,6 +53,7 @@ class _Child:
         self._last_plot_ts = None
         self._plot_strikes = 0
         self.data = {image_key: _Channel(), "plot_strikes": _Channel(), "shading_factor": _Channel()}
+        self.image_key = image_key
         self.image = self.data[image_key]
         self.strikes = self.data["plot_strikes"]
 
@@ -232,6 +239,37 @@ def test_soil_rows_of_one_chunk_strike_out_and_the_rest_are_skipped(monkeypatch)
     assert calls["n"] == 3
     assert seam.child.plot_config is None
     assert seam.child.image.calls == []
+
+
+# --------------------------------------------------------------------------- channel writes
+
+
+def test_an_image_write_failure_is_a_render_failure(seam, caplog):
+    render, calls = _counting()
+    seam.render_with(render)
+    seam.child.data[seam.child.image_key] = _BrokenChannel()
+
+    with caplog.at_level(logging.ERROR):
+        seam.emit(T0)
+        assert seam.child.plot_config is not None
+        seam.emit(T0)
+        seam.emit(T0)
+
+    assert calls["n"] == 3
+    assert seam.child.plot_config is None
+    assert [value for _, value in seam.child.strikes.calls] == [1.0, 2.0, 3.0]
+    assert len(_disabling(caplog)) == 1
+
+
+def test_a_strike_channel_failure_never_escapes(seam):
+    seam.child.data["plot_strikes"] = _BrokenChannel()
+    seam.render_with(_flaky(succeed_on=2))
+
+    seam.emit(T0)
+    assert seam.child._plot_strikes == 1
+    seam.emit(T0)
+    assert seam.child._plot_strikes == 0
+    assert seam.child.image.calls == [(T0, b"png")]
 
 
 # --------------------------------------------------------------------------- cadence
