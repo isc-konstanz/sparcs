@@ -40,6 +40,8 @@ def decode_state_blob(blob: bytes) -> tuple[np.ndarray, np.ndarray, dict[str, fl
     decode: truncated, not an npz, without ``rel_sat``, or needing pickle."""
     try:
         arrays = np.load(io.BytesIO(blob), allow_pickle=False)
+        if not isinstance(arrays, np.lib.npyio.NpzFile):
+            raise ValueError(f"undecodable simulation state blob: {type(arrays).__name__} is not an npz archive")
         se = np.asarray(arrays["rel_sat"], dtype=float)
         se_old = np.asarray(arrays["rel_sat_old"], dtype=float) if "rel_sat_old" in arrays.files else se.copy()
         surface_h: dict[str, float] = {}

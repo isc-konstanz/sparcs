@@ -598,11 +598,18 @@ def _blob_without_rel_sat() -> bytes:
     return buf.getvalue()
 
 
+def _single_array_npy() -> bytes:
+    buf = io.BytesIO()
+    np.save(buf, np.full(3, 0.4))
+    return buf.getvalue()
+
+
 @pytest.mark.parametrize(
     "blob",
     [
         pytest.param(encode_state_blob(np.full(3, 0.4), np.full(3, 0.4), {})[:200], id="truncated"),
         pytest.param(_blob_without_rel_sat(), id="no rel_sat"),
+        pytest.param(_single_array_npy(), id="npy not npz"),
     ],
 )
 def test_decode_state_blob_raises_value_error_for_an_undecodable_blob(blob):
