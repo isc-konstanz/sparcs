@@ -3,13 +3,9 @@
 sparcs.components.agriculture.fieldsim.core.assimilator
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Tensiometer assimilation ("anchoring"), as an owned instance with its own
-state. Replaces ``AnchorRuntime(self)`` being constructed at five call sites
-with its state living on ``SoilSimulation``.
-
-The math stays in ``.anchor`` (fipy-free, a verbatim copy of
-``simulation._anchor``); this class only holds the per-sensor history and
-the last-anchored stamp and decides when to blend.
+Tensiometer assimilation ("anchoring") with its own state. The math lives in
+``.anchor`` (fipy-free); this class holds the per-sensor history and the
+last-anchored stamp and decides when to blend.
 """
 
 from __future__ import annotations

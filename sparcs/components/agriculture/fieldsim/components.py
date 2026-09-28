@@ -554,7 +554,7 @@ class FieldSimulation(Component):
         field.configure(configs)  # own keys; child sections and [plot] are allowed, not resolved here
         self.location = get_context(self, System).location
 
-        # [plot] cascades into every child as its default, [model] only into the soil simulation.
+        # Only SoilConfig declares [model]; the other children's strict check would reject the cascade.
         defaults = Component._build_defaults(configs, includes=["plot"], strict=True)
         soil_defaults = Component._build_defaults(configs, includes=["model", "plot"], strict=True)
         self.soil_simulation = self._child(SoilSimulation, configs, soil_defaults)
