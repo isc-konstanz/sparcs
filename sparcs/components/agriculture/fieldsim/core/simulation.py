@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from typing import Mapping, Optional, Sequence
+from types import SimpleNamespace
+from typing import Any, Mapping, Optional, Sequence
 
 import pandas as pd
 
@@ -71,21 +72,11 @@ class Simulation:
         rel_sat_name: str = "relative saturation",
         name: str = "fieldsim",
     ) -> "Simulation":
-        """Assemble engine, chain, assimilator and planner from a configured ``FieldSetup``.
+        """Assemble engine, chain, assimilator and planner from a configured ``FieldSetup``."""
+        engine = SoilEngine.build(setup.soil, rel_sat_name=rel_sat_name)
 
-        Sets ``setup.soil.probe_specs`` in place.
-        """
-        engine = SoilEngine.build(setup.soil, setup.model, rel_sat_name=rel_sat_name)
-
-        probes = (
-            list(engine.probes(setup.soil.configs.get_member("probes", defaults={}, ensure_exists=True)))
-            if (setup.soil.configs is not None)
-            else []
-        )
-        anchor_cfg = parse_anchor_config(setup.soil.anchor)
-        if setup.soil.discover_sensor_probes or anchor_cfg.enabled:
-            probes += [engine.probe_from_sensor(sensor) for sensor in anchor_sensors]
-        setup.soil.probe_specs = probes
+        probes = list(engine.probes(setup.soil.configs.get_member("probes", defaults={}, ensure_exists=True)))
+        anchor_cfg = parse_anchor_config(setup.soil.configs.get_member("anchor", defaults={}))
 
         segment_ranges = _resolve_segment_ranges(engine.mesh_config, setup.shading, setup.field.bay_width)
         setup.shading.derive(bay_width=setup.field.bay_width, segment_ranges=segment_ranges)
@@ -101,7 +92,6 @@ class Simulation:
         )
 
         assimilator = Assimilator(anchor_cfg, engine)
-        assimilator.set_sensors(anchor_sensors)
 
         planner = None
         if setup.planner is not None:
@@ -109,12 +99,14 @@ class Simulation:
                 setup.planner,
                 engine,
                 probes=probes,
-                drip=setup.planner_drip,
+                drip=setup.planner.drip if setup.planner.drip is not None else setup.soil.drip,
                 total_drip_line_length_m=setup.soil.total_drip_line_length_m,
                 name=name,
             )
 
-        return cls(setup, engine, chain, assimilator, planner)
+        simulation = cls(setup, engine, chain, assimilator, planner, probes=probes)
+        simulation.add_sensors(anchor_sensors)
+        return simulation
 
     def __init__(
         self,
@@ -123,16 +115,30 @@ class Simulation:
         chain: WeatherChain,
         assimilator: Assimilator,
         planner: Optional[IrrigationPlanner] = None,
+        *,
+        probes: Sequence[Any] = (),
     ) -> None:
         self.setup = setup
         self.engine = engine
         self.chain = chain
         self.assimilator = assimilator
         self.planner = planner
+        self.probes = list(probes)
         self.state: Optional[SoilState] = None
         self._last_chain: Optional[ChainResult] = None
         self._last_step: Optional[StepResult] = None
         self._last_plan: Optional[Plan] = None
+
+    def add_sensors(self, sensors: Sequence[AnchorSensor]) -> None:
+        """Hand discovered tensiometers to the assimilator; sample each as a probe
+        when sensor probes are on or anchoring is live."""
+        self.assimilator.set_sensors(sensors)
+        if self.setup.soil.discover_sensor_probes or self.assimilator.enabled:
+            # probe_from_sensor reads the SoilMoisture attribute names.
+            self.probes += [
+                self.engine.probe_from_sensor(SimpleNamespace(key=s.key, x_offset=s.x_offset_cm, depth=s.depth_cm))
+                for s in sensors
+            ]
 
     def resume(self, state: SoilState) -> None:
         self.state = state
@@ -191,7 +197,7 @@ class Simulation:
         state = result.state
         if self.assimilator.enabled:
             state = self.assimilator.update(state, step.end)
-        tension = {p.channel_id: self.engine.tension_at(state, p) for p in self.setup.soil.probe_specs}
+        tension = {p.channel_id: self.engine.tension_at(state, p) for p in self.probes}
         self.state = state
         return replace(
             result,

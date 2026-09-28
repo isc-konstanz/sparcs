@@ -18,10 +18,11 @@ import pytest
 import numpy as np
 import pandas as pd
 from lories import Constant
-from lories.components.weather import Weather
+from lories.components.weather import Weather, WeatherProvider
 from lories.data import Channels
 from sparcs.components.agriculture.fieldsim import components
 from sparcs.components.agriculture.fieldsim.core.anchor import AnchorResult, AnchorSensor
+from sparcs.components.agriculture.fieldsim.core.assimilator import parse_anchor_config
 from sparcs.components.agriculture.fieldsim.core.config import FieldConfig, FieldSetup, PlannerConfig, SoilConfig
 from sparcs.components.agriculture.fieldsim.core.simulation import Simulation
 from sparcs.components.agriculture.fieldsim.core.state import ChainResult, Plan, SoilState, StepResult
@@ -44,12 +45,13 @@ _MESH_KW = {
 }
 
 
-def _soil_config(tmp_path, filename: str) -> SoilConfig:
+def _soil_config(tmp_path, filename: str, **extra) -> SoilConfig:
     soil = SoilConfig.from_dict(
         {
             "mesh": {**_MESH_KW, "filename": str(tmp_path / filename)},
             "pde": {"dt": "600s", "dt_min": "30s"},
             "probes": {"points": {"strip": {"x_offset": 0.0, "depth": 30.0}}},
+            **extra,
         }
     )
     soil.mesh.derive(bay_width=3.0)
@@ -100,7 +102,7 @@ def test_simulation_build_wires_engine_chain_assimilator_planner(tmp_path):
     assert simulation.planner is not None
     assert simulation.planner._probe_ids == ["strip"]
 
-    assert [p.channel_id for p in setup.soil.probe_specs] == ["strip"]
+    assert [p.channel_id for p in simulation.probes] == ["strip"]
 
     assert tuple(simulation.chain._top_segment_names) == tuple(simulation.engine.top_segment_names)
     assert len(simulation.chain._top_segment_names) > 0
@@ -116,11 +118,29 @@ def test_simulation_build_wires_engine_chain_assimilator_planner(tmp_path):
     assert chain_result.evapotranspiration.index.equals(weather.index)
 
 
+@pytest.mark.slow  # builds a real Gmsh mesh
+def test_simulation_build_reads_an_enabled_anchor_table_and_samples_its_sensor(tmp_path):
+    anchor = {"enabled": True, "sensors": {"bay1_30cm": {"r_vertical": 0.1}}}
+    soil = _soil_config(tmp_path, "components_anchor.msh", anchor=anchor)
+    setup = FieldSetup(
+        field=FieldConfig.from_dict({"bay_width": 3.0}), soil=soil, shading=components.ShadingConfig.from_dict()
+    )
+    sensor = AnchorSensor(key="bay1_30cm", x_offset_cm=0.0, depth_cm=30.0)
+
+    simulation = Simulation.build(setup, anchor_sensors=[sensor], rel_sat_name="Se_components_anchor")
+
+    assert simulation.assimilator.config.enabled is True
+    assert simulation.assimilator.config.sensors["bay1_30cm"].r_vertical == 0.1
+    assert simulation.assimilator.enabled is True
+    assert [p.channel_id for p in simulation.probes] == ["strip", "bay1_30cm"]
+
+
 # --------------------------------------------------------------------------- ChannelInputs
 
 
 class _FakeChannel:
-    def __init__(self, *, connector: bool = True, valid: bool = False, value=None, timestamp=None):
+    def __init__(self, *, id: str = "fake", connector: bool = True, valid: bool = False, value=None, timestamp=None):
+        self.id = id
         self._connector = connector
         self._valid = valid
         self.value = value
@@ -135,8 +155,8 @@ class _FakeChannel:
 
 class _FakeData:
     """Stands in for ``Component.data``: routes ``.read(channels, ...)`` by
-    identity (the weather channels list) or by contained channel object (a
-    fresh ``Channels([one_channel])`` per irrigation/tension read)."""
+    identity (the weather channels list) or by contained channel objects, one
+    column per bound, non-empty channel named by its id."""
 
     def __init__(self, weather_channels=None, weather_frame=None):
         self.weather_channels = weather_channels if weather_channels is not None else []
@@ -146,13 +166,15 @@ class _FakeData:
     def bind(self, channel, frame: pd.DataFrame) -> None:
         self.by_channel[id(channel)] = frame
 
-    def read(self, channels, start=None, end=None, unique=True) -> pd.DataFrame:
+    def read(self, channels, start=None, end=None, unique=False) -> pd.DataFrame:
         if channels is self.weather_channels:
             return self.weather_frame.copy()
-        chans = list(channels)
-        if len(chans) == 1 and id(chans[0]) in self.by_channel:
-            return self.by_channel[id(chans[0])].copy()
-        return pd.DataFrame()
+        columns = [
+            self.by_channel[id(c)].iloc[:, 0].rename(c.id)
+            for c in channels
+            if id(c) in self.by_channel and not self.by_channel[id(c)].empty
+        ]
+        return pd.concat(columns, axis=1) if columns else pd.DataFrame()
 
 
 def _fake_field(**overrides) -> SimpleNamespace:
@@ -166,13 +188,10 @@ def _fake_field(**overrides) -> SimpleNamespace:
         simulation=None,
         setup=SimpleNamespace(soil=SoilConfig.from_dict({"mesh": {}})),
         _weather_channels=weather_channels,
-        _evapo_rename={},
         _required_weather_keys=components.ETModel.REQUIRED_WEATHER_COLUMNS,
         _irrigation_flow_channel=None,
         _irrigation_state_channel=None,
-        _anchor_sensors=(),
         _anchor_channels={},
-        _anchor_data={},
     )
     for key, value in overrides.items():
         setattr(field, key, value)
@@ -240,8 +259,8 @@ def test_channel_inputs_irrigation_measured_then_state_then_empty():
 
 
 def test_channel_inputs_tension_one_column_per_sensor_nan_where_absent():
-    s1 = _FakeChannel()
-    s2 = _FakeChannel()
+    s1 = _FakeChannel(id="field.soil_1.water_tension")
+    s2 = _FakeChannel(id="field.soil_2.water_tension")
     idx1 = pd.DatetimeIndex(["2026-06-21 08:00", "2026-06-21 09:00"], tz="UTC")
     frame1 = pd.DataFrame({"tension": [-50.0, -55.0]}, index=idx1)
     data = _FakeData()
@@ -250,13 +269,8 @@ def test_channel_inputs_tension_one_column_per_sensor_nan_where_absent():
 
     field = _fake_field(
         data=data,
-        simulation=SimpleNamespace(assimilator=SimpleNamespace(config=None)),
-        _anchor_sensors=[
-            AnchorSensor(key="s1", x_offset_cm=0.0, depth_cm=10.0),
-            AnchorSensor(key="s2", x_offset_cm=0.0, depth_cm=20.0),
-        ],
+        simulation=SimpleNamespace(assimilator=SimpleNamespace(config=parse_anchor_config({}))),
         _anchor_channels={"s1": s1, "s2": s2},
-        _anchor_data={"s1": data, "s2": data},
     )
     inputs = components.ChannelInputs(field)
 
@@ -275,7 +289,9 @@ def test_channel_inputs_forecast_spans_start_end():
         data=SimpleNamespace(to_frame=lambda unique=False: forecast_frame),
         is_enabled=lambda: True,
     )
-    field = _fake_field(weather=SimpleNamespace(forecast=forecast_sub))
+    provider = object.__new__(WeatherProvider)
+    provider._WeatherProvider__forecast = forecast_sub
+    field = _fake_field(weather=provider)
     inputs = components.ChannelInputs(field)
 
     got = inputs.read(

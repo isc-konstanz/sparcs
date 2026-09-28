@@ -129,7 +129,6 @@ class _FlakyRecorder(Recorder):
 
 def _setup(planner=True, intake_delay="0min") -> FieldSetup:
     soil = SoilConfig.from_dict({"mesh": {}})
-    soil.probe_specs = (_Probe("soil_30cm"),)
     return FieldSetup(
         field=FieldConfig.from_dict({"interval": 360, "intake_delay": intake_delay}),
         soil=soil,
@@ -139,7 +138,9 @@ def _setup(planner=True, intake_delay="0min") -> FieldSetup:
 
 
 def _simulation(setup: FieldSetup) -> Simulation:
-    return Simulation(setup, _Engine(), _Chain(setup, _Shading(), _ET()), _NoAssimilation(), _Planner())
+    return Simulation(
+        setup, _Engine(), _Chain(setup, _Shading(), _ET()), _NoAssimilation(), _Planner(), probes=[_Probe("soil_30cm")]
+    )
 
 
 def _weather(start: str, end: str) -> pd.DataFrame:

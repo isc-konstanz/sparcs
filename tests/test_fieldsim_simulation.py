@@ -3,7 +3,8 @@
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``Simulation.run`` over the real ``WeatherChain`` and a stub engine: cold-start
-spin-up, the already-simulated guard and the ``extra_diagnostics`` merge.
+spin-up, the already-simulated guard and the ``extra_diagnostics`` merge; and
+``Simulation.add_sensors`` handing discovered tensiometers to the assimilator.
 """
 
 import types
@@ -13,6 +14,7 @@ import pytest
 import numpy as np
 import pandas as pd
 from lories.components.weather import Weather
+from sparcs.components.agriculture.fieldsim.core.anchor import AnchorSensor
 from sparcs.components.agriculture.fieldsim.core.chain import WeatherChain
 from sparcs.components.agriculture.fieldsim.core.config import FieldConfig, FieldSetup, SoilConfig
 from sparcs.components.agriculture.fieldsim.core.evapotranspiration import ETModel
@@ -59,19 +61,46 @@ class _StubEngine:
     def tension_at(self, state: SoilState, probe) -> float:
         return -100.0
 
+    def probe_from_sensor(self, sensor):
+        return types.SimpleNamespace(channel_id=sensor.key, at=(sensor.x_offset, sensor.depth))
 
-def _simulation(cold_start_s: float = 0.0, probes=(), cancel_after: int = -1) -> Simulation:
+
+class _StubAssimilator:
+    """Enabled once anchoring is on and sensors exist; ``update`` leaves the state as it is."""
+
+    def __init__(self, anchor_enabled: bool = False) -> None:
+        self.anchor_enabled = anchor_enabled
+        self.sensors: list = []
+
+    @property
+    def enabled(self) -> bool:
+        return self.anchor_enabled and bool(self.sensors)
+
+    def set_sensors(self, sensors) -> None:
+        self.sensors = list(sensors)
+
+    def update(self, state: SoilState, now) -> SoilState:
+        return state
+
+
+def _simulation(
+    cold_start_s: float = 0.0,
+    probes=(),
+    cancel_after: int = -1,
+    *,
+    anchor_enabled: bool = False,
+    discover_sensor_probes: bool = False,
+) -> Simulation:
     setup = FieldSetup(
         field=FieldConfig.from_dict({"bay_width": 3.5}),
-        soil=SoilConfig.from_dict({"mesh": {}}),
+        soil=SoilConfig.from_dict({"mesh": {}, "discover_sensor_probes": discover_sensor_probes}),
         shading=None,
     )
-    setup.soil.probe_specs = list(probes)
     shading_config = ShadingConfig.from_dict({"mode": "free_field"}).derive(bay_width=3.5, segment_ranges=None)
     chain = WeatherChain(setup, ShadingModel(shading_config), ETModel(), top_segment_names=(), segment_face_length={})
     engine = _StubEngine(cold_start_s=cold_start_s, cancel_after=cancel_after)
-    assimilator = types.SimpleNamespace(enabled=False)
-    return Simulation(setup, engine, chain, assimilator)
+    assimilator = _StubAssimilator(anchor_enabled)
+    return Simulation(setup, engine, chain, assimilator, probes=probes)
 
 
 def _run(sim: Simulation, weather: pd.DataFrame, **kwargs):
@@ -146,3 +175,35 @@ def test_cancelled_advance_keeps_the_committed_rows():
 
     assert len(results) == 1
     assert sim.state.at == weather.index[1]
+
+
+def _sensor(key: str) -> AnchorSensor:
+    return AnchorSensor(key=key, x_offset_cm=25.0, depth_cm=60.0)
+
+
+def test_add_sensors_without_anchor_or_discovery_keeps_them_off_the_probe_list():
+    sim = _simulation(probes=[types.SimpleNamespace(channel_id="strip")])
+
+    sim.add_sensors([_sensor("s1")])
+
+    assert [s.key for s in sim.assimilator.sensors] == ["s1"]
+    assert [p.channel_id for p in sim.probes] == ["strip"]
+
+
+@pytest.mark.parametrize(
+    "anchor_enabled, discover_sensor_probes",
+    [pytest.param(True, False, id="anchor"), pytest.param(False, True, id="discover")],
+)
+def test_add_sensors_samples_each_sensor_as_a_probe(anchor_enabled, discover_sensor_probes):
+    sim = _simulation(
+        probes=[types.SimpleNamespace(channel_id="strip")],
+        anchor_enabled=anchor_enabled,
+        discover_sensor_probes=discover_sensor_probes,
+    )
+
+    sim.add_sensors([_sensor("s1")])
+    results, _ = _run(sim, _weather_frame(hours=2))
+
+    assert [p.channel_id for p in sim.probes] == ["strip", "s1"]
+    assert sim.probes[-1].at == (25.0, 60.0)
+    assert set(results[-1].probe_tension) == {"strip", "s1"}

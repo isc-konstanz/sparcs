@@ -77,7 +77,6 @@ def _inputs(*, drip=None, flow=None, state=None, weather_index=None) -> componen
         data=data,
         setup=SimpleNamespace(soil=soil),
         _weather_channels=weather_channels,
-        _evapo_rename={},
         _required_weather_keys=(),
         _irrigation_flow_channel=_FLOW if flow is not None else None,
         _irrigation_state_channel=_STATE if state is not None else None,

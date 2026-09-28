@@ -49,7 +49,7 @@ def _weather_frame(hours: int = 24) -> pd.DataFrame:
 def _setup(total_drip_line_length_m: float = 12.6) -> FieldSetup:
     field = FieldConfig.from_dict({"lai_type": "grass", "bay_width": 3.5})
     soil = SoilConfig.from_dict({"mesh": {}, "total_drip_line_length_m": total_drip_line_length_m})
-    return FieldSetup(field=field, soil=soil, shading=None, planner=None, plots=None, model=None, location=None)
+    return FieldSetup(field=field, soil=soil, shading=None, planner=None, plots=None, location=None)
 
 
 # --------------------------------------------------------------------------- ShadingConfig / real geometry

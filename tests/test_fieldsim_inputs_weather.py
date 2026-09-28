@@ -3,8 +3,9 @@
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``ChannelInputs``' weather span: the read goes through the connector (never a
-logger), the frame is renamed and trimmed to ``(start, end]``, and a chunk
-missing a required column is dropped with the column named at WARNING.
+logger) with columns named by channel key, the frame is trimmed to
+``(start, end]``, and a chunk missing a required column is dropped with the
+column named at WARNING.
 """
 
 import datetime as dt
@@ -36,13 +37,12 @@ class _RecordingData:
         return pd.DataFrame()
 
 
-def _inputs(data, *, rename=None, required=()) -> components.ChannelInputs:
+def _inputs(data, *, required=()) -> components.ChannelInputs:
     field = SimpleNamespace(
         name="fieldsim_test",
         data=data,
         setup=SimpleNamespace(soil=SoilConfig.from_dict({"mesh": {}})),
         _weather_channels=object(),
-        _evapo_rename=rename or {},
         _required_weather_keys=required,
     )
     return components.ChannelInputs(field)
@@ -58,13 +58,13 @@ def test_weather_span_reads_the_connector_not_a_logger():
     end = dt.datetime(2026, 7, 12, 11, tzinfo=dt.timezone.utc)
     inputs.read(InputKey.WEATHER, start, end)
 
-    assert data.calls == [("read", start, end, True)]
+    assert data.calls == [("read", start, end, False)]
 
 
-def test_trim_span_renames_and_keeps_the_half_open_interval():
+def test_trim_span_keeps_the_half_open_interval():
     index = pd.date_range("2026-07-12 10:00", periods=5, freq="15min", tz="UTC")
-    frame = pd.DataFrame({"weather.ghi": [1.0, 2.0, 3.0, 4.0, 5.0]}, index=index)
-    inputs = _inputs(_RecordingData(), rename={"weather.ghi": "ghi"})
+    frame = pd.DataFrame({"ghi": [1.0, 2.0, 3.0, 4.0, 5.0]}, index=index)
+    inputs = _inputs(_RecordingData())
 
     trimmed = inputs._trim_span(frame, index[0], pd.Timestamp("2026-07-12 10:45", tz="UTC"))
 

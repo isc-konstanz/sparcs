@@ -44,7 +44,8 @@ def _explicit_drip(explicit: bool):
 def _child_block(tmp_path, child_type: str, **values) -> Configurations:
     """Reproduce ``FieldSimulation.configure``'s child-config path."""
     field = Configurations.load("field.conf", conf_dir=str(tmp_path), require=False, **values)
-    defaults = Component._build_defaults(field, includes=["model", "plot"], strict=True)
+    includes = ["model", "plot"] if child_type == SoilSimulation.TYPE else ["plot"]
+    defaults = Component._build_defaults(field, includes=includes, strict=True)
     return field.get_member(child_type, defaults=defaults)
 
 

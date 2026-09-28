@@ -3,20 +3,15 @@
 sparcs.components.agriculture.fieldsim.components
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The lories layer: the only module in this package that imports lories
-components and channels.
+The lories layer: ``FieldSimulation``, its four ``ChannelNamespace``
+children, and ``ChannelInputs``/``ChannelOutputs``, the runtime ports over
+lories channels.
 
-``FieldSimulation`` configures its own section, lets each ``.d`` child
-configure its own, bundles them into a frozen ``FieldSetup``, builds the
-``Simulation``, the runner and the ``Ticker``, and exposes the ``Snapshot``
-for dash. Each child is a ``ChannelNamespace``: a TYPE, the lories
-``Constant``s it registers, and the ``Config`` class its file is validated
-against. The constants are the live classes' own objects, imported rather
-than redeclared; only channels the live classes register by bare key are
-declared here, under ``context="fieldsim"``.
-
-Not registered as a component type; the live ``simulation.FieldSimulation``
-keeps the ``field_simulation`` type.
+``FieldSimulation`` validates its own section and each child's ``.d`` file
+against a ``Config`` class, bundles them into a frozen ``FieldSetup`` and
+builds the ``Simulation`` at configure; the runner and the ``Ticker`` start at
+activate. ``AgriculturalField`` builds it from its ``field_simulation``
+member, and the ``simulation`` package imports its channel constants from here.
 """
 
 from __future__ import annotations
@@ -24,23 +19,29 @@ from __future__ import annotations
 import datetime as dt
 import logging
 from copy import deepcopy
-from dataclasses import replace
 from typing import Any, ClassVar, Mapping, Optional, Sequence, Type, TypeVar
 
 import pandas as pd
-from lories import Constant
+from lories import Constant, System
 from lories.components import Component
-from lories.components.weather import Weather
+from lories.components.weather import Weather, WeatherProvider
 from lories.core import Configurations, ConfigurationUnavailableError
 from lories.data import Channels
+from lories.util import get_context
 from sparcs.components.agriculture.irrigation import Irrigation
 
-from .anchor_runtime import _walk_components
 from .core.anchor import AnchorSensor
-from .core.assimilator import parse_anchor_config
-from .core.config import Config, FieldConfig, FieldSetup, PlannerConfig, PlotConfig, SoilConfig
+from .core.config import (
+    Config,
+    EvapotranspirationConfig,
+    FieldConfig,
+    FieldSetup,
+    PlannerConfig,
+    PlotConfig,
+    SoilConfig,
+)
 from .core.evapotranspiration import ETModel
-from .core.shading import ShadingConfig
+from .core.shading import MODE_FREE_FIELD, ShadingConfig
 from .core.simulation import Simulation
 from .core.state import ChainResult, Plan, Snapshot, SoilState, StepResult
 from .forecast_tables import ForecastTablePublisher
@@ -58,7 +59,7 @@ _OPTIONAL_WEATHER_KEYS: frozenset = frozenset({Weather.CLEAR_SKY_INDEX, Weather.
 # The live components register these by bare key, so they have no live Constant.
 PLOT_STRIKES = Constant(float, "plot_strikes", "Plot Strikes", context="fieldsim")
 
-# Keyed by the table label the live publisher passes to _bump_write_failure.
+# Keyed by the table label ForecastTablePublisher passes to _bump_write_failure.
 _WRITE_FAILURE_CHANNELS: Mapping[str, Constant] = {
     "header table": Constant(float, "header_write_failures", "Header Write Failures", context="fieldsim"),
     "detail table": Constant(float, "detail_write_failures", "Detail Write Failures", context="fieldsim"),
@@ -79,8 +80,8 @@ _SHADING_IMAGE: Mapping[str, Any] = {"aggregate": "last", "logger": {"enabled": 
 
 
 class ChannelNamespace(Component):
-    """A Component that exists to own channels under its id and to validate
-    its ``.d`` file against one ``Config`` class. No logic."""
+    """A Component that exists to own channels under its id. ``FieldSimulation``
+    validates its ``.d`` file against ``CONFIG`` and sets ``config``. No logic."""
 
     CHANNELS: ClassVar[Sequence[Constant]] = ()
     # Registered only when the child's own [plot] block is enabled.
@@ -95,10 +96,6 @@ class ChannelNamespace(Component):
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
         self.plot_enabled = self._plot_enabled(configs)
-        if self.CONFIG is not None:
-            self.config = self.CONFIG()
-            # A copy: the section was already configured against this object.
-            self.config.configure(configs.copy())
         self.register_channels(self.data, plot_enabled=self.plot_enabled)
 
     @classmethod
@@ -113,10 +110,6 @@ class ChannelNamespace(Component):
     @staticmethod
     def _plot_enabled(configs: Configurations) -> bool:
         return configs.get_member("plot", defaults={}, ensure_exists=True).get_bool("enabled", default=True)
-
-    @classmethod
-    def schema(cls) -> dict[str, Any]:
-        return cls.CONFIG.schema() if cls.CONFIG is not None else {}
 
 
 class GroundShading(ChannelNamespace):
@@ -147,7 +140,7 @@ class Evapotranspiration(ChannelNamespace):
     RAD_TERM = Constant(float, "radiation_term", "Radiation Term", "(kPa*W)/(K*m^2)")
     AER_TERM = Constant(float, "aerodynamic_term", "Aerodynamic Term", "(kPa*J)/(m^2*K*s)")
     EVAPOTRANSPIRATION = Constant(float, "evapotranspiration", "Evapotranspiration", "kg/(m^2*h)")
-    CONFIG = None  # no keys of its own today; its .d file carries only channels
+    CONFIG = EvapotranspirationConfig
     CHANNELS = (
         SVP,
         GVP,
@@ -212,6 +205,14 @@ class SoilSimulation(ChannelNamespace):
         PLOT_STRIKES: _LAST_MEMORY,
     }
 
+    # The config probes, set by FieldSimulation before this component configures.
+    probes: Sequence[Any] = ()
+
+    def configure(self, configs: Configurations) -> None:
+        super().configure(configs)
+        for probe in self.probes:
+            self.register_probe(probe)
+
     def register_probe(self, probe: Any) -> None:
         """One float channel per resolved config probe. Sensor-derived probes
         stay sample-only."""
@@ -226,8 +227,8 @@ class SoilSimulation(ChannelNamespace):
 
 
 class SoilPredictor(ChannelNamespace):
-    """The forecast tables' schema and write path are the live
-    ``ForecastTablePublisher``'s; this class supplies what it reads."""
+    """The forecast tables' schema and write path live in
+    ``ForecastTablePublisher``; this class supplies what it reads."""
 
     TYPE: str = "soil_predictor"
     CONFIG = PlannerConfig
@@ -309,7 +310,7 @@ class SoilPredictor(ChannelNamespace):
             return
         try:
             self.data[constant].set(pd.Timestamp.now(tz="UTC"), float(count))
-        except Exception:  # noqa: BLE001
+        except KeyError:
             logger.debug("%s: write-failure channel '%s' unavailable; count=%d.", self.name, constant, count)
 
 
@@ -340,7 +341,7 @@ class ChannelInputs:
             return None
         try:
             channel = soil.data[SoilSimulation.SIMULATION_STATE]
-        except Exception:  # noqa: BLE001
+        except KeyError:
             return None
         if not channel.is_valid():
             return None
@@ -353,7 +354,7 @@ class ChannelInputs:
 
     def _read_weather(self, start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
         field = self.field
-        frame = field.data.read(field._weather_channels, start=start, end=end, unique=True)
+        frame = field.data.read(field._weather_channels, start=start, end=end)
         frame = self._trim_span(frame, start, end)
         if not self._weather_frame_valid(frame):
             return frame.iloc[0:0]
@@ -362,7 +363,6 @@ class ChannelInputs:
     def _trim_span(self, frame: pd.DataFrame, start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
         if frame.empty:
             return frame
-        frame = frame.rename(columns=self.field._evapo_rename)
         return frame.loc[(frame.index > start) & (frame.index <= end)]
 
     def _weather_frame_valid(self, frame: pd.DataFrame) -> bool:
@@ -377,7 +377,7 @@ class ChannelInputs:
             if missing != self._last_invalid_weather_columns:
                 logger.warning(
                     "%s: weather chunk dropped, required column(s) missing or all-NaN: %s",
-                    getattr(self.field, "name", "fieldsim"),
+                    self.field.name,
                     ", ".join(missing),
                 )
             self._last_invalid_weather_columns = missing
@@ -437,52 +437,35 @@ class ChannelInputs:
 
     def _read_tension(self, start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
         field = self.field
-        sensors = getattr(field, "_anchor_sensors", ())
-        if not sensors:
+        channels = field._anchor_channels
+        if not channels:
             return pd.DataFrame()
-        assimilator = getattr(getattr(field, "simulation", None), "assimilator", None)
-        cfg = getattr(assimilator, "config", None)
-        lookback = (
-            max((cfg.sensor_staleness(s.key) for s in sensors), default=dt.timedelta(0)) if cfg else dt.timedelta(0)
-        )
-        read_start = start - lookback
+        config = field.simulation.assimilator.config
+        lookback = max(config.sensor_staleness(key) for key in channels)
+        frame = field.data.read(Channels(list(channels.values())), start=start - lookback, end=end, unique=True)
 
         # One column per sensor even when its read is empty, so an absent
         # reading is NaN once another sensor's rows widen the shared index.
         series_by_key: dict[str, pd.Series] = {}
-        for sensor in sensors:
-            series_by_key[sensor.key] = pd.Series(dtype=float)
-            data = getattr(field, "_anchor_data", {}).get(sensor.key)
-            channel = getattr(field, "_anchor_channels", {}).get(sensor.key)
-            if data is None or channel is None:
+        for key, channel in channels.items():
+            if channel.id not in frame.columns:
+                series_by_key[key] = pd.Series(dtype=float)
                 continue
-            try:
-                frame = data.read(Channels([channel]), start=read_start, end=end, unique=True)
-            except Exception:  # noqa: BLE001
-                logger.exception(
-                    "%s: anchor history read failed for %s", getattr(field, "name", "fieldsim"), sensor.key
-                )
-                continue
-            if frame is None or frame.empty:
-                continue
-            series = frame.iloc[:, 0].dropna().sort_index()
-            series = series[~series.index.duplicated(keep="last")]
-            if not series.empty:
-                series_by_key[sensor.key] = series
+            series = frame[channel.id].dropna().sort_index()
+            series_by_key[key] = series[~series.index.duplicated(keep="last")]
         return pd.concat(series_by_key, axis=1)
 
     # -- FORECAST -----------------------------------------------------------
 
     def _read_forecast(self, start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
-        field = self.field
-        weather = field.weather
-        forecast_sub = getattr(weather, "forecast", None) if weather is not None else None
+        weather = self.field.weather
+        forecast_sub = weather.forecast if isinstance(weather, WeatherProvider) else None
         if forecast_sub is None or not forecast_sub.is_enabled():
             return pd.DataFrame()
         try:
             frame = forecast_sub.data.to_frame(unique=False)
         except Exception as e:  # noqa: BLE001
-            logger.warning("%s: forecast read failed: %s", getattr(field, "name", "fieldsim"), e)
+            logger.warning("%s: forecast read failed: %s", self.field.name, e)
             return pd.DataFrame()
         if frame.empty:
             return frame
@@ -491,7 +474,7 @@ class ChannelInputs:
 
 class ChannelOutputs:
     """``Outputs`` over channel sets and logger tables. Fans a ``ChainResult``
-    out per row; the forecast tables go through the live publisher."""
+    out per row; the forecast tables go through ``ForecastTablePublisher``."""
 
     def __init__(
         self,
@@ -548,13 +531,12 @@ class ChannelOutputs:
             if constant in result.diagnostics:
                 self.soil.data[constant].set(ts, float(result.diagnostics[constant]))
         for probe_id, tension in result.probe_tension.items():
-            try:
-                self.soil.data[probe_id].set(ts, float(tension))
-            except Exception:  # noqa: BLE001
+            if probe_id not in self.soil.data:
                 continue  # sensor-derived probe: sample-only, no registered channel
+            self.soil.data[probe_id].set(ts, float(tension))
 
-        assimilator = getattr(getattr(self.field, "simulation", None), "assimilator", None)
-        last_result = getattr(assimilator, "last_result", None)
+        assimilator = self.field.simulation.assimilator
+        last_result = assimilator.last_result if assimilator is not None else None
         if last_result is not None and last_result.innovations:
             increment = float(sum(last_result.innovations.values()))
             self.soil.data[SoilSimulation.WATER_ANCHOR].set(ts, increment)
@@ -578,13 +560,11 @@ class ChannelOutputs:
         self.soil.data[SoilSimulation.SIMULATION_STATE].set(state.at, state.to_blob())
 
     def _top_segment_names(self) -> Sequence[str]:
-        simulation = getattr(self.field, "simulation", None)
-        engine = getattr(simulation, "engine", None)
-        return getattr(engine, "top_segment_names", ()) or ()
+        return self.field.simulation.engine.top_segment_names
 
 
 class FieldSimulation(Component):
-    """Configure own section, let children configure theirs, bundle, assemble, own the thread."""
+    """Configure own and children's sections, bundle, build the simulation, own the thread."""
 
     TYPE: str = "field_simulation"
 
@@ -614,15 +594,18 @@ class FieldSimulation(Component):
         super().configure(configs)
         field = FieldConfig()
         field.configure(configs)  # own keys; child sections and [plot] are allowed, not resolved here
+        self.location = get_context(self, System).location
 
-        # [model] and [plot] cascade into every child as its defaults.
-        defaults = Component._build_defaults(configs, includes=["model", "plot"], strict=True)
+        # [plot] cascades into every child as its default, [model] only into the soil simulation.
+        defaults = Component._build_defaults(configs, includes=["plot"], strict=True)
+        soil_defaults = Component._build_defaults(configs, includes=["model", "plot"], strict=True)
+        self.soil_simulation = self._child(SoilSimulation, configs, soil_defaults)
+        if self.soil_simulation is None:
+            raise ConfigurationUnavailableError(f"{self.id}: [soil_simulation] block is required")
+        soil: SoilConfig = self.soil_simulation.config
         self.ground_shading = self._child(GroundShading, configs, defaults)
         self.evapotranspiration = self._child(Evapotranspiration, configs, defaults)
-        self.soil_simulation = self._child(SoilSimulation, configs, defaults)
-        self.soil_predictor = self._child(SoilPredictor, configs, defaults)
-        if self.soil_simulation is None or self.soil_simulation.config is None:
-            raise ValueError(f"{self.id}: [soil_simulation] block is required")
+        self.soil_predictor = self._child(SoilPredictor, configs, {**defaults, "drip": soil.drip.values()})
 
         plots = None
         if configs.has_member("plot"):
@@ -631,16 +614,21 @@ class FieldSimulation(Component):
                 plots = PlotConfig()
                 plots.configure(plot_member)
 
-        soil: SoilConfig = self.soil_simulation.config
         soil.mesh.derive(bay_width=field.bay_width)
-        shading = self.ground_shading.config if self.ground_shading is not None else ShadingConfig.from_dict()
+        if self.ground_shading is not None:
+            shading = self.ground_shading.config
+        else:
+            shading = ShadingConfig.from_dict({"mode": MODE_FREE_FIELD})
         self.setup = FieldSetup(
             field=field,
             soil=soil,
             shading=shading,
             planner=self.soil_predictor.config if self.soil_predictor is not None else None,
             plots=plots,
+            location=self.location,
         )
+        self.simulation = Simulation.build(self.setup, name=self.name)
+        self.soil_simulation.probes = list(self.simulation.probes)
 
         for constant in _VEGETATION_CHANNELS:
             self.data.add(constant, **deepcopy(dict(_MEAN_MEMORY)))
@@ -648,54 +636,39 @@ class FieldSimulation(Component):
             for constant in _SEGMENT_CHANNELS:
                 self.data.add(constant, **deepcopy(dict(_BUNDLE_MEMORY)))
 
-        self.simulation: Optional[Simulation] = None
         self.runner: Optional[FieldRunner] = None
         self.ticker: Optional[Ticker] = None
+
+    def _on_configure(self, configs: Configurations) -> None:
+        super()._on_configure(configs)
+        probes = self.soil_simulation.probes
+        # Raises on a duplicate soil_id, with or without a predictor.
+        ForecastTablePublisher(self.soil_simulation).resolve_probe_identities(self.soil_simulation.configs, probes)
+        if self.soil_predictor is not None:
+            self.soil_predictor.register_forecast_tables(self.soil_simulation.configs, probes)
 
     def activate(self) -> None:
         super().activate()
 
-        system = self.context.context.context
-        self.location = getattr(system, "location", None)
-        self.weather = getattr(system, "weather", None)
-        self.irrigation = getattr(self.context, "irrigation", None)
-
-        if self.evapotranspiration is None or self.soil_simulation is None:
-            return
+        system = get_context(self, System)
+        self.weather = system.weather if system.has_weather() else None
         if self.weather is None:
-            logger.warning("%s: no Weather component resolved; chain will never tick.", self.name)
-            return
+            raise ConfigurationUnavailableError(f"{self.name}: no weather component configured to drive the chain")
+        field = self.context
+        self.irrigation = field.irrigation if field.has_irrigation() else None
 
         self._weather_channels = Channels(list(self.weather.data.values()))
         self._required_weather_keys = ETModel.REQUIRED_WEATHER_COLUMNS
-        self._evapo_rename = {c.id: c.key for c in self._weather_channels}
         self._warn_unwired_weather_channels()
 
-        self.setup = replace(self.setup, location=self.location)
-
-        anchor_cfg = parse_anchor_config(self.setup.soil.anchor)
-        discover_enabled = self.setup.soil.discover_sensor_probes or anchor_cfg.enabled
-        self._anchor_sensors, self._anchor_channels, self._anchor_data = self._discover_and_validate_sensors(
-            anchor_cfg.enabled, discover_enabled
-        )
+        anchor_enabled = self.simulation.assimilator.config.enabled
+        discover_enabled = self.setup.soil.discover_sensor_probes or anchor_enabled
+        sensors, self._anchor_channels = self._discover_and_validate_sensors(anchor_enabled, discover_enabled)
+        self.simulation.add_sensors(sensors)
 
         self._irrigation_flow_channel = self._resolve_irrigation_channel(Irrigation.FLOW)
         self._irrigation_state_channel = self._resolve_irrigation_channel(Irrigation.STATE)
         self._validate_irrigation_input()
-
-        self.simulation = Simulation.build(self.setup, anchor_sensors=self._anchor_sensors, name=self.name)
-
-        config_probes = []
-        if self.setup.soil.configs is not None:
-            probes_block = self.setup.soil.configs.get_member("probes", defaults={}, ensure_exists=True)
-            config_probes = self.simulation.engine.probes(probes_block)
-        for probe in config_probes:
-            self.soil_simulation.register_probe(probe)
-
-        if self.soil_predictor is not None:
-            self.soil_predictor.register_forecast_tables(
-                self.soil_simulation.configs, list(self.setup.soil.probe_specs)
-            )
 
         self.inputs = ChannelInputs(self)
         self.outputs = ChannelOutputs(
@@ -703,7 +676,7 @@ class FieldSimulation(Component):
         )
         self.runner = FieldRunner(self.setup, self.simulation, self.inputs, self.outputs)
         self._register_state_listener()
-        self.ticker = Ticker(self.setup, self.runner, tz=getattr(self.location, "timezone", None), name=self.name)
+        self.ticker = Ticker(self.setup, self.runner, tz=self.location.timezone, name=self.name)
         self.ticker.start()
 
     def deactivate(self) -> None:
@@ -725,15 +698,10 @@ class FieldSimulation(Component):
         **kwargs: Any,
     ) -> pd.DataFrame:
         """Offline run over a weather frame; returns the per-row diagnostics."""
-        if self.soil_simulation is None or self.evapotranspiration is None:
-            return pd.DataFrame()
-        if start is not None:
-            weather = weather.loc[weather.index >= start]
-        if end is not None:
-            weather = weather.loc[weather.index <= end]
+        weather = self._get_range(weather, start, end)
         if weather.empty:
             return pd.DataFrame()
-        simulation = self.simulation or Simulation.build(self.setup, name=self.name)
+        simulation = self.simulation
         state = self._prior_state(prior)
         if state is not None:
             simulation.resume(state)
@@ -751,21 +719,15 @@ class FieldSimulation(Component):
             return None
         return SoilState.from_blob(bytes(blob), prior.index[-1])
 
-    @classmethod
-    def schema(cls) -> dict[str, Any]:
-        """The whole tree of needed and allowed keys: own section, [plot],
-        and one entry per child type."""
-        tree: dict[str, Any] = dict(FieldConfig.schema())
-        tree["plot"] = {"type": "group", "children": PlotConfig.schema()}
-        for child in cls.CHILDREN:
-            tree[child.TYPE] = {"type": "component", "children": child.schema()}
-        return tree
-
     def _child(self, cls: Type[_C], configs: Configurations, defaults: dict[str, Any]) -> Optional[_C]:
-        """Build one channel namespace from its ``.d`` member, if present."""
+        """Build one channel namespace and its configured section from its ``.d`` member, if present."""
         if not configs.has_member(cls.TYPE, includes=True):
             return None
-        child = cls(self, configs.get_member(cls.TYPE, defaults=defaults))
+        member = configs.get_member(cls.TYPE, defaults=defaults)
+        section = cls.CONFIG()
+        section.configure(member.copy())
+        child = cls(self, member)
+        child.config = section
         self.components.add(child)
         return child
 
@@ -837,10 +799,7 @@ class FieldSimulation(Component):
     def _resolve_irrigation_channel(self, constant: Constant) -> Any:
         if self.irrigation is None:
             return None
-        try:
-            return self.irrigation.data[constant]
-        except KeyError:
-            return None
+        return self.irrigation.data[constant]
 
     def _validate_irrigation_input(self) -> None:
         if self.irrigation is None:
@@ -862,45 +821,36 @@ class FieldSimulation(Component):
 
     # -- anchor sensor discovery --------------------------------------------------
 
-    def _discover_sensors(
-        self,
-    ) -> tuple[list[AnchorSensor], dict[str, Any], dict[str, Any], list[tuple[str, Exception]]]:
+    def _discover_sensors(self) -> tuple[list[AnchorSensor], dict[str, Any], list[tuple[str, Exception]]]:
         """One ``AnchorSensor`` per enabled, tension-measured ``SoilMoisture``
-        sensor in this field, walked from this component's own parent field."""
+        sensor of this component's parent field."""
         from sparcs.components.agriculture.soil.moisture import SoilMoisture
 
-        field = getattr(self, "context", None)
         sensors: list[AnchorSensor] = []
         channels: dict[str, Any] = {}
-        data: dict[str, Any] = {}
         failures: list[tuple[str, Exception]] = []
-        if field is None:
-            return sensors, channels, data, failures
-        for comp in _walk_components(field):
-            if not isinstance(comp, SoilMoisture):
-                continue
+        for sensor in self.context.soil:
             try:
-                if not comp.has_measured_tension:
+                if not sensor.has_measured_tension:
                     continue
-                sensors.append(AnchorSensor(key=comp.key, x_offset_cm=comp.x_offset, depth_cm=comp.depth))
-                channels[comp.key] = comp.data[SoilMoisture.WATER_TENSION]
-                data[comp.key] = comp.data
+                sensors.append(AnchorSensor(key=sensor.key, x_offset_cm=sensor.x_offset, depth_cm=sensor.depth))
+                channels[sensor.key] = sensor.data[SoilMoisture.WATER_TENSION]
             except Exception as e:  # noqa: BLE001
-                logger.exception("%s: failed to derive an anchor sensor from %s", self.name, getattr(comp, "key", "?"))
-                failures.append((str(getattr(comp, "key", "?")), e))
-        return sensors, channels, data, failures
+                logger.exception("%s: failed to derive an anchor sensor from %s", self.name, sensor.key)
+                failures.append((sensor.key, e))
+        return sensors, channels, failures
 
     def _discover_and_validate_sensors(
         self, anchor_enabled: bool, discover_enabled: bool
-    ) -> tuple[list[AnchorSensor], dict[str, Any], dict[str, Any]]:
+    ) -> tuple[list[AnchorSensor], dict[str, Any]]:
         """With ``[anchor]`` enabled, a discovery failure or zero discovered
         sensors refuses startup; with only ``discover_sensor_probes`` on,
         failures are logged and the sim runs with whatever was found."""
         if not discover_enabled:
-            return [], {}, {}
+            return [], {}
         strict = anchor_enabled
         try:
-            sensors, channels, data, failures = self._discover_sensors()
+            sensors, channels, failures = self._discover_sensors()
         except Exception as e:  # noqa: BLE001
             if strict:
                 raise ConfigurationUnavailableError(
@@ -908,9 +858,9 @@ class FieldSimulation(Component):
                     "Verify the field's SoilMoisture sensor wiring before starting."
                 ) from e
             logger.exception("%s: sensor-probe discovery failed; continuing without sensor probes", self.name)
-            return [], {}, {}
+            return [], {}
         if not strict:
-            return sensors, channels, data
+            return sensors, channels
         if failures:
             failed = ", ".join(key for key, _ in failures)
             raise ConfigurationUnavailableError(
@@ -923,7 +873,7 @@ class FieldSimulation(Component):
                 "discovered in this field (a sensor counts when its water_tension channel has a "
                 "connector). Wire a tensiometer or disable [anchor]."
             )
-        return sensors, channels, data
+        return sensors, channels
 
 
 # --------------------------------------------------------------------------- field-level channels

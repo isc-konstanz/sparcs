@@ -11,10 +11,11 @@ import pytest
 import pandas as pd
 from lories.core import ConfigurationError
 from lories.core.configs.configurations import Configurations
+from sparcs.components.agriculture.fieldsim.core.assimilator import parse_anchor_config
 from sparcs.components.agriculture.fieldsim.core.config import (
     DripConfig,
+    EvapotranspirationConfig,
     FieldConfig,
-    FieldSetup,
     MeshConfig,
     PlannerConfig,
     PlotConfig,
@@ -119,6 +120,18 @@ def test_bool_scalar_is_not_mistaken_for_a_section():
     assert s.discover_sensor_probes is True
 
 
+def test_lories_registrator_tables_are_reserved():
+    tables = {"components": {}, "connectors": {"db": {"type": "csv"}}, "converters": {}}
+    SoilConfig.from_dict({"mesh": {}, **tables})
+    ShadingConfig.from_dict(tables)
+
+
+def test_evapotranspiration_section_rejects_any_key_of_its_own():
+    EvapotranspirationConfig.from_dict({"type": "evapotranspiration", "plot": {"enabled": False}})
+    with pytest.raises(ConfigurationError, match=r"EvapotranspirationConfig.lai_type"):
+        EvapotranspirationConfig.from_dict({"lai_type": "grass"})
+
+
 # --------------------------------------------------------------------------- typed sub-sections
 
 
@@ -145,6 +158,16 @@ def test_mesh_dl_must_be_positive():
         MeshConfig.from_dict({"dl": 0.0})
 
 
+def test_mesh_height_must_be_positive():
+    with pytest.raises(ConfigurationError, match=r"Validation failed for 'height'"):
+        MeshConfig.from_dict({"height": 0.0})
+
+
+def test_total_drip_line_length_must_be_positive():
+    with pytest.raises(ConfigurationError, match=r"Validation failed for 'total_drip_line_length_m'"):
+        SoilConfig.from_dict({"mesh": {}, "total_drip_line_length_m": 0.0})
+
+
 @pytest.mark.parametrize(
     "values, fragment",
     [
@@ -168,14 +191,59 @@ def test_drip_absent_means_placeholder_not_explicit():
     assert s2.drip.design_flow_lpm == pytest.approx(32.0 / 60.0)
 
 
-def test_planner_drip_is_a_per_key_override_over_the_sims():
+def test_drip_values_are_keyed_by_config_key():
+    drip = DripConfig.from_dict({"nozzle_count": 32, "nozzle_flow_lph": 2.0})
+    assert drip.values() == {"nozzle_count": 32, "nozzle_flow_lph": 2.0}
+
+
+def _planner_member(tmp_path, soil: SoilConfig, **predictor) -> Configurations:
+    """The ``[soil_predictor]`` member as ``FieldSimulation.configure`` builds it."""
+    field = Configurations.load("field.conf", conf_dir=str(tmp_path), require=False, soil_predictor=predictor)
+    return field.get_member("soil_predictor", defaults={"drip": soil.drip.values()})
+
+
+def test_planner_drip_falls_back_to_the_sims_per_key(tmp_path):
     soil = SoilConfig.from_dict({"mesh": {}, "drip": {"nozzle_count": 32, "nozzle_flow_lph": 2.0}})
-    planner = PlannerConfig.from_dict({"drip": {"nozzle_count": 8}})
-    setup = FieldSetup(field=FieldConfig.from_dict(), soil=soil, shading=None, planner=planner)
-    assert setup.planner_drip.nozzle_count == 8
-    assert setup.planner_drip.nozzle_flow_lph == 2.0  # not restated -> falls back to the sim's
-    assert setup.planner_drip.explicit is True
-    assert FieldSetup(field=setup.field, soil=soil, shading=None).planner_drip is soil.drip
+    planner = PlannerConfig()
+    planner.configure(_planner_member(tmp_path, soil, drip={"nozzle_count": 8}))
+    assert isinstance(planner.drip, DripConfig)
+    assert planner.drip.nozzle_count == 8
+    assert planner.drip.nozzle_flow_lph == 2.0  # not restated -> falls back to the sim's
+
+
+def test_planner_without_a_drip_table_takes_the_sims(tmp_path):
+    soil = SoilConfig.from_dict({"mesh": {}, "drip": {"nozzle_count": 32, "nozzle_flow_lph": 2.0}})
+    planner = PlannerConfig()
+    planner.configure(_planner_member(tmp_path, soil))
+    assert (planner.drip.nozzle_count, planner.drip.nozzle_flow_lph) == (32, 2.0)
+
+
+def test_planner_drip_rejects_an_unknown_key():
+    with pytest.raises(ConfigurationError, match=r"PlannerConfig.drip.typo"):
+        PlannerConfig.from_dict({"drip": {"typo": 1}})
+
+
+@pytest.mark.parametrize(
+    "values, fragment",
+    [
+        (
+            {"max_windows": 1, "windows": {"a": {"start": "08:00"}, "b": {"start": "20:00"}}},
+            "2 windows configured, max_windows is 1",
+        ),
+        ({"max_workers": 0}, "max_workers must be at least 1"),
+        ({"interval": 60, "offset": 60}, "offset must satisfy"),
+    ],
+)
+def test_planner_rejects_bad_values(values, fragment):
+    with pytest.raises(ConfigurationError, match=fragment):
+        PlannerConfig.from_dict(values)
+
+
+def test_anchor_table_reaches_the_parser_as_a_member():
+    s = SoilConfig.from_dict({"mesh": {}, "anchor": {"enabled": True, "sensors": {"x": {"r_vertical": 0.1}}}})
+    anchor = parse_anchor_config(s.configs.get_member("anchor", defaults={}))
+    assert anchor.enabled is True
+    assert anchor.sensors["x"].r_vertical == 0.1
 
 
 # --------------------------------------------------------------------------- schema
@@ -234,10 +302,11 @@ def test_shading_surface_azimuth_defaults_per_mode():
     assert ShadingConfig.from_dict({"mode": "trackable", "surface_azimuth": 90.0}).resolved_surface_azimuth() == 90.0
 
 
-def test_plot_interval_accepts_seconds_as_a_number():
-    assert PlotConfig.from_dict({"interval": 600}).interval == pd.Timedelta(seconds=600)
+def test_plot_interval_is_a_duration_string():
     assert PlotConfig.from_dict({"interval": "30min"}).interval == pd.Timedelta(minutes=30)
     assert PlotConfig.from_dict().interval == pd.Timedelta(hours=1)
+    with pytest.raises(ConfigurationError, match="durations must be strings"):
+        PlotConfig.from_dict({"interval": 600})
 
 
 def test_plot_dir_is_optional():

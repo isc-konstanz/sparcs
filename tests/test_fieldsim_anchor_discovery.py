@@ -57,14 +57,11 @@ def _moisture_without_geometry(key: str) -> SoilMoisture:
     return comp
 
 
-def _field_components(*comps) -> SimpleNamespace:
-    return SimpleNamespace(components={c._key: c for c in comps})
-
-
 def _field(*comps) -> FieldSimulation:
+    """A field simulation whose parent field's ``soil`` yields ``comps``."""
     field = object.__new__(FieldSimulation)
     field._name = "test_field_simulation"
-    field._Registrator__context = _field_components(*comps)
+    field._Registrator__context = SimpleNamespace(soil=list(comps))
     return field
 
 
@@ -81,16 +78,15 @@ def test_discovery_resolves_sibling_from_configure_time_state_only():
     sensor = _moisture("bay1_30cm")
     unconnected = _moisture("bay1_60cm", depth=60.0, connected=False)
 
-    sensors, channels, data, failures = _field(sensor, unconnected)._discover_sensors()
+    sensors, channels, failures = _field(sensor, unconnected)._discover_sensors()
 
     assert [s.key for s in sensors] == ["bay1_30cm"]
     assert failures == []
     assert channels["bay1_30cm"] is sensor.data[SoilMoisture.WATER_TENSION]
-    assert data["bay1_30cm"] is sensor.data
 
 
 def test_discovered_sensor_carries_its_geometry():
-    (sensor,), _, _, _ = _field(_moisture("bay1_60cm", depth=60.0, x_offset=25.0))._discover_sensors()
+    (sensor,), _, _ = _field(_moisture("bay1_60cm", depth=60.0, x_offset=25.0))._discover_sensors()
 
     assert (sensor.x_offset_cm, sensor.depth_cm) == (25.0, 60.0)
 
@@ -99,7 +95,7 @@ def test_discovered_sensor_carries_its_geometry():
 
 
 def test_validate_passes_with_a_discovered_sensor():
-    sensors, _, _ = _validate(_field(_moisture("bay1_30cm")))
+    sensors, _ = _validate(_field(_moisture("bay1_30cm")))
 
     assert [s.key for s in sensors] == ["bay1_30cm"]
 
@@ -152,7 +148,7 @@ def test_discovery_only_mode_never_raises(caplog):
     field = _field(_moisture("bay1_30cm"), _moisture_without_geometry("bay9_broken"))
 
     with caplog.at_level(logging.ERROR):
-        sensors, _, _ = _validate(field, anchor_enabled=False)
+        sensors, _ = _validate(field, anchor_enabled=False)
     assert any("failed to derive an anchor sensor" in m for m in caplog.messages)
     assert [s.key for s in sensors] == ["bay1_30cm"]
 
@@ -163,7 +159,7 @@ def test_discovery_only_mode_never_raises(caplog):
 
     crashing._discover_sensors = _boom
     with caplog.at_level(logging.ERROR):
-        assert _validate(crashing, anchor_enabled=False) == ([], {}, {})
+        assert _validate(crashing, anchor_enabled=False) == ([], {})
     assert any("discovery failed" in m for m in caplog.messages)
 
 
@@ -172,7 +168,7 @@ def test_validate_noop_when_discovery_disabled():
     calls = []
     field._discover_sensors = lambda: calls.append(1)
 
-    assert field._discover_and_validate_sensors(False, False) == ([], {}, {})
+    assert field._discover_and_validate_sensors(False, False) == ([], {})
     assert calls == []
 
 

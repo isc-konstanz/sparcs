@@ -14,7 +14,7 @@ import datetime as dt
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, Iterable, Mapping, Optional, Sequence
+from typing import Any, ClassVar, Iterable, Mapping, Optional
 
 from lories.core import ConfigurationError
 from lories.core.configs.configurations import Configurations
@@ -43,7 +43,13 @@ _NO_CONF_DIR = Path(tempfile.gettempdir(), "fieldsim-no-conf-dir")
 class Config(Configurator):
     """Base for all fieldsim sections: strict keys, typed sub-sections, schema, from_dict."""
 
-    _CONFIGS_RESERVED_KEYS: ClassVar[frozenset] = Configurator._CONFIGS_RESERVED_KEYS | {"type", "data"}
+    _CONFIGS_RESERVED_KEYS: ClassVar[frozenset] = Configurator._CONFIGS_RESERVED_KEYS | {
+        "type",
+        "data",
+        "components",
+        "connectors",
+        "converters",
+    }
     # Child sections handled by other Config classes (set per class).
     _CONFIGS_CHILD_KEYS: ClassVar[Iterable[str]] = ()
     # attribute -> section class, for tables declared with section()
@@ -113,7 +119,7 @@ class Config(Configurator):
         return instance
 
     def values(self) -> dict[str, Any]:
-        return {attr: getattr(self, attr) for attr in type(self).__config_parameters__}
+        return {param._resolve_key(): getattr(self, attr) for attr, param in type(self).__config_parameters__.items()}
 
 
 def section(key: str, *, required: bool = False, desc: Optional[str] = None) -> ParameterGroup:
@@ -178,17 +184,6 @@ class PlotConfig(Config):
         type=int, default=3, min=1, desc="Consecutive render failures before plotting stops"
     )
 
-    @classmethod
-    def _assert_configs(cls, configs: Optional[Configurations]) -> Optional[Configurations]:
-        configs = super()._assert_configs(configs)
-        if configs is None:
-            return None
-        interval = configs.get("interval", default=None)
-        if isinstance(interval, (int, float)) and not isinstance(interval, bool):
-            # A bare number is seconds; DurationParameter only reads strings.
-            configs.set("interval", f"{int(round(float(interval)))}s", replace=True)
-        return configs
-
 
 class MeshConfig(Config):
     """``[soil_simulation.mesh]``: the 2D bay cross-section handed to Gmsh."""
@@ -198,7 +193,7 @@ class MeshConfig(Config):
     width = Parameter(
         type=float, default=None, required=False, desc="Cross-section width (m); defaults to the field bay_width"
     )
-    height = Parameter(type=float, default=5.0, min=0.0, desc="Cross-section depth (m)")
+    height = Parameter(type=float, default=5.0, validator=_positive, desc="Cross-section depth (m), > 0")
     plant_width = Parameter(type=float, default=2.0, min=0.0, desc="Root zone width in the bay centre (m)")
     plant_height = Parameter(type=float, default=2.0, min=0.0, desc="Root zone depth in the bay centre (m)")
     watering_width = Parameter(type=float, default=1.0, min=0.0, desc="Drip strip width (m); keep >= dl")
@@ -222,8 +217,6 @@ class MeshConfig(Config):
     def _check_segments(self, width: float) -> None:
         if width < self.plant_width + 2 * self.dx:
             raise ConfigurationError("mesh.width must be at least plant_width + 2 * d_x")
-        if self.height <= 0:
-            raise ConfigurationError("mesh.height must be positive")
         if self.height <= self.plant_height:
             raise ConfigurationError("mesh.height must be greater than plant_height")
         half_width = (width - self.plant_width) / 2
@@ -249,13 +242,6 @@ class DripConfig(Config):
     def design_flow_lpm(self) -> float:
         return self.nozzle_count * self.nozzle_flow_lph / 60.0
 
-    def override(self, values: Mapping[str, Any]) -> DripConfig:
-        """A copy with the given keys replaced."""
-        merged = {**self.values(), **dict(values)}
-        out = DripConfig.from_dict(merged)
-        out.explicit = self.explicit
-        return out
-
 
 # --------------------------------------------------------------------------- component sections
 
@@ -280,28 +266,24 @@ class SoilConfig(Config):
         key="testing", desc="[testing] rig-only options: history_window, poll_interval (passthrough)"
     )
     total_drip_line_length_m = Parameter(
-        type=float, default=1.0, min=0.0, desc="Total drip line length under the mesh (m)"
+        type=float, default=1.0, validator=_positive, desc="Total drip line length under the mesh (m), > 0"
     )
     discover_sensor_probes = Parameter(
         type=bool, default=False, desc="Register a probe per discovered SoilMoisture sensor"
     )
     plot_structure = Parameter(type=bool, default=False, desc="Render the mesh structure plot once at configure")
 
-    # derived by the adapter from [probes.points.*] and sensor discovery
-    probe_specs: Sequence[Any] = ()
-
     def _on_configure(self, configs: Configurations) -> None:
         if self.drip is None:
             self.drip = DripConfig.from_dict()
             self.drip.explicit = False
-        if self.total_drip_line_length_m <= 0:
-            raise ConfigurationError("total_drip_line_length_m must be positive")
 
 
 class PlannerConfig(Config):
-    """``[soil_predictor]``: its ``[drip]`` is a per-key override of the sim's."""
+    """``[soil_predictor]``: its ``[drip]`` defaults per key to the sim's."""
 
     _CONFIGS_RESERVED_KEYS = Config._CONFIGS_RESERVED_KEYS | {"plot"}
+    _SECTIONS = {"drip": DripConfig}
 
     windows = ParameterGroup(key="windows", desc="[windows.<name>] start time and durations (passthrough)")
     interval = Parameter(type=int, default=1440, min=1, desc="Planner schedule cadence (minutes)")
@@ -328,18 +310,21 @@ class PlannerConfig(Config):
     # no min bound: lories compares a None default against min (TypeError)
     max_workers = Parameter(type=int, default=None, required=False, desc="Pool size; default cpu_count - 1")
     logger = Parameter(type=str, default=None, required=False, desc="Logger connector id for the forecast tables")
-    drip = ParameterGroup(
-        key="drip",
-        desc="[drip] per-key override of [soil_simulation.drip]",
-        children=[
-            Parameter(key="nozzle_count", type=int, required=False, min=1, desc="Number of drip nozzles"),
-            Parameter(key="nozzle_flow_lph", type=float, required=False, min=0.0, desc="Flow per nozzle (l/h)"),
-        ],
-    )
+    drip = section("drip", desc="[drip] the planner's drip layout; unset keys fall back to [soil_simulation.drip]")
 
-    def drip_override(self) -> dict[str, Any]:
-        """Only the keys the table restates; absent table -> empty."""
-        return {k: v for k, v in (self.drip or {}).items() if v is not None}
+    def _on_configure(self, configs: Configurations) -> None:
+        if len(self.windows) > self.max_windows:
+            raise ConfigurationError(f"{len(self.windows)} windows configured, max_windows is {self.max_windows}")
+        if self.max_workers is not None and self.max_workers < 1:
+            raise ConfigurationError("max_workers must be at least 1")
+        if not 0 <= self.offset < self.interval:
+            raise ConfigurationError("offset must satisfy 0 <= offset < interval")
+
+
+class EvapotranspirationConfig(Config):
+    """``[evapotranspiration]``: no keys of its own; its ``.d`` file carries only channels."""
+
+    _CONFIGS_RESERVED_KEYS = Config._CONFIGS_RESERVED_KEYS | {"plot"}
 
 
 class FieldConfig(Config):
@@ -387,12 +372,4 @@ class FieldSetup:
     shading: Any  # shading.ShadingConfig; typed Any to avoid an import cycle
     planner: Optional[PlannerConfig] = None
     plots: Optional[PlotConfig] = None
-    model: Any = None  # resolved [soil_simulation.model] over field-level [model]
     location: Any = None  # lories Location of the field; None offline
-
-    @property
-    def planner_drip(self) -> DripConfig:
-        """The predictor's drip layout: its per-key override over the sim's."""
-        if self.planner is None:
-            return self.soil.drip
-        return self.soil.drip.override(self.planner.drip_override())

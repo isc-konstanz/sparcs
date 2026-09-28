@@ -3,10 +3,11 @@
 sparcs.components.agriculture.fieldsim.core
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Pure layer: config (lories Parameter declarations), state, engine, shading,
+Config sections (lories Configurators), state, engine, shading,
 evapotranspiration, plots, chain, assimilator, planner, and the simulation
-session that composes them. Imports lories' config machinery only.
-No channels, no components, no threads, no I/O.
+session that composes them. Nothing here reads or writes channels or starts a
+thread; the one file it writes is the Gmsh mesh, and ``pde`` also holds
+``SoilBase``, the component base the ``simulation`` package builds on.
 """
 
 from . import (  # noqa: F401
