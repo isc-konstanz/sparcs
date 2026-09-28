@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""tests.test_fieldsim_anchor_history
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_anchor_history
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``latest_reading_at`` is the lookup every assimilation backend calls per step:
 given a per-sensor tension series (range-read once per tick), return the

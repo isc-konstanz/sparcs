@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-sparcs.components.agriculture.simulation._predictor_tables
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+sparcs.components.agriculture.fieldsim.forecast_tables
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Forecast-table persistence extracted from ``SoilPredictor``: the four
+Forecast-table persistence for ``SoilPredictor``: the four
 persisted tables' channel registrations, frame builders, and the shared
 direct-write path. ``ForecastTablePublisher`` is a PER-CALL view over the
 predictor instance -- it reads ``predictor.data`` / ``predictor.connectors``
 / ``predictor._logger_id`` etc. live through the predictor at use time,
-never copying at configure time: the pin files monkeypatch
+never copying at configure time: the forecast-table tests monkeypatch
 ``SoilPredictor.data``/``.connectors`` as class properties, stub
 collaborators as instance attributes, and assert the write-failure
 counters on the predictor. Every cross-method dispatch below therefore
@@ -16,7 +16,7 @@ goes back THROUGH the predictor's bound ``_x`` delegate names (so
 instance-attr overrides keep intercepting), and all mutable state
 (counters, key lists) stays predictor-resident. Table names and channel
 keys stay as ``SoilPredictor`` class constants (test-pinned); this module
-reads them off the instance. Nothing here imports ``soil_predictor`` at
+reads them off the instance. Nothing here imports ``components`` at
 runtime (would cycle).
 """
 

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""tests.test_fieldsim_components
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_components
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The lories layer of the fieldsim skeleton: ``Simulation.build`` assembling
 engine/chain/assimilator/planner from a configured ``FieldSetup`` (against
@@ -16,6 +17,7 @@ import io
 from types import SimpleNamespace
 
 import pytest
+from conftest import MESH_KW
 
 import numpy as np
 import pandas as pd
@@ -35,21 +37,11 @@ from sparcs.components.agriculture.simulation import SoilSimulation as LiveSoil
 
 UTC = dt.timezone.utc
 
-_MESH_KW = {
-    "dl": 0.2,
-    "width": 3.0,
-    "height": 1.5,
-    "plant_width": 1.0,
-    "plant_height": 0.5,
-    "watering_width": 0.5,
-    "d_x": 0.5,
-}
-
 
 def _soil_config(tmp_path, filename: str, **extra) -> SoilConfig:
     soil = SoilConfig.from_dict(
         {
-            "mesh": {**_MESH_KW, "filename": str(tmp_path / filename)},
+            "mesh": {**MESH_KW, "filename": str(tmp_path / filename)},
             "pde": {"dt": "600s", "dt_min": "30s"},
             "probes": {"points": {"strip": {"x_offset": 0.0, "depth": 30.0}}},
             **extra,

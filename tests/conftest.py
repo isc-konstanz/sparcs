@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
-"""sparcs.tests.conftest
-~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.conftest
+~~~~~~~~~~~~~~
 
-Shared fixtures for the solver-backed fieldsim tests: the standard
+Shared helpers and fixtures for the fieldsim tests: the standard test mesh
+kwargs, a minute ``Timedelta``, a ``Configurations`` loader, the standard
 small-mesh ``SoilPDECore`` recipe, a watering-strip probe, and the bare
 ``RolloutEngine`` factory the ladder/zero-window roll-out pins share.
 
@@ -11,6 +13,27 @@ module level, so collecting or running the fast tests stays light.
 """
 
 import pytest
+
+import pandas as pd
+from lories import Configurations
+
+MESH_KW = {
+    "dl": 0.2,
+    "width": 3.0,
+    "height": 1.5,
+    "plant_width": 1.0,
+    "plant_height": 0.5,
+    "watering_width": 0.5,
+    "d_x": 0.5,
+}
+
+
+def td(minutes: int) -> pd.Timedelta:
+    return pd.Timedelta(minutes=minutes)
+
+
+def load_configs(tmp_path, name="t.conf", **values) -> Configurations:
+    return Configurations.load(name, conf_dir=str(tmp_path), require=False, **values)
 
 
 @pytest.fixture(scope="module")
@@ -23,7 +46,6 @@ def pde_core_factory(tmp_path_factory):
     ``dt`` stays parameterizable -- ``test_soil_core_integration.py`` keeps
     its own dt='50s' fixture.
     """
-    from lories import Configurations
     from sparcs.components.agriculture.fieldsim.core.pde import (
         MeshConfig,
         PDEConfig,
@@ -33,34 +55,10 @@ def pde_core_factory(tmp_path_factory):
 
     def make_core(subdir: str, dt: str = "30s", **ode_values) -> SoilPDECore:
         tmp_path = tmp_path_factory.mktemp(subdir)
-
-        def _configs(**values) -> Configurations:
-            return Configurations.load(
-                "test.conf",
-                conf_dir=str(tmp_path),
-                require=False,
-                **values,
-            )
-
         mesh_config = MeshConfig(
-            _configs(
-                filename=str(tmp_path / "soil_test.msh"),
-                dl=0.2,
-                width=3.0,
-                height=1.5,
-                plant_width=1.0,
-                plant_height=0.5,
-                watering_width=0.5,
-                d_x=0.5,
-            )
+            load_configs(tmp_path, "test.conf", filename=str(tmp_path / "soil_test.msh"), **MESH_KW)
         )
-        ode_config = PDEConfig(
-            _configs(
-                dt=dt,
-                dt_min="1s",
-                **ode_values,
-            )
-        )
+        ode_config = PDEConfig(load_configs(tmp_path, "test.conf", dt=dt, dt_min="1s", **ode_values))
         ensure_mesh(mesh_config)
         return SoilPDECore(mesh_config, ode_config, rel_sat_name="Se_test")
 

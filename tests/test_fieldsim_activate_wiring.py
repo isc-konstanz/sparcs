@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""tests.test_fieldsim_activate_wiring
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_activate_wiring
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 What the field wires up before the ticker starts: the field-level ``[plot]``
 block cascades into every child as its default, a configured irrigation with

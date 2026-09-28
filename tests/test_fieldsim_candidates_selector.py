@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""sparcs.tests.test_fieldsim_candidates_selector
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_candidates_selector
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Candidate scoring and selection: ``score_candidate`` (RMS-to-setpoint),
 ``select_candidate`` (argmin, least-water tie-break) for both grid modes,
@@ -10,6 +11,7 @@ and the planner's Se -> signed water tension conversion.
 import types
 
 import pytest
+from conftest import td
 
 import numpy as np
 import pandas as pd
@@ -18,10 +20,6 @@ from sparcs.components.agriculture.fieldsim.core.planner import IrrigationPlanne
 from sparcs.components.agriculture.soil.models import Genuchten
 
 _TZ = "Europe/Berlin"
-
-
-def _td(minutes: int) -> pd.Timedelta:
-    return pd.Timedelta(minutes=minutes)
 
 
 def _trajectory(probe_values: dict) -> tuple:
@@ -112,7 +110,7 @@ def _single_value_trajectories(tensions: dict) -> dict:
 def test_select_picks_candidate_closest_to_setpoint(grid_mode):
     """Both grid modes reduce to the same rule: the argmin of the RMS-to-setpoint
     score, i.e. the rung whose tension sits closest to threshold_hpa."""
-    ladder = [(_td(0),), (_td(30),), (_td(60),)]
+    ladder = [(td(0),), (td(30),), (td(60),)]
     # scores |v - 300| = 200, 20, 200 -> the middle rung is closest.
     trajectories = _single_value_trajectories({ladder[0]: 500.0, ladder[1]: 320.0, ladder[2]: 100.0})
 
@@ -122,7 +120,7 @@ def test_select_picks_candidate_closest_to_setpoint(grid_mode):
 def test_select_returns_zero_rung_when_it_tracks_setpoint_best():
     """When doing nothing already sits closest to the setpoint, the all-0min rung
     is chosen -- watering would only overshoot wet."""
-    ladder = [(_td(0),), (_td(30),), (_td(60),)]
+    ladder = [(td(0),), (td(30),), (td(60),)]
     trajectories = _single_value_trajectories({ladder[0]: 300.0, ladder[1]: 220.0, ladder[2]: 120.0})
 
     assert select_candidate(ladder, trajectories, ["root_20"], 300.0, grid_mode="fill_order") == ladder[0]
@@ -131,7 +129,7 @@ def test_select_returns_zero_rung_when_it_tracks_setpoint_best():
 def test_select_tie_breaks_on_least_total_water():
     """Two rungs equidistant from the setpoint (equal score) -> the one with less
     total watering wins, for a deterministic pick."""
-    ladder = [(_td(0), _td(0)), (_td(30), _td(0)), (_td(30), _td(30))]
+    ladder = [(td(0), td(0)), (td(30), td(0)), (td(30), td(30))]
     # 250 and 350 both score |. - 300| = 50; the all-zero rung is far (score 200).
     trajectories = _single_value_trajectories({ladder[0]: 100.0, ladder[1]: 250.0, ladder[2]: 350.0})
 
@@ -144,7 +142,7 @@ def test_select_empty_ladder_raises():
 
 
 def test_select_unknown_grid_mode_raises():
-    ladder = [(_td(0),)]
+    ladder = [(td(0),)]
     trajectories = _single_value_trajectories({ladder[0]: 300.0})
     with pytest.raises(ValueError, match="Unknown grid_mode"):
         select_candidate(ladder, trajectories, ["root_20"], 300.0, grid_mode="bogus")

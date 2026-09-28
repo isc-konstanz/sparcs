@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-sparcs.components.agriculture.simulation._anchor_runtime
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+sparcs.components.agriculture.fieldsim.anchor_runtime
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Anchor lifecycle extracted from ``SoilSimulation``: ``[anchor]`` config
 parsing, sensor-probe discovery, the per-tick ranged history read with its

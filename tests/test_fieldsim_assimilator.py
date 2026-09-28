@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""sparcs.tests.test_fieldsim_assimilator
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_assimilator
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``Assimilator`` over a synthetic two-cell field: ``parse_anchor_config``
 parity with the live parser, ``ingest``/``update`` blending fresh tensiometer

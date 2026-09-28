@@ -1,19 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-sparcs.components.agriculture.simulation._predictor_rollout
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+sparcs.components.agriculture.fieldsim.core.rollout
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Roll-out executor extracted from ``SoilPredictor``: the sequential
-prefix-shared caterpillar, the independent reference roll, the parallel
-spawn-pool executor, and the module-level spawn workers. ``RolloutEngine``
-is a per-call struct of the rollout inputs; ``SoilPredictor`` keeps
-``_roll_segment`` / ``_rollout_ladder`` / ``_rollout_independent`` /
-``_rollout_parallel`` as thin delegates that assemble an engine per call
-from the instance's loose attributes, and ``_rollout_dispatch`` (the
-parallel-vs-caterpillar routing) stays on the predictor. Nothing in this
-module imports ``soil_predictor`` (would cycle); the spawn workers
-therefore rebuild a ``RolloutEngine`` -- not a ``SoilPredictor`` -- in
-``_worker_init``.
+Roll-out executor for the planner: the sequential prefix-shared caterpillar,
+the independent reference roll, the parallel spawn-pool executor, and the
+module-level spawn workers. ``RolloutEngine`` is a per-call struct of the
+rollout inputs that ``IrrigationPlanner`` assembles per roll-out call; the
+spawn workers rebuild a ``RolloutEngine`` in ``_worker_init``.
 """
 
 from __future__ import annotations

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""sparcs.tests.test_fieldsim_config
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_config
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Config sections of the ``fieldsim`` skeleton: resolution, strict keys, typed
 sub-sections, schema, live-aligned defaults and a conf loaded from disk.

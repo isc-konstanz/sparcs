@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""sparcs.tests.test_fieldsim_et_terms
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_et_terms
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Physics guards for the Penman-Monteith term helpers.
 

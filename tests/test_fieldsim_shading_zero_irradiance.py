@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""sparcs.tests.test_fieldsim_shading_zero_irradiance
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_shading_zero_irradiance
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Regression pins for the zero-irradiance NaN stall (copperhead 2026-07-23): the
 Perez transposition is undefined at DHI=0, so a sun-up twilight row with

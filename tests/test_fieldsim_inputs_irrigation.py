@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""tests.test_fieldsim_inputs_irrigation
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_inputs_irrigation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Irrigation enters the soil PDE as a time series read from its connector, not
 as a latch: ``ChannelInputs`` reads the raw metered flow (reaching back before

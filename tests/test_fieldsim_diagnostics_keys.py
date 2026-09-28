@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""sparcs.tests.test_fieldsim_diagnostics_keys
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_diagnostics_keys
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The water-balance diagnostic Constants keep their short keys under
 ``context="water"``: the bare key is the channel key and the

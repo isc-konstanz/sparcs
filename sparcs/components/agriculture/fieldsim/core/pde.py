@@ -1,14 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-sparcs.components.agriculture.simulation._soil
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+sparcs.components.agriculture.fieldsim.core.pde
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Shared base for the soil simulation chain: mesh / PDE / plot config
-dataclasses, the FiPy Richards-equation core (``SoilPDECore``), shared
-diagnostic math (``SoilBase``), and mesh-generation / probe helpers.
-
-Both :class:`SoilSimulation` (live solver) and :class:`SoilPredictor`
-(forecast roll-outs) inherit from :class:`SoilBase`.
+Mesh / PDE / drip config dataclasses, the FiPy Richards-equation core
+(``SoilPDECore``), the mesh-generation / probe helpers, and ``SoilBase``, the
+component base with the shared diagnostic math.
 """
 
 from __future__ import annotations

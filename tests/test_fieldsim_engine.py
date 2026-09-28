@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""sparcs.tests.test_fieldsim_engine
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_engine
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``SoilEngine`` over the live ``SoilPDECore``. Heavy (Gmsh + FiPy): marked slow.
 """
@@ -10,6 +11,7 @@ import io
 import types
 
 import pytest
+from conftest import MESH_KW
 
 import numpy as np
 
@@ -24,21 +26,11 @@ from sparcs.components.agriculture.fieldsim.core.state import Forcing, SoilState
 
 UTC = dt.timezone.utc
 
-_MESH_KW = {
-    "dl": 0.2,
-    "width": 3.0,
-    "height": 1.5,
-    "plant_width": 1.0,
-    "plant_height": 0.5,
-    "watering_width": 0.5,
-    "d_x": 0.5,
-}
-
 
 def _soil_config(tmp_path, filename: str, **pde_values) -> SoilConfig:
     soil = SoilConfig.from_dict(
         {
-            "mesh": {**_MESH_KW, "filename": str(tmp_path / filename)},
+            "mesh": {**MESH_KW, "filename": str(tmp_path / filename)},
             "pde": {"dt": "30s", "dt_min": "1s", **pde_values},
         }
     )
@@ -53,7 +45,7 @@ def engine(tmp_path) -> SoilEngine:
 
 
 def test_build_rejects_undrived_mesh_width():
-    mesh_kw = {k: v for k, v in _MESH_KW.items() if k != "width"}
+    mesh_kw = {k: v for k, v in MESH_KW.items() if k != "width"}
     soil = SoilConfig.from_dict({"mesh": mesh_kw, "pde": {"dt": "30s", "dt_min": "1s"}})
     assert soil.mesh.width is None
     with pytest.raises(ValueError, match="mesh.width"):
@@ -238,7 +230,7 @@ def test_cancel_holds_input_state_then_resumes(engine):
 def test_tension_at_probe(tmp_path):
     soil = SoilConfig.from_dict(
         {
-            "mesh": {**_MESH_KW, "filename": str(tmp_path / "soil_probe.msh")},
+            "mesh": {**MESH_KW, "filename": str(tmp_path / "soil_probe.msh")},
             "pde": {"dt": "30s", "dt_min": "1s"},
             "probes": {"points": {"strip": {"x_offset": 0.0, "depth": 30.0}}},
         }

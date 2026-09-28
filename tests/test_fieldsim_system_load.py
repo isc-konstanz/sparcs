@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""tests.test_fieldsim_system_load
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_system_load
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 A copperhead-shaped conf tree loaded through ``sparcs.load()``: the field
 simulation configures under a real ``lories`` system, its probe and
@@ -8,7 +9,9 @@ forecast-table channels exist before any connector connects, and ``activate``
 starts the ticker from the system's weather and location. ``ChannelOutputs``
 hands every row of a chunk to the real channels. A duplicate probe
 ``soil_id`` is refused at configure even without a predictor, and a system
-without weather is refused at activate.
+without weather is refused at activate. Tension-measured ``SoilMoisture``
+children of the field become sensor probes at activate and, with ``[anchor]``
+on, reach the assimilator.
 """
 
 import datetime as dt
@@ -296,3 +299,74 @@ def test_activation_without_weather_is_refused(tmp_path, load):
 
     with pytest.raises(ConfigurationUnavailableError, match="no weather"):
         simulation.activate()
+
+
+SENSOR_KEYS = {"soil_30cm", "soil_60cm"}
+
+
+def _add_soil_sensors(root) -> None:
+    """Two tension-measured ``SoilMoisture`` children under the field, declared the
+    way copperhead does: ``[soil]`` on the field and one ``soil_<n>.conf`` per sensor."""
+    with (root / "conf" / "agri_pv.d" / "field_1.conf").open("a", encoding="utf-8") as field:
+        field.write("\n[soil.data.channels.logger]\nenabled = false\n")
+    for n, depth in ((1, 30), (2, 60)):
+        _write(
+            root / "conf" / "agri_pv.d" / "field_1.d" / f"soil_{n}.conf",
+            f"""
+key = "soil_{depth}cm"
+name = "Soil {depth}cm"
+depth = {depth}
+
+[data.channels]
+soil_id = {n + 2}
+
+[data.channels.temp]
+logger.enabled = false
+
+[data.channels.water_content]
+logger.enabled = false
+
+[data.channels.water_tension]
+type = "float"
+connector = "csv"
+logger.enabled = false
+
+[data.channels.water_supply]
+logger.enabled = false
+""",
+        )
+
+
+def test_sensor_probes_are_discovered_from_the_field_soil_children(tmp_path, load):
+    _add_soil_sensors(tmp_path)
+    soil_conf = _children_dir(tmp_path) / "soil_simulation.conf"
+    text = soil_conf.read_text(encoding="utf-8")
+    soil_conf.write_text(text.replace("[mesh]\n", "discover_sensor_probes = true\n\n[mesh]\n", 1), encoding="utf-8")
+    simulation = load().components.get_first(FieldSimulation)
+
+    simulation.activate()
+    try:
+        assert {probe.channel_id for probe in simulation.simulation.probes} == {"strip"} | SENSOR_KEYS
+        assert not any(key in simulation.soil_simulation.data for key in SENSOR_KEYS)
+        assert not simulation.simulation.assimilator.enabled
+    finally:
+        simulation.deactivate()
+
+
+def test_anchor_sensors_reach_the_assimilator(tmp_path, load):
+    _add_soil_sensors(tmp_path)
+    soil_conf = _children_dir(tmp_path) / "soil_simulation.conf"
+    overrides = "".join(f"\n[anchor.sensors.{key}]\nr_vertical = 0.1\n" for key in SENSOR_KEYS)
+    anchor = "[anchor]\nenabled = true\n" + overrides
+    text = soil_conf.read_text(encoding="utf-8")
+    soil_conf.write_text(text.replace("[anchor]\nenabled = false\n", anchor, 1), encoding="utf-8")
+    simulation = load().components.get_first(FieldSimulation)
+
+    simulation.activate()
+    try:
+        assimilator = simulation.simulation.assimilator
+        assert assimilator.enabled
+        assert {sensor.key for sensor in assimilator.sensors} == SENSOR_KEYS
+        assert set(assimilator.config.sensors) == SENSOR_KEYS
+    finally:
+        simulation.deactivate()

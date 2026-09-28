@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""tests.test_fieldsim_inputs_weather
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_inputs_weather
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``ChannelInputs``' weather span: the read goes through the connector (never a
 logger) with columns named by channel key, the frame is trimmed to

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""sparcs.tests.test_fieldsim_forecast_logger
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_forecast_logger
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``SoilPredictor.activate`` refuses a ``logger`` id that resolves to nothing or to a
 connector without ``write()``; unset stays a no-op. A bare id resolves up the

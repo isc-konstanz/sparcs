@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""sparcs.tests.test_fieldsim_rollout_parallel
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_rollout_parallel
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The parallel independent-roll executor: ``IrrigationPlanner.rollout``'s routing
 and graceful degrade, ``_worker_init``'s one-core pin, ``rollout_parallel``'s
@@ -19,19 +20,10 @@ import pytest
 
 import numpy as np
 import pandas as pd
-from lories import Configurations
 from lories.components.weather import Weather
 from sparcs.components.agriculture.fieldsim.core import rollout as _rollout
 from sparcs.components.agriculture.fieldsim.core.candidates import WateringWindow, build_candidate_grid
 from sparcs.components.agriculture.fieldsim.core.config import PlannerConfig
-from sparcs.components.agriculture.fieldsim.core.pde import (
-    MeshConfig,
-    PDEConfig,
-    ProbeSpec,
-    SoilPDECore,
-    _coords_to_cell,
-    ensure_mesh,
-)
 from sparcs.components.agriculture.fieldsim.core.planner import IrrigationPlanner
 from sparcs.components.agriculture.fieldsim.core.rollout import RolloutEngine
 
@@ -347,41 +339,8 @@ WATERING = "WateringTopSegment"
 _EXTREME_FLOW = 2000.0e-3 / 3600.0 * 0.5
 
 
-def _configs(tmp_dir, **values):
-    return Configurations.load("test.conf", conf_dir=str(tmp_dir), require=False, **values)
-
-
-def _build_core(tmp_dir, dt="30s"):
-    mesh_config = MeshConfig(
-        _configs(
-            tmp_dir,
-            filename=str(tmp_dir / "soil_test.msh"),
-            dl=0.2,
-            width=3.0,
-            height=1.5,
-            plant_width=1.0,
-            plant_height=0.5,
-            watering_width=0.5,
-            d_x=0.5,
-        )
-    )
-    ode_config = PDEConfig(_configs(tmp_dir, dt=dt, dt_min="1s"))
-    ensure_mesh(mesh_config)
-    return SoilPDECore(mesh_config, ode_config, rel_sat_name="Se_test")
-
-
-def _strip_probe(core):
-    idx = _coords_to_cell(core.mesh, core.mesh_config, x_offset_cm=0.0, depth_cm=5.0)
-    return ProbeSpec(
-        name="watering strip probe",
-        channel_id="strip",
-        cell_indices=np.array([idx], dtype=int),
-        weights=np.array([1.0]),
-    )
-
-
 @pytest.mark.slow
-def test_parallel_equals_caterpillar_solver_backed(tmp_path):
+def test_parallel_equals_caterpillar_solver_backed(pde_core_factory, strip_probe_factory):
     """For a small fill_order ladder, the parallel executor's
     ``{candidate: trajectory}`` map equals the sequential caterpillar's within
     solver tolerance: a wall-time win, not a change to what is stored."""
@@ -405,11 +364,11 @@ def test_parallel_equals_caterpillar_solver_backed(tmp_path):
     ]
     ladder = build_candidate_grid(window_durations, grid_mode="fill_order")
 
-    core = _build_core(tmp_path)
+    core = pde_core_factory("parallel")
     ic_rel_sat = core.snapshot()
     engine = RolloutEngine(
         pde=core,
-        probes=[_strip_probe(core)],
+        probes=[strip_probe_factory(core)],
         windows=windows,
         window_durations=window_durations,
         flow_m3s=_EXTREME_FLOW,

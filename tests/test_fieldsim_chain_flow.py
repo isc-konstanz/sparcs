@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""sparcs.tests.test_fieldsim_chain_flow
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_chain_flow
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Irrigation flow normalisation and the once-only strip-flux guard of ``WeatherChain``.
 """

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import io
+import zipfile
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -35,13 +36,17 @@ def encode_state_blob(se: np.ndarray, se_old: np.ndarray, surface_h: Mapping[str
 
 def decode_state_blob(blob: bytes) -> tuple[np.ndarray, np.ndarray, dict[str, float]]:
     """Inverse of ``encode_state_blob``; a legacy blob carrying only ``rel_sat`` decodes with
-    ``rel_sat_old = rel_sat`` and no ponds. Raises ``ValueError`` for a blob that needs pickle."""
-    arrays = np.load(io.BytesIO(blob), allow_pickle=False)
-    se = np.asarray(arrays["rel_sat"], dtype=float)
-    se_old = np.asarray(arrays["rel_sat_old"], dtype=float) if "rel_sat_old" in arrays.files else se.copy()
-    surface_h: dict[str, float] = {}
-    if "surface_names" in arrays.files and "surface_h" in arrays.files:
-        surface_h = {str(n): float(v) for n, v in zip(arrays["surface_names"], arrays["surface_h"])}
+    ``rel_sat_old = rel_sat`` and no ponds. Raises ``ValueError`` for any blob that does not
+    decode: truncated, not an npz, without ``rel_sat``, or needing pickle."""
+    try:
+        arrays = np.load(io.BytesIO(blob), allow_pickle=False)
+        se = np.asarray(arrays["rel_sat"], dtype=float)
+        se_old = np.asarray(arrays["rel_sat_old"], dtype=float) if "rel_sat_old" in arrays.files else se.copy()
+        surface_h: dict[str, float] = {}
+        if "surface_names" in arrays.files and "surface_h" in arrays.files:
+            surface_h = {str(n): float(v) for n, v in zip(arrays["surface_names"], arrays["surface_h"])}
+    except (zipfile.BadZipFile, EOFError, OSError, KeyError) as e:
+        raise ValueError(f"undecodable simulation state blob: {e}") from e
     return se, se_old, surface_h
 
 

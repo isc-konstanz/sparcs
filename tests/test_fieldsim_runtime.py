@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""sparcs.tests.test_fieldsim_runtime
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_runtime
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Runtime layer of the ``fieldsim`` skeleton: ``FrameInputs`` slicing,
 ``Recorder`` frames, and the live tick policy of ``FieldRunner`` -- frontier
@@ -12,6 +13,7 @@ everything between them is the real code path.
 """
 
 import datetime as dt
+import io
 import itertools
 import logging
 from types import SimpleNamespace
@@ -25,7 +27,14 @@ from sparcs.components.agriculture.fieldsim.core.chain import WeatherChain
 from sparcs.components.agriculture.fieldsim.core.config import FieldConfig, FieldSetup, PlannerConfig, SoilConfig
 from sparcs.components.agriculture.fieldsim.core.evapotranspiration import SegmentProperties
 from sparcs.components.agriculture.fieldsim.core.simulation import Simulation
-from sparcs.components.agriculture.fieldsim.core.state import Forcing, Plan, SoilState, StepResult
+from sparcs.components.agriculture.fieldsim.core.state import (
+    Forcing,
+    Plan,
+    SoilState,
+    StepResult,
+    decode_state_blob,
+    encode_state_blob,
+)
 from sparcs.components.agriculture.fieldsim.runtime.memory import FrameInputs, Recorder
 from sparcs.components.agriculture.fieldsim.runtime.runner import FieldRunner
 from sparcs.components.agriculture.fieldsim.runtime.scenario import ScenarioRunner
@@ -132,6 +141,14 @@ class _RecordingInputs(FrameInputs):
 class _UndecodableInputs(FrameInputs):
     def load_state(self):
         raise ValueError("Object arrays cannot be loaded when allow_pickle=False")
+
+
+class _TruncatedBlobInputs(FrameInputs):
+    """A persisted blob cut short mid-write."""
+
+    def load_state(self):
+        at = dt.datetime(2026, 9, 20, 10, tzinfo=UTC)
+        return SoilState.from_blob(_state_at(at).to_blob()[:200], at)
 
 
 class _FlakyRecorder(Recorder):
@@ -539,7 +556,7 @@ def test_irrigation_samples_are_aligned_onto_the_weather_rows():
     assert list(runner.simulation.chain.flows[-1]) == [2.0, 2.0, 0.0]
 
 
-@pytest.mark.parametrize("cause", ["cell count", "undecodable"])
+@pytest.mark.parametrize("cause", ["cell count", "undecodable", "truncated"])
 def test_an_incompatible_persisted_state_cold_starts_with_a_warning(caplog, cause):
     setup = _setup(planner=False)
     rec = Recorder()
@@ -547,8 +564,10 @@ def test_an_incompatible_persisted_state_cold_starts_with_a_warning(caplog, caus
     if cause == "cell count":
         stale = SoilState(np.full(5, 0.4), np.full(5, 0.4), {}, dt.datetime(2026, 9, 20, 10, tzinfo=UTC))
         inputs = FrameInputs(weather=weather, state=stale)
-    else:
+    elif cause == "undecodable":
         inputs = _UndecodableInputs(weather=weather)
+    else:
+        inputs = _TruncatedBlobInputs(weather=weather)
     runner = _runner(setup, None, rec, inputs=inputs)
 
     with caplog.at_level(logging.WARNING, logger=RUNNER_LOGGER):
@@ -571,6 +590,24 @@ def test_an_incompatible_restore_is_dropped_with_a_warning(caplog):
 
     assert sum("incompatible" in r.message for r in caplog.records) == 1
     assert [s.state.at.hour for s in rec.rows] == [13, 14]
+
+
+def _blob_without_rel_sat() -> bytes:
+    buf = io.BytesIO()
+    np.savez(buf, rel_sat_old=np.full(3, 0.4))
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize(
+    "blob",
+    [
+        pytest.param(encode_state_blob(np.full(3, 0.4), np.full(3, 0.4), {})[:200], id="truncated"),
+        pytest.param(_blob_without_rel_sat(), id="no rel_sat"),
+    ],
+)
+def test_decode_state_blob_raises_value_error_for_an_undecodable_blob(blob):
+    with pytest.raises(ValueError):
+        decode_state_blob(blob)
 
 
 def test_an_empty_chunk_inside_the_span_does_not_stop_the_tick():

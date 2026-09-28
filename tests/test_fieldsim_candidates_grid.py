@@ -1,20 +1,17 @@
 # -*- coding: utf-8 -*-
-"""sparcs.tests.test_fieldsim_candidates_grid
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_candidates_grid
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``build_candidate_grid`` (fill-order ladder and full product) and the
 ``combo_cap`` fail-fast check.
 """
 
 import pytest
+from conftest import td
 
 import pandas as pd
 from sparcs.components.agriculture.fieldsim.core.candidates import build_candidate_grid, check_candidate_cap
-
-
-def _td(minutes: int) -> pd.Timedelta:
-    return pd.Timedelta(minutes=minutes)
-
 
 # --- fill_order ladder generation --------------------------------------------
 
@@ -24,25 +21,25 @@ def test_fill_order_two_windows_sweep_then_mesh_longest():
     then mesh window 0's max with window 1's non-zero sweep. Order matters: the
     ladder is generated fill-earlier-first, so this asserts the exact sequence."""
     window_durations = [
-        [_td(0), _td(30), _td(60)],
-        [_td(0), _td(30), _td(60)],
+        [td(0), td(30), td(60)],
+        [td(0), td(30), td(60)],
     ]
 
     ladder = build_candidate_grid(window_durations, grid_mode="fill_order")
 
     assert ladder == [
-        (_td(0), _td(0)),
-        (_td(30), _td(0)),
-        (_td(60), _td(0)),
-        (_td(60), _td(30)),
-        (_td(60), _td(60)),
+        (td(0), td(0)),
+        (td(30), td(0)),
+        (td(60), td(0)),
+        (td(60), td(30)),
+        (td(60), td(60)),
     ]
 
 
 def test_fill_order_total_water_strictly_increasing():
     window_durations = [
-        [_td(0), _td(30), _td(60)],
-        [_td(0), _td(30), _td(60)],
+        [td(0), td(30), td(60)],
+        [td(0), td(30), td(60)],
     ]
     ladder = build_candidate_grid(window_durations, grid_mode="fill_order")
 
@@ -54,20 +51,20 @@ def test_fill_order_total_water_strictly_increasing():
 def test_fill_order_drops_back_loaded_candidate():
     """(0min morning, 60min evening) is never generated -- front-load dominance."""
     window_durations = [
-        [_td(0), _td(30), _td(60)],
-        [_td(0), _td(30), _td(60)],
+        [td(0), td(30), td(60)],
+        [td(0), td(30), td(60)],
     ]
     ladder = build_candidate_grid(window_durations, grid_mode="fill_order")
 
-    assert (_td(0), _td(60)) not in ladder
-    assert (_td(0), _td(30)) not in ladder
+    assert (td(0), td(60)) not in ladder
+    assert (td(0), td(30)) not in ladder
 
 
 def test_fill_order_three_windows():
     window_durations = [
-        [_td(0), _td(30)],
-        [_td(0), _td(20)],
-        [_td(0), _td(10), _td(40)],
+        [td(0), td(30)],
+        [td(0), td(20)],
+        [td(0), td(10), td(40)],
     ]
 
     ladder = build_candidate_grid(window_durations, grid_mode="fill_order")
@@ -76,11 +73,11 @@ def test_fill_order_three_windows():
     # window 1 contributes non-zero only, meshed onto max0=30: (30,20,0)
     # window 2 contributes non-zero only, meshed onto max0=30,max1=20: (30,20,10), (30,20,40)
     assert ladder == [
-        (_td(0), _td(0), _td(0)),
-        (_td(30), _td(0), _td(0)),
-        (_td(30), _td(20), _td(0)),
-        (_td(30), _td(20), _td(10)),
-        (_td(30), _td(20), _td(40)),
+        (td(0), td(0), td(0)),
+        (td(30), td(0), td(0)),
+        (td(30), td(20), td(0)),
+        (td(30), td(20), td(10)),
+        (td(30), td(20), td(40)),
     ]
 
     totals = [sum((d for d in candidate), pd.Timedelta(0)) for candidate in ladder]
@@ -93,8 +90,8 @@ def test_fill_order_three_windows():
 
 def test_full_grid_mode_is_cartesian_product():
     window_durations = [
-        [_td(0), _td(30), _td(60)],
-        [_td(0), _td(30)],
+        [td(0), td(30), td(60)],
+        [td(0), td(30)],
     ]
 
     ladder = build_candidate_grid(window_durations, grid_mode="full")
@@ -102,12 +99,12 @@ def test_full_grid_mode_is_cartesian_product():
     assert len(ladder) == 3 * 2
     assert set(ladder) == {(d0, d1) for d0 in window_durations[0] for d1 in window_durations[1]}
     # Full mode keeps every combination, including the back-loaded one dropped by fill_order.
-    assert (_td(0), _td(30)) in ladder
+    assert (td(0), td(30)) in ladder
 
 
 def test_unknown_grid_mode_raises():
     with pytest.raises(ValueError):
-        build_candidate_grid([[_td(0), _td(30)]], grid_mode="bogus")
+        build_candidate_grid([[td(0), td(30)]], grid_mode="bogus")
 
 
 # --- combo_cap fail-fast ------------------------------------------------------
@@ -115,8 +112,8 @@ def test_unknown_grid_mode_raises():
 
 def test_combo_cap_exceeded_raises():
     window_durations = [
-        [_td(m) for m in range(0, 10 * 30, 30)],  # 10 candidates on window 0 alone
-        [_td(0), _td(30)],
+        [td(m) for m in range(0, 10 * 30, 30)],  # 10 candidates on window 0 alone
+        [td(0), td(30)],
     ]
     ladder = build_candidate_grid(window_durations, grid_mode="fill_order")
     combo_cap = 5
@@ -128,8 +125,8 @@ def test_combo_cap_exceeded_raises():
 
 def test_combo_cap_not_exceeded_does_not_raise():
     window_durations = [
-        [_td(0), _td(30), _td(60)],
-        [_td(0), _td(30), _td(60)],
+        [td(0), td(30), td(60)],
+        [td(0), td(30), td(60)],
     ]
     ladder = build_candidate_grid(window_durations, grid_mode="fill_order")
 

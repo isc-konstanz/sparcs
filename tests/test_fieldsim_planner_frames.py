@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""sparcs.tests.test_fieldsim_planner_frames
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_planner_frames
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The planner's three forecast-table frame builders: the ``agri_field_forecast``
 header (one row per candidate per run), the ``agri_soil_forecast`` detail
@@ -9,6 +10,8 @@ All pure -- no engine, no mesh.
 """
 
 import datetime
+
+from conftest import td
 
 import numpy as np
 import pandas as pd
@@ -25,10 +28,6 @@ _WEATHER_TS = pd.Timestamp("2026-07-03 00:00", tz="UTC")
 _PROBE_IDS = ["root_20", "root_40"]
 
 
-def _td(minutes: int) -> pd.Timedelta:
-    return pd.Timedelta(minutes=minutes)
-
-
 def _windows(*starts: datetime.time) -> list:
     return [WateringWindow(start=start) for start in starts]
 
@@ -39,7 +38,7 @@ def _two_windows() -> list:
 
 def _synthetic_ladder():
     """A 2-window fill-order-style ladder: 3 candidates."""
-    return [(_td(0), _td(0)), (_td(30), _td(0)), (_td(60), _td(0))]
+    return [(td(0), td(0)), (td(30), td(0)), (td(60), td(0))]
 
 
 def _header(ladder, chosen, run_ts=_RUN_TS, weather_ts=_WEATHER_TS, max_windows=4, windows=None):
@@ -313,7 +312,7 @@ def test_irrigation_frame_two_windows_yields_four_edge_rows():
     horizon_start = pd.Timestamp("2026-07-03 01:00", tz=_TZ)
     horizon_end = horizon_start + pd.Timedelta(hours=24)
 
-    frame = _irrigation((_td(30), _td(60)), horizon_start, horizon_end, horizon_start)
+    frame = _irrigation((td(30), td(60)), horizon_start, horizon_end, horizon_start)
 
     assert len(frame) == 4
     assert list(frame.index) == [
@@ -331,7 +330,7 @@ def test_irrigation_frame_zero_duration_candidate_yields_zero_rows():
     zero rows, not a marker row; the run stays visible via its header row."""
     horizon_start = pd.Timestamp("2026-07-03 01:00", tz=_TZ)
 
-    frame = _irrigation((_td(0), _td(0)), horizon_start, horizon_start + pd.Timedelta(hours=24), horizon_start)
+    frame = _irrigation((td(0), td(0)), horizon_start, horizon_start + pd.Timedelta(hours=24), horizon_start)
 
     assert frame.empty
     assert "irrigation_state" in frame.columns
@@ -345,7 +344,7 @@ def test_irrigation_frame_horizon_clamped_off_edge_emits_closing_false():
     horizon_end = horizon_start + pd.Timedelta(hours=24)  # 2026-07-04 07:00
 
     frame = _irrigation(
-        (_td(10 * 60),), horizon_start, horizon_end, horizon_start, windows=_windows(datetime.time(23, 0))
+        (td(10 * 60),), horizon_start, horizon_end, horizon_start, windows=_windows(datetime.time(23, 0))
     )
 
     assert len(frame) == 2
@@ -367,7 +366,7 @@ def test_irrigation_frame_touching_windows_merge_into_one_interval():
     through the joint, so it must merge into ONE interval (2 edge rows), not emit
     a spurious (False, True) pair on the identical timestamp."""
     horizon_start = pd.Timestamp("2026-07-03 07:00", tz=_TZ)
-    candidate = (_td(600), _td(30))  # window A: 08:00 + 10h == window B's 18:00 on_ts
+    candidate = (td(600), td(30))  # window A: 08:00 + 10h == window B's 18:00 on_ts
 
     frame = _irrigation(candidate, horizon_start, horizon_start + pd.Timedelta(hours=24), horizon_start)
 
@@ -384,7 +383,7 @@ def test_irrigation_frame_overlapping_windows_merge_into_one_interval():
     """Window A's interval extends past window B's on_ts (a true overlap, not
     just a touch) -- same merge behavior as the touching case."""
     horizon_start = pd.Timestamp("2026-07-03 07:00", tz=_TZ)
-    candidate = (_td(11 * 60), _td(30))  # window A: 08:00 + 11h = 19:00, past 18:00
+    candidate = (td(11 * 60), td(30))  # window A: 08:00 + 11h = 19:00, past 18:00
 
     frame = _irrigation(candidate, horizon_start, horizon_start + pd.Timedelta(hours=24), horizon_start)
 
@@ -404,7 +403,7 @@ def test_irrigation_frame_short_horizon_drops_degenerate_window_but_keeps_others
     horizon_start = pd.Timestamp("2026-07-03 07:00", tz=_TZ)
     horizon_end = pd.Timestamp("2026-07-03 12:00", tz=_TZ)  # cuts off window B (18:00)
 
-    frame = _irrigation((_td(30), _td(30)), horizon_start, horizon_end, horizon_start)
+    frame = _irrigation((td(30), td(30)), horizon_start, horizon_end, horizon_start)
 
     assert len(frame) == 2
     assert list(frame.index) == [

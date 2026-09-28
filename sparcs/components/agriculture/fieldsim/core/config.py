@@ -254,7 +254,7 @@ class SoilConfig(Config):
 
     mesh = section("mesh", required=True, desc="[mesh] bay cross-section geometry")
     drip = section("drip", desc="[drip] whole-field drip layout; defaults to 1 nozzle x 1 l/h")
-    pde = ParameterGroup(key="pde", desc="[pde] solver settings (simulation._soil.PDEConfig, passthrough)")
+    pde = ParameterGroup(key="pde", desc="[pde] solver settings (core.pde.PDEConfig, passthrough)")
     ponding = ParameterGroup(key="ponding", desc="[ponding] surface storage, sibling of [pde] (passthrough)")
     feddes = ParameterGroup(key="feddes", desc="[feddes] root water uptake, sibling of [pde] (passthrough)")
     anchor = ParameterGroup(

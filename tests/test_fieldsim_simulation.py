@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""sparcs.tests.test_fieldsim_simulation
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_simulation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``Simulation.run`` over the real ``WeatherChain`` and a stub engine: cold-start
 spin-up (and its cancellation), the already-simulated guard, the

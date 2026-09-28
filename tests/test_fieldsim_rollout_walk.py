@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""sparcs.tests.test_fieldsim_rollout_walk
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_rollout_walk
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``RolloutEngine.roll_segment``'s walk loop over a stub PDE: the
 ``sample_on_zero_dt`` parameterization and the interval observers that fire

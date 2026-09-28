@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""sparcs.tests.test_fieldsim_diagnostics_walk
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_diagnostics_walk
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The adaptive walk's own numbers reach the diagnostics every step, not just the
 log: ``skipped_s`` (seconds held at ``dt_min``) escalates to ERROR and is

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""sparcs.tests.test_fieldsim_engine_tension
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_engine_tension
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The probe publish boundary is water tension, not relative saturation:
 ``SoilEngine.tension_at`` converts the sampled Se with the retention model and

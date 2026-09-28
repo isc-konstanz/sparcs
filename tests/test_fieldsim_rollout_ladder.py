@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""sparcs.tests.test_fieldsim_rollout_ladder
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_rollout_ladder
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 PDE-backed guard for the prefix-shared caterpillar (``rollout_ladder``): every
 candidate rolled through the shared prefix must match an independent roll of

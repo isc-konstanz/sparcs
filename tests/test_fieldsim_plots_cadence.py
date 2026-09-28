@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""sparcs.tests.test_fieldsim_plots_cadence
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_plots_cadence
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``render_due`` is the one plot-cadence gate. Driven once per (minute-
 resolution) forcing row it must collapse to one frame per ``[plot] interval``;

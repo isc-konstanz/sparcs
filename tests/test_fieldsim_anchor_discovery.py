@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""tests.test_fieldsim_anchor_discovery
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_anchor_discovery
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Anchor sensor discovery at activation: it may rely only on the siblings'
 configure-time state (lories activates the field simulation before the

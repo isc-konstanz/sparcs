@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""tests.test_fieldsim_ticker
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_ticker
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``Ticker``: the lories scheduler it wraps and what it hands the runner --
 a UTC clock, the scheduler's consecutive-failure count before each tick and

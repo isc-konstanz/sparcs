@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""tests.test_fieldsim_chain
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_chain
+~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``WeatherChain``, ``ETModel`` and ``ShadingModel`` as pure models.
 """

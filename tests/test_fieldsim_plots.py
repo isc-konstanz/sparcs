@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""sparcs.tests.test_fieldsim_plots
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_plots
+~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Progress-image renderers of the ``fieldsim`` skeleton as pure functions
 from data to PNG bytes: no FiPy, no Gmsh, no lories channel/component state.

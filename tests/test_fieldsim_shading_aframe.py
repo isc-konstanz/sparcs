@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""sparcs.tests.test_fieldsim_shading_aframe
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_shading_aframe
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The mirrored ``as_is`` roof must be a peak ("/\\"), not a valley ("\\/"), for
 any ``axis_azimuth``: pvfactors derives a signed rotation from

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""tests.test_fieldsim_anchor_walk
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_anchor_walk
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``_walk_components`` feeds sensor-probe discovery: a container shape it does
 not recognise falls back to plain iteration, a genuinely raising ``.values()``

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""sparcs.tests.test_fieldsim_plots_title
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_plots_title
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The progress-plot title renders the timestamp in the site timezone with a
 colon-form offset (``+HH:MM``) when a ``tz`` is given, assuming UTC for naive

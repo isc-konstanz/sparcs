@@ -1,16 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-sparcs.components.agriculture.simulation._predictor_candidates
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+sparcs.components.agriculture.fieldsim.core.candidates
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Pure candidate-grid/schedule/scoring statics extracted from
-``SoilPredictor``, renamed to glossary-correct
-names -- ``context/sparcs.md`` reserves "ladder" for the strictly
+Pure candidate-grid/schedule/scoring functions the planner rolls on, named
+after the glossary -- ``context/sparcs.md`` reserves "ladder" for the strictly
 front-loaded ``fill_order`` subset, not the full candidate space, so the
-grid-building/selection statics live here as ``build_candidate_grid`` /
-``select_candidate`` etc. ``SoilPredictor`` keeps every pinned ``_x`` name
-as a ``staticmethod`` alias onto the matching function here; nothing in
-this module imports ``soil_predictor`` (would cycle).
+grid-building/selection functions live here as ``build_candidate_grid`` /
+``select_candidate`` etc.
 """
 
 from __future__ import annotations

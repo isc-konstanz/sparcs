@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-sparcs.components.agriculture.simulation._schedule
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+sparcs.components.agriculture.fieldsim.core.schedule
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Tick-schedule config parsing and wall-clock slot alignment, factored out of
 ``FieldSimulation``/``SoilPredictor`` so the ``interval``/``offset``

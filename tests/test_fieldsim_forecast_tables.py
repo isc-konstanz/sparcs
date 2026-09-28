@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""sparcs.tests.test_fieldsim_forecast_tables
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+"""
+tests.test_fieldsim_forecast_tables
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``ForecastTablePublisher``: the four persisted forecast tables' channel
 registrations, the probe-identity resolution they carry, the image frame
