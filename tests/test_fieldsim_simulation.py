@@ -5,10 +5,12 @@ tests.test_fieldsim_simulation
 
 ``Simulation.run`` over the real ``WeatherChain`` and a stub engine: cold-start
 spin-up (and its cancellation), the already-simulated guard, the
-``extra_diagnostics`` merge and the per-row anchor increment; and
-``Simulation.add_sensors`` handing discovered tensiometers to the assimilator.
+``extra_diagnostics`` merge and the per-row anchor increment;
+``Simulation.add_sensors`` handing discovered tensiometers to the assimilator;
+and ``Simulation.plan`` handing the forecast's issue time to the planner.
 """
 
+import logging
 import types
 
 import pytest
@@ -252,3 +254,60 @@ def test_add_sensors_samples_each_sensor_as_a_probe(anchor_enabled, discover_sen
     assert [p.channel_id for p in sim.probes] == ["strip", "s1"]
     assert sim.probes[-1].at == (25.0, 60.0)
     assert set(results[-1].probe_tension) == {"strip", "s1"}
+
+
+class _RecordingPlanner:
+    """Keeps the keyword arguments of every ``plan`` call."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def plan(self, state, weather, seg_et, horizon_start, horizon_end, **kwargs):
+        self.calls.append(kwargs)
+
+
+_CREATION_KEY = "timestamp_creation"
+_ISSUED = pd.Timestamp("2026-06-20 23:00", tz="UTC")
+
+
+def _planning_simulation() -> Simulation:
+    sim = _simulation()
+    sim.planner = _RecordingPlanner()
+    sim.state = sim.engine.initial_state(pd.Timestamp("2026-06-21 00:00", tz="UTC"))
+    return sim
+
+
+def _simulation_warnings(caplog) -> list:
+    return [r for r in caplog.records if r.name == Simulation.__module__ and r.levelno == logging.WARNING]
+
+
+def test_plan_hands_the_latest_forecast_issue_time_to_the_planner():
+    sim = _planning_simulation()
+    forecast = _weather_frame(hours=3)
+    forecast[_CREATION_KEY] = [_ISSUED, _ISSUED - pd.Timedelta(hours=6), None]
+
+    sim.plan(forecast)
+
+    (call,) = sim.planner.calls
+    assert call["weather_creation"] == _ISSUED
+    assert call["run_timestamp"] == pd.Timestamp(sim.state.at)
+
+
+@pytest.mark.parametrize(
+    "creation",
+    [pytest.param(None, id="missing"), pytest.param([None, None, None], id="null")],
+)
+def test_plan_falls_back_to_the_run_time_with_one_warning_without_an_issue_time(caplog, creation):
+    sim = _planning_simulation()
+    forecast = _weather_frame(hours=3)
+    if creation is not None:
+        forecast[_CREATION_KEY] = creation
+
+    with caplog.at_level(logging.WARNING):
+        sim.plan(forecast)
+        sim.plan(forecast)
+
+    run_timestamp = pd.Timestamp(sim.state.at)
+    assert [call["weather_creation"] for call in sim.planner.calls] == [run_timestamp, run_timestamp]
+    (warning,) = _simulation_warnings(caplog)
+    assert _CREATION_KEY in warning.getMessage()

@@ -29,6 +29,8 @@ from .state import ChainResult, Forcing, Plan, Snapshot, SoilState, StepResult
 
 logger = logging.getLogger(__name__)
 
+FORECAST_CREATION_KEY = "timestamp_creation"
+
 
 def _resolve_segment_ranges(mesh, shading_config, bay_width: float) -> Optional[dict[str, tuple[float, float]]]:
     """Soil-mesh top-segment x-ranges in pvfactors coordinates; ``None`` without a mesh."""
@@ -129,6 +131,7 @@ class Simulation:
         self._last_chain: Optional[ChainResult] = None
         self._last_step: Optional[StepResult] = None
         self._last_plan: Optional[Plan] = None
+        self._creation_warned = False
 
     def add_sensors(self, sensors: Sequence[AnchorSensor]) -> None:
         """Hand discovered tensiometers to the assimilator; sample each as a probe
@@ -217,16 +220,35 @@ class Simulation:
         weather, seg_et = self.chain.horizon_inputs(forecast)
         if weather.empty:
             return None
+        run_timestamp = pd.Timestamp(self.state.at)
         plan = self.planner.plan(
             self.state,
             weather,
             seg_et,
             weather.index[0],
             weather.index[-1],
-            run_timestamp=pd.Timestamp(self.state.at),
+            run_timestamp=run_timestamp,
+            weather_creation=self._weather_creation(forecast, run_timestamp),
         )
         self._last_plan = plan
         return plan
+
+    def _weather_creation(self, forecast: pd.DataFrame, run_timestamp: pd.Timestamp) -> pd.Timestamp:
+        """The forecast's latest issue time; the run time when the frame carries none."""
+        creation = pd.NaT
+        if FORECAST_CREATION_KEY in forecast.columns:
+            creation = pd.to_datetime(forecast[FORECAST_CREATION_KEY], utc=True).max()
+        if pd.isna(creation):
+            if not self._creation_warned:
+                logger.warning(
+                    "weather forecast issue time unavailable (no valid '%s' in the forecast yet); "
+                    "using the run time %s as weather_creation",
+                    FORECAST_CREATION_KEY,
+                    run_timestamp,
+                )
+                self._creation_warned = True
+            return run_timestamp
+        return creation
 
     def snapshot(self) -> Snapshot:
         return Snapshot(

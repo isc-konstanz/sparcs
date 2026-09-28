@@ -89,6 +89,7 @@ def build_header_frame(
         index.append(run_timestamp)
 
     frame = pd.DataFrame.from_records(rows, index=pd.DatetimeIndex(index, name="timestamp"))
+    frame[_HEADER_WEATHER_CREATION_KEY] = pd.to_datetime(frame[_HEADER_WEATHER_CREATION_KEY])
     return frame.loc[:, columns]
 
 

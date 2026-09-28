@@ -11,10 +11,15 @@ All pure -- no engine, no mesh.
 
 import datetime
 
+import pytest
 from conftest import td
+from sqlalchemy.types import TIMESTAMP
 
 import numpy as np
 import pandas as pd
+import pytz
+from lories.connectors.sql.columns import DatetimeColumn
+from lories.core.errors import ResourceError
 from sparcs.components.agriculture.fieldsim.core.candidates import WateringWindow
 from sparcs.components.agriculture.fieldsim.core.planner import (
     build_detail_frame,
@@ -147,6 +152,26 @@ def test_header_frame_empty_ladder_returns_empty_frame_with_columns():
 
     assert frame.empty
     assert "w0_min" in frame.columns
+
+
+def _weather_creation_column() -> DatetimeColumn:
+    return DatetimeColumn("weather_creation", TIMESTAMP, timezone=pytz.UTC)
+
+
+def test_header_frame_weather_creation_passes_the_sql_datetime_column():
+    ladder = _synthetic_ladder()
+
+    validated = _weather_creation_column().validate(_header(ladder, ladder[0])["weather_creation"])
+
+    assert (validated == _WEATHER_TS.tz_convert(None)).all()
+
+
+def test_sql_datetime_column_rejects_a_null_weather_creation_column():
+    """The header column as it reached the logger before the issue time was passed through."""
+    nulls = pd.Series([None] * 3, index=pd.DatetimeIndex([_RUN_TS] * 3, name="timestamp"), name="weather_creation")
+
+    with pytest.raises(ResourceError):
+        _weather_creation_column().validate(nulls)
 
 
 # --- build_detail_frame (pure, per-probe LONG shape) -------------------------
