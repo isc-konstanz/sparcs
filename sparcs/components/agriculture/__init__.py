@@ -24,8 +24,6 @@ from .fieldsim.components import (  # noqa: F401
     SoilSimulation,
 )
 
-from . import simulation  # noqa: F401
-
 from . import field  # noqa: F401
 from .field import AgriculturalField  # noqa: F401
 

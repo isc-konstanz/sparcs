@@ -139,30 +139,6 @@ def test_et_model_raises_on_missing_required_column():
         ETModel().evaluate(weather, [seg])
 
 
-def test_et_model_matches_live_evapotranspiration_publish_false():
-    live_mod = pytest.importorskip("sparcs.components.agriculture.simulation.evapotranspiration")
-    weather = _weather_frame()
-    kwargs = dict(
-        name="top",
-        lai=1.0,
-        plant_height=0.5,
-        ndvi=0.4,
-        roughness=0.05,
-        shade_factor=0.8,
-        face_length=1.0,
-        is_canopy=True,
-    )
-    ours_bulk, ours_seg_et = ETModel().evaluate(weather.copy(), [SegmentProperties(**kwargs)])
-
-    live = object.__new__(live_mod.Evapotranspiration)
-    live_bulk, live_seg_et = live.evaluate(weather.copy(), [live_mod.SegmentProperties(**kwargs)], publish=False)
-
-    # Constant is a str subclass; rename to plain str so the column Index
-    # comparison can't trip on the subclass identity, only the values.
-    pd.testing.assert_frame_equal(ours_bulk.rename(columns=str), live_bulk.rename(columns=str))
-    pd.testing.assert_frame_equal(ours_seg_et["top"], live_seg_et["top"])
-
-
 # --------------------------------------------------------------------------- WeatherChain.forcing_series
 
 

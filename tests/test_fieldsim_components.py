@@ -31,10 +31,6 @@ from sparcs.components.agriculture.fieldsim.core.assimilator import parse_anchor
 from sparcs.components.agriculture.fieldsim.core.config import FieldConfig, FieldSetup, PlannerConfig, SoilConfig
 from sparcs.components.agriculture.fieldsim.core.simulation import Simulation
 from sparcs.components.agriculture.fieldsim.core.state import ChainResult, Plan, SoilState, StepResult
-from sparcs.components.agriculture.simulation import Evapotranspiration as LiveET
-from sparcs.components.agriculture.simulation import FieldSimulation as LiveField
-from sparcs.components.agriculture.simulation import GroundShading as LiveGroundShading
-from sparcs.components.agriculture.simulation import SoilSimulation as LiveSoil
 
 UTC = dt.timezone.utc
 
@@ -657,46 +653,66 @@ def _declared(namespace) -> set:
     return {str(c) for c in (*namespace.CHANNELS, *namespace.PLOT_CHANNELS)}
 
 
-def test_ground_shading_channels_reuse_the_live_constants():
-    assert components.GroundShading.CHANNELS[0] is LiveGroundShading.SHADING_FACTOR
-    assert components.GroundShading.PLOT_CHANNELS == (LiveGroundShading.SHADING_PROGRESS_IMAGE,)
+def test_ground_shading_channels_are_the_canonical_keys():
+    assert components.GroundShading.CHANNELS[0].key == "shading_factor"
+    assert [c.key for c in components.GroundShading.PLOT_CHANNELS] == ["shading_progress_image"]
     assert _declared(components.GroundShading) == {"shading_factor", "shading_progress_image", "plot_strikes"}
 
 
-def test_evapotranspiration_channels_are_the_live_constants():
-    assert components.Evapotranspiration.CHANNELS == tuple(LiveET.CHANNELS)
+def test_evapotranspiration_channels_are_the_canonical_keys():
+    assert [c.key for c in components.Evapotranspiration.CHANNELS] == [
+        "sat_vapor_pressure",
+        "ground_vapor_pressure",
+        "vaporization_heat",
+        "slope_sat_vapor_pressure",
+        "net_irradiance",
+        "aerodynamic_resistance",
+        "soil_heat_flow",
+        "resistance_surface",
+        "radiation_term",
+        "aerodynamic_term",
+        "evapotranspiration",
+    ]
     assert components.Evapotranspiration.PLOT_CHANNELS == ()
 
 
-def test_soil_simulation_channels_reuse_the_live_constants():
+def test_soil_simulation_channels_are_the_canonical_keys():
     expected = {
-        c.key
-        for c in (
-            LiveSoil.SIMULATION_STATE,
-            LiveSoil.SOIL_PROGRESS_IMAGE,
-            LiveSoil.WATER_TOP_IN,
-            LiveSoil.WATER_TOP_OUT,
-            LiveSoil.WATER_BOTTOM,
-            LiveSoil.WATER_TRANSP,
-            LiveSoil.WATER_RUNOFF,
-            LiveSoil.WATER_DEMAND_UNMET,
-            LiveSoil.WATER_BALANCE_RESIDUAL,
-            LiveSoil.WATER_ANCHOR,
-            LiveSoil.WALK_SKIPPED_S,
-            LiveSoil.WALK_RETRIES,
-            LiveSoil.WEATHER_STALL,
-            LiveSoil.TICK_FAILURES,
-        )
-    } | {"plot_strikes"}
+        "simulation_state",
+        "top_in",
+        "top_out",
+        "bottom_out",
+        "transpiration",
+        "runoff",
+        "demand_unmet",
+        "balance_residual",
+        "anchor",
+        "skipped_s",
+        "retries",
+        "weather_stall",
+        "tick_failures",
+        "plot_strikes",
+        "soil_progress_image",
+    }
     assert _declared(components.SoilSimulation) == expected
-    assert components.SoilSimulation.PLOT_CHANNELS == (LiveSoil.SOIL_PROGRESS_IMAGE,)
+    assert [c.key for c in components.SoilSimulation.PLOT_CHANNELS] == ["soil_progress_image"]
     assert all(isinstance(c, Constant) for c in components.SoilSimulation.CHANNELS)
 
 
-def test_field_level_channels_are_the_live_constants():
-    assert components._VEGETATION_CHANNELS == tuple(LiveField.VEGETATION_CHANNELS)
-    assert components._SEGMENT_CHANNELS == tuple(LiveField.SEGMENT_CHANNELS)
-    assert components._SOIL_DIAGNOSTIC_CHANNELS[0] is LiveSoil.WATER_TOP_IN
+def test_field_level_channels_are_the_canonical_keys():
+    assert [c.key for c in components._VEGETATION_CHANNELS] == [
+        "temp_ground",
+        "lai",
+        "roughness",
+        "plant_height",
+        "ndvi",
+    ]
+    assert [c.key for c in components._SEGMENT_CHANNELS] == [
+        "seg_ghi",
+        "seg_evapotranspiration",
+        "seg_temp_ground",
+    ]
+    assert components._SOIL_DIAGNOSTIC_CHANNELS[0].key == "top_in"
 
 
 def test_soil_predictor_channels_are_the_write_failure_counters():
