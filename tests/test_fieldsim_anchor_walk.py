@@ -6,7 +6,7 @@ tests.test_fieldsim_anchor_walk
 ``_walk_components`` feeds sensor-probe discovery: a container shape it does
 not recognise falls back to plain iteration, a genuinely raising ``.values()``
 propagates, and an unwalkable subtree is dropped with ONE named WARNING
-instead of vanishing silently. ``soil_tuning`` carries its own duplicate.
+instead of vanishing silently. Exercises ``soil_tuning``'s own copy.
 """
 
 import logging
@@ -14,12 +14,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from sparcs.components.agriculture.fieldsim.anchor_runtime import _walk_components
-
 soil_tuning = pytest.importorskip("soil_tuning")
 
 WALKERS = [
-    pytest.param(_walk_components, id="fieldsim"),
     pytest.param(soil_tuning._walk_components, id="soil_tuning"),
 ]
 

@@ -51,6 +51,8 @@ from lories.application.settings import Settings
 from lories.components.weather import Weather
 from lories.core.configs.directories import Directories, Directory
 from sparcs.components.agriculture import Irrigation, SoilMoisture
+from sparcs.components.agriculture.fieldsim.components import FieldSimulation, SoilSimulation
+from sparcs.components.agriculture.fieldsim.core import plots
 from sparcs.components.agriculture.fieldsim.core.anchor import (
     AnchorConfig,
     AnchorSensor,
@@ -64,7 +66,6 @@ from sparcs.components.agriculture.fieldsim.core.pde import (
     PDEConfig,
     SoilPDECore,
 )
-from sparcs.components.agriculture.simulation import FieldSimulation, SoilSimulation, plot_render
 from sparcs.system import System as SparcsSystem
 
 log = logging.getLogger("sparcs.soil_tuning")
@@ -487,15 +488,11 @@ def _worker_run_job(job_id: str, label: str, params: dict[str, float]) -> None:
             put({"type": "failed", "error": "et_data has fewer than 2 timestamps"})
             return
 
-        fig, ax, norm = plot_render.init_rel_sat_figure(
-            mesh_config.width,
-            mesh_config.height,
-        )
         render_every = max(1, render_stride)
 
         row0 = _sample_probe_row(pde, timeline[0], probes)
         put({"type": "row", "row": row0, "progress": 0.0})
-        _push_render(png_store, job_id, label, fig, ax, norm, pde, timeline[0])
+        _push_render(png_store, job_id, label, pde, timeline[0], width_m=mesh_config.width, height_m=mesh_config.height)
 
         anchor_on = _W_ANCHOR_CFG is not None and _W_ANCHOR_CFG.enabled and _W_ANCHOR_SENSORS
         last_anchored: dict = {}
@@ -566,7 +563,9 @@ def _worker_run_job(job_id: str, label: str, params: dict[str, float]) -> None:
             )
 
             if i % render_every == 0 or i == len(timeline) - 1:
-                _push_render(png_store, job_id, label, fig, ax, norm, pde, t_now)
+                _push_render(
+                    png_store, job_id, label, pde, t_now, width_m=mesh_config.width, height_m=mesh_config.height
+                )
 
         if anchor_on and anchor_fires == 0:
             put(
@@ -686,22 +685,21 @@ def _push_render(
     png_store: Any,
     job_id: str,
     label: str,
-    fig: Any,
-    ax: Any,
-    norm: Any,
     pde: SoilPDECore,
     sim_t: pd.Timestamp,
+    *,
+    width_m: float,
+    height_m: float,
 ) -> None:
     """Render the current Se field straight into the shared png-store (off the
     row queue, so large PNG blobs don't contend with the progress stream)."""
     try:
-        png = plot_render.render_rel_sat_png(
-            fig,
-            ax,
-            norm,
+        png = plots.render_rel_sat_png(
             pde.mesh,
             np.asarray(pde.rel_sat.value),
             sim_t,
+            width_m=width_m,
+            height_m=height_m,
             title=label,
         )
         png_store[job_id] = (png, sim_t)
@@ -738,13 +736,8 @@ def _find_soil_simulation(app) -> tuple[SoilSimulation, FieldSimulation]:
     roots = list(app.components.values())
     for root in roots:
         for c in _walk_components(root):
-            if isinstance(c, SoilSimulation):
-                parent = c.context
-                if not isinstance(parent, FieldSimulation):
-                    raise RuntimeError(
-                        f"SoilSimulation {c.id} parent is {type(parent).__name__}, expected FieldSimulation"
-                    )
-                return c, parent
+            if isinstance(c, FieldSimulation):
+                return c.soil_simulation, c
     # Nothing matched; dump the loaded tree to tell a missing/misconfigured
     # chain from a class-identity mismatch.
     log.error("no SoilSimulation found; loaded component tree:")
@@ -845,8 +838,7 @@ def _load_history(
         )
         log.info("synthesized %s from precipitation_intensity (mm/h × step)", Weather.PRECIPITATION)
 
-    # Run the ET / shading chain once (publish=False keeps live channels clean).
-    et_data, seg_et = field_sim._run_chain(weather_df.copy(), publish=False)
+    et_data, seg_et = field_sim.simulation.chain.horizon_inputs(weather_df.copy())
 
     # Strip Constant column labels to their string ids: Constant.__new__ raises
     # during the spawn pickle round-trip (fine under fork, fatal under spawn).
@@ -1430,24 +1422,29 @@ def main() -> int:
             "yes" if initial_blob else "no (PDEConfig IC)",
         )
 
+        mesh_config = field_sim.simulation.engine.mesh_config
+        base_pde_config = field_sim.simulation.engine.ode
+        probes = list(field_sim.simulation.probes)
+        anchor_cfg = field_sim.simulation.assimilator.config
+
         runner = TuningRunner(
-            mesh_config=soil_sim._mesh_config,
-            base_pde_config=soil_sim._ode_config,
-            probes=soil_sim.get_probes(),
+            mesh_config=mesh_config,
+            base_pde_config=base_pde_config,
+            probes=probes,
             et_data=et_data,
             seg_et=seg_et,
             irrigation=irrigation,
             initial_blob=initial_blob,
             max_workers=max_workers,
-            anchor_cfg=soil_sim._anchor_cfg,
+            anchor_cfg=anchor_cfg,
             anchor_sensors=anchor_sensors,
             anchor_history=anchor_history,
         )
-        if soil_sim._anchor_cfg.enabled:
+        if anchor_cfg.enabled:
             log.info(
                 "anchoring ON: %d sensor(s) in allowlist, %d with history",
-                len(soil_sim._anchor_cfg.sensors),
-                sum(1 for s in anchor_sensors if s.key in soil_sim._anchor_cfg.sensors),
+                len(anchor_cfg.sensors),
+                sum(1 for s in anchor_sensors if s.key in anchor_cfg.sensors),
             )
 
         dash_app = build_app(runner, measurements, poll_seconds=poll_seconds)
