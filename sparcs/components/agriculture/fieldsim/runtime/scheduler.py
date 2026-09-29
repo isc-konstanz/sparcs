@@ -27,7 +27,7 @@ class Ticker:
     """Run ``FieldRunner.run_tick`` on the field's aligned cadence.
 
     lories aligns slots on epoch seconds, which lands on the same instant as
-    the live ``slot_ceil`` (a floor in the site timezone) for every interval
+    a floor in the site timezone for every interval
     that divides 60 minutes; a longer, non-dividing interval would drift
     against the site's wall clock.
     """

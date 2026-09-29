@@ -4,8 +4,7 @@ sparcs.components.agriculture.fieldsim.core.pde
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Mesh / PDE / drip config dataclasses, the FiPy Richards-equation core
-(``SoilPDECore``), the mesh-generation / probe helpers, and ``SoilBase``, the
-component base with the shared diagnostic math.
+(``SoilPDECore``), and the mesh-generation / probe helpers.
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ import logging
 import os
 import warnings
 from dataclasses import dataclass, field, fields
-from typing import Any, Callable, Collection, Optional
+from typing import Any, Callable, Optional
 
 import gmsh
 
@@ -34,7 +33,6 @@ from fipy.tools import serialComm
 
 import numpy as np
 import pandas as pd
-from lories import Component
 from lories.components.weather import Weather
 from lories.typing import Configurations
 from lories.util import to_timedelta
@@ -56,157 +54,6 @@ SE_MAX: float = 0.999  # effective-saturation ceiling for source clipping
 # Floor on (SE_MAX - Se) when linearizing the implicit irrigation intake;
 # bounds the penalty coefficient B when the strip is already at saturation.
 IRR_HEADROOM_EPS: float = 1e-4
-
-
-# -- config-key linting (issue 18-w1-7) --------------------------------------
-#
-# Shared keys/members every component's own top-level block may carry
-# regardless of which component reads it: `id`/`type`/`key`/`name` are read
-# off the raw block by `_Registrator._build_id`/`_build_key`/`_build_name`
-# BEFORE `configure()` ever runs (lories/_core/_registrator.py:40-86);
-# `Configurations.enabled` reads `enabled`/`disabled` (configurations.py:
-# 296-297); `Component._at_configure`/`_on_configure` load the `data`/
-# `components`/`connectors`/`converters` members (lories/components/
-# component.py:45-62). `logger` is also a bare top-level connector-id string
-# some components read directly (e.g. SoilPredictor's OWN [soil_predictor]
-# `.logger`, soil_predictor.py) and `connector` its per-channel equivalent --
-# both common enough across the chain's three sections to list once here
-# instead of three times.
-FRAMEWORK_ALLOWED_KEYS: frozenset[str] = frozenset(
-    {
-        "id",
-        "type",
-        "enabled",
-        "disabled",
-        "key",
-        "name",
-        "logger",
-        "connector",
-        "data",
-        "components",
-        "connectors",
-        "converters",
-    }
-)
-
-# Per-section allowlists: the framework set above PLUS what that component's
-# OWN configure() reads (top-level scalars and member/sub-table names alike
-# -- has_member() counts a bare bool as a member too, so the scan never
-# distinguishes scalar vs. member, only key NAME). Kept next to the shared
-# helper (not scattered per component module) so the three call sites and
-# their allowlists stay in one auditable place.
-
-# [soil_predictor] (soil_predictor.py): horizon/interval/offset/combo_cap/
-# grid_mode/parallel/max_workers/max_windows/threshold_hpa/decision_probes
-# top-level; plot/state/drip/windows/pde/ponding/feddes members.
-SOIL_PREDICTOR_ALLOWED_KEYS: frozenset[str] = FRAMEWORK_ALLOWED_KEYS | frozenset(
-    {
-        "horizon",
-        "interval",
-        "offset",
-        "combo_cap",
-        "grid_mode",
-        "parallel",
-        "max_workers",
-        "max_windows",
-        "threshold_hpa",
-        "decision_probes",
-        "plot",
-        "state",
-        "drip",
-        "windows",
-        "pde",
-        "ponding",
-        "feddes",
-    }
-)
-
-# [soil_simulation] (soil.py): total_drip_line_length_m/plot_structure/
-# discover_sensor_probes top-level; mesh/model/pde/ponding/feddes/anchor/
-# plot/probes members. `drip` (and `mesh`) are parsed by the PARENT
-# FieldSimulation (base.py), not soil.py itself -- allowlisted anyway since
-# they are real keys on the SAME configs object the child scans (get_member
-# mutates in place; base.py's eager mesh/model/pde/drip parses already
-# materialize those members before SoilSimulation.configure() ever runs).
-# `testing` is consumed by the standalone soil_tuning.py replay/calibration
-# harness (documented in soil_tuning.md), never by SoilSimulation.configure()
-# -- allowlisted so that tool's own block never produces a false
-# unknown-key warning.
-SOIL_SIMULATION_ALLOWED_KEYS: frozenset[str] = FRAMEWORK_ALLOWED_KEYS | frozenset(
-    {
-        "total_drip_line_length_m",
-        "plot_structure",
-        "discover_sensor_probes",
-        "mesh",
-        "model",
-        "pde",
-        "ponding",
-        "feddes",
-        "anchor",
-        "plot",
-        "probes",
-        "drip",
-        "testing",
-    }
-)
-
-# [field_simulation] (base.py): lai_type/roughness/plant_height/ndvi/
-# bare_lai/bare_roughness/bare_plant_height/bare_ndvi/bay_width/
-# intake_delay/interval/offset top-level; model/plot/soil_simulation/
-# soil_predictor/ground_shading/evapotranspiration members.
-FIELD_SIMULATION_ALLOWED_KEYS: frozenset[str] = FRAMEWORK_ALLOWED_KEYS | frozenset(
-    {
-        "lai_type",
-        "roughness",
-        "plant_height",
-        "ndvi",
-        "bare_lai",
-        "bare_roughness",
-        "bare_plant_height",
-        "bare_ndvi",
-        "bay_width",
-        "intake_delay",
-        "interval",
-        "offset",
-        "model",
-        "plot",
-        "soil_simulation",
-        "soil_predictor",
-        "ground_shading",
-        "evapotranspiration",
-    }
-)
-
-
-def warn_unknown_keys(configs: Configurations, known: Collection[str], section_name: str) -> None:
-    """Warn (never raise) once per unrecognized TOP-LEVEL key in ``configs``.
-
-    Call this at the TOP of ``configure()``, right after
-    ``super().configure(configs)`` and before any local ``get_member(...)``
-    call on ``configs`` itself. ``Configurations.__iter__``
-    (configurations.py:182) yields every key already in the backing dict --
-    inline TOML sub-tables included -- but a ``.d``-file-only member (e.g.
-    ``field_simulation.d/soil_predictor.conf`` with no inline
-    ``[soil_predictor]`` table in the parent file) is not one of those keys
-    until something calls ``get_member(key, ..., ensure_exists=True)``, which
-    adds it via ``_add_member``/``self[key] = ...``
-    (configurations.py:335-369). Scanning first means the check reads exactly
-    what was declared on disk, not keys configure() itself would go on to
-    materialize (several of which -- ``mesh``/``model``/``pde``/``drip``/
-    ``plot`` in this chain -- get added with ``ensure_exists=True`` even when
-    the operator never wrote the block).
-
-    ``known`` is indifferent to scalar-vs-member: ``has_member`` counts a
-    bare ``True``/``False`` value as a member too (configurations.py:
-    311-319), so this checks by key NAME only.
-    """
-    for key in configs:
-        if key not in known:
-            logger.warning(
-                "[%s] config key '%s' is not read by any parser; check for a typo or a stale/dead key.",
-                section_name,
-                key,
-            )
 
 
 def design_flow_lpm(nozzle_count: int, nozzle_flow_lph: float) -> float:
@@ -231,48 +78,6 @@ def flow_m3s_per_m(flow_lpm: float, total_drip_line_length_m: float) -> float:
     the two normalization sites can never diverge.
     """
     return flow_lpm / (60_000.0 * total_drip_line_length_m)
-
-
-# Shared drip-layout defaults; a [soil_simulation.drip] block that's present but
-# omits a key falls back to these, and so does an absent [soil_predictor.drip]
-# key with no sim DripConfig to inherit from (see DripConfig, SoilPredictor's
-# per-key override). A meaningful state-driven feed needs the sim's block set
-# explicitly (see DripConfig.explicit) -- these keep the arithmetic
-# well-defined, not correct for any real field.
-_DEFAULT_NOZZLE_COUNT: int = 1
-_DEFAULT_NOZZLE_FLOW_LPH: float = 1.0
-
-
-@dataclass
-class DripConfig:
-    """Whole-field drip layout parsed ONCE from ``[soil_simulation.drip]``:
-    ``nozzle_count`` x ``nozzle_flow_lph``, and whether the block was
-    configured explicitly (not defaulted).
-
-    ``design_flow_lpm`` is derived at construction via the shared
-    :func:`design_flow_lpm` helper. ``explicit`` gates the live sim's
-    state-driven fallback feed (``FieldSimulation._validate_irrigation_input``
-    requires it before trusting the on/off state channel) -- a bare state
-    channel with no explicit block would otherwise silently roll at the
-    1-nozzle x 1-l/h placeholder.
-
-    ``SoilPredictor``'s own ``[soil_predictor.drip]`` is a PER-KEY override
-    against an already-resolved ``DripConfig``'s fields (same key-level-merge
-    idiom as ``PondingConfig``/``FeddesConfig``'s ``base`` parameter), rather
-    than a ``base`` parameter on this constructor: the sim's own
-    ``[soil_simulation.drip]`` is always a fresh whole-block parse against the
-    hardcoded nozzle defaults above, never inherited from anything.
-    """
-
-    def __init__(self, soil_block: Configurations):
-        # has_member() BEFORE get_member(..., ensure_exists=True) materializes
-        # the block -- checking after would always read True here (the same
-        # gotcha the pre-refactor base.py call site carried).
-        self.explicit: bool = soil_block.has_member("drip")
-        drip_block = soil_block.get_member("drip", defaults={}, ensure_exists=True)
-        self.nozzle_count: int = drip_block.get_int("nozzle_count", default=_DEFAULT_NOZZLE_COUNT)
-        self.nozzle_flow_lph: float = drip_block.get_float("nozzle_flow_lph", default=_DEFAULT_NOZZLE_FLOW_LPH)
-        self.design_flow_lpm: float = design_flow_lpm(self.nozzle_count, self.nozzle_flow_lph)
 
 
 @dataclass
@@ -828,37 +633,34 @@ def resolve_pde_config(
 ) -> PDEConfig:
     """Build a component's ``PDEConfig`` and populate its surface forcing in one place.
 
-    Collapses the construct-then-``apply_surface_forcing`` sequence duplicated
-    across ``SoilSimulation.configure`` (site a), ``FieldSimulation.configure``'s
-    eager ``_soil_pde_config`` parse (site b), and
-    ``SoilPredictor._resolve_ode_config``'s own-``[pde]`` branch (site c) into
-    one canonical resolution, so the three sites can never resolve
-    ``[pde]``/``[model]``/forcing differently.
+    Collapses the construct-then-``apply_surface_forcing`` sequence into one
+    canonical resolution (``engine.py`` builds the soil PDE config through
+    this), so parsing ``[pde]``/``[model]``/forcing can never diverge between
+    call sites.
 
     ``component_block.get_member("pde", defaults={}, ensure_exists=True)`` parses
     against the component's own ``[pde]`` block -- a no-op merge when the block
     already exists; harmlessly materializes an empty one when absent.
 
-    When ``inherit_forcing_from`` is given (site c inheriting the live sim's
-    forcing), ``cfg.ponding``/``cfg.feddes`` are seeded to
-    ``inherit_forcing_from``'s SAME objects (``is`` identity) BEFORE
+    When ``inherit_forcing_from`` is given, ``cfg.ponding``/``cfg.feddes`` are
+    seeded to ``inherit_forcing_from``'s SAME objects (``is`` identity) BEFORE
     ``apply_surface_forcing`` runs, and that call passes
     ``ponding_base``/``feddes_base=inherit_forcing_from.ponding``/``.feddes`` so a
-    present sibling block key-merges against the sim's resolved values instead
-    of the hardcoded ``PondingConfig``/``FeddesConfig`` defaults.
+    present sibling block key-merges against the inherited resolved values
+    instead of the hardcoded ``PondingConfig``/``FeddesConfig`` defaults.
 
     The seed-before-apply ORDER is mandatory, not cosmetic: reversing it --
     seeding AFTER calling ``apply_surface_forcing`` -- would let the plain
     identity assignment clobber ``apply_surface_forcing``'s merge result
     whenever the component states its OWN explicit ``[ponding]``/``[feddes]``
-    override, silently discarding that override in favour of the sim's object.
-    Seeding first means ``apply_surface_forcing``'s own-block branch (when
-    present) always has the last word; the seed only supplies the correct
-    fallback ``cfg.ponding``/``.feddes`` for the absent-block case, where
-    ``apply_surface_forcing`` is a no-op.
+    override, silently discarding that override in favour of the inherited
+    object. Seeding first means ``apply_surface_forcing``'s own-block branch
+    (when present) always has the last word; the seed only supplies the
+    correct fallback ``cfg.ponding``/``.feddes`` for the absent-block case,
+    where ``apply_surface_forcing`` is a no-op.
 
-    Sites with no ``inherit_forcing_from`` (sites a/b, fresh-parse semantics)
-    call plain ``apply_surface_forcing(cfg, component_block)``.
+    With no ``inherit_forcing_from`` (fresh-parse semantics) this calls plain
+    ``apply_surface_forcing(cfg, component_block)``.
     """
     cfg = PDEConfig(component_block.get_member("pde", defaults={}, ensure_exists=True), model_configs=model_block)
     if inherit_forcing_from is not None:
@@ -1581,151 +1383,6 @@ class SoilPDECore:
         self.surface_h = {
             **{name: 0.0 for name in [*self.open_sky_segment_names, "WateringTopSegment"]},
             **surface_h,
-        }
-
-
-class SoilBase(Component):
-    """Base for soil-PDE components (live solver and predictor).
-
-    Subclasses populate ``_mesh_config`` / ``_ode_config`` then call
-    :meth:`_build_pde`. ``REL_SAT_NAME`` labels the FiPy CellVariable.
-    """
-
-    REL_SAT_NAME: str = "relative saturation"
-
-    _mesh_config: MeshConfig
-    _ode_config: PDEConfig
-    _pde: SoilPDECore
-
-    def _build_pde(self) -> SoilPDECore:
-        """Generate .msh if missing and build a fresh ``SoilPDECore``."""
-        ensure_mesh(self._mesh_config)
-        return SoilPDECore(
-            self._mesh_config,
-            self._ode_config,
-            rel_sat_name=self.REL_SAT_NAME,
-        )
-
-    # -- thin accessors onto SoilPDECore --------------------------------------
-
-    @property
-    def _mesh_fipy(self) -> Gmsh2D:
-        return self._pde.mesh
-
-    @property
-    def _soil_model(self) -> SoilModel:
-        return self._pde.soil_model
-
-    @property
-    def _segment_face_len(self) -> dict[str, float]:
-        return self._pde.segment_face_len
-
-    @property
-    def _top_segment_names(self) -> list[str]:
-        return self._pde.top_segment_names
-
-    @property
-    def _rain_face_len(self) -> float:
-        return self._pde.rain_face_len
-
-    def _total_water(self) -> float:
-        return self._pde.total_water()
-
-    # -- shared publish-side conversion ---------------------------------------
-
-    def _tension_from_se(self, values: float | Collection[float] | np.ndarray) -> float | list[float]:
-        """Publish-side Se -> water tension conversion shared by the sim's
-        per-probe publish and the predictor's trajectory conversion: scalar
-        in -> ``float`` out, sequence/ndarray in -> ``list[float]`` out.
-
-        The published value is the signed matric potential (negative hPa; 0
-        at saturation, more negative as the soil dries) -- the tensiometer /
-        DB convention. That sign convention is enforced by
-        ``SoilModel.psi_from_se`` itself, not here; this seam owns only the
-        publish-side shape coercion. The PDE core (``sample``, anchoring,
-        ``total_water``) stays in Se.
-        """
-        if np.ndim(values) == 0:
-            return float(self._soil_model.psi_from_se(values))
-        result = self._soil_model.psi_from_se(np.asarray(values, dtype=float))
-        return [float(v) for v in result]
-
-    # -- shared diagnostic math -----------------------------------------------
-
-    def _face_weighted_mean(
-        self,
-        per_segment: dict[str, float],
-        names: list[str],
-    ) -> float:
-        """Face-length-weighted mean over ``names``; missing entries count as 0."""
-        total_len = 0.0
-        weighted = 0.0
-        for name in names:
-            face_len = self._segment_face_len.get(name, 0.0)
-            if face_len <= 0:
-                continue
-            total_len += face_len
-            weighted += per_segment.get(name, 0.0) * face_len
-        if total_len <= 0:
-            return 0.0
-        return weighted / total_len
-
-    def _balance_drainage_flux(
-        self,
-        rates: FluxRates,
-        delta_storage: float,
-        duration_s: float,
-    ) -> float:
-        # drainage = (in - out)·dt - Δstorage, then / (bottom_face_len · dt) → kg/(m²·s)
-        bottom_len = self._segment_face_len.get("GroundBottomSegment", 0.0)
-        if bottom_len <= 0 or duration_s <= 0:
-            return 0.0
-        evap_mass = sum(value * self._segment_face_len.get(name, 0.0) for name, value in rates.seg_evap.items())
-        transp_mass = sum(value * self._segment_face_len.get(name, 0.0) for name, value in rates.seg_transp.items())
-        in_rate = rates.rain_flux * self._rain_face_len + rates.flow_m3s * RHO_W
-        out_rate = evap_mass + transp_mass
-        drainage_mass = (in_rate - out_rate) * duration_s - delta_storage
-        return drainage_mass / (bottom_len * duration_s)
-
-    def _compute_diagnostics(
-        self,
-        rates: FluxRates,
-        delta_storage: float,
-        elapsed_s: float,
-        clip: ClipDiagnostics,
-    ) -> dict[str, float]:
-        """Compute the 7 per-window flux-density diagnostics [kg/(m²·h)].
-
-        Returns a dict keyed by channel-key strings; no channel writes.
-        """
-        watering_len = self._segment_face_len.get("WateringTopSegment", 0.0)
-        irr_flux = rates.flow_m3s * RHO_W / watering_len if watering_len > 0 else 0.0
-        top_in = irr_flux + rates.rain_flux
-
-        e_flux_mean = self._face_weighted_mean(rates.seg_evap, self._top_segment_names)
-        t_flux_mean = self._face_weighted_mean(rates.seg_transp, self._top_segment_names)
-        bottom = self._balance_drainage_flux(rates, delta_storage, elapsed_s)
-        direct_bottom = self._pde.bottom_drainage_estimate()  # kg/(m²·s)
-        balance_residual = bottom - direct_bottom  # kg/(m²·s)
-
-        # Geometric top face (all segments + watering strip, not amplified like rain_face_len).
-        top_face_len = self._segment_face_len.get("WateringTopSegment", 0.0) + sum(
-            self._segment_face_len.get(n, 0.0) for n in self._top_segment_names
-        )
-        evap_face_len = sum(self._segment_face_len.get(n, 0.0) for n in self._top_segment_names)
-        runoff_mass = clip.top_rejected + clip.ponding_overflow
-        runoff_rate = runoff_mass / (top_face_len * elapsed_s) if top_face_len > 0 and elapsed_s > 0 else 0.0
-        unmet_rate = clip.bottom_rejected / (evap_face_len * elapsed_s) if evap_face_len > 0 and elapsed_s > 0 else 0.0
-
-        kg_per_s_to_kg_per_h = 3600.0
-        return {
-            "top_out": e_flux_mean * kg_per_s_to_kg_per_h,
-            "transpiration": t_flux_mean * kg_per_s_to_kg_per_h,
-            "top_in": top_in * kg_per_s_to_kg_per_h,
-            "bottom_out": bottom * kg_per_s_to_kg_per_h,
-            "runoff": runoff_rate * kg_per_s_to_kg_per_h,
-            "demand_unmet": unmet_rate * kg_per_s_to_kg_per_h,
-            "balance_residual": balance_residual * kg_per_s_to_kg_per_h,
         }
 
 

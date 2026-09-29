@@ -185,7 +185,7 @@ def test_anchoring_is_off_unless_explicitly_enabled():
 
 def test_anchor_module_stays_fipy_free():
     """The pure math module must not pull FiPy: the lifecycle lives in
-    ``anchor_runtime`` for exactly this reason. Parsed statically, because the
+    ``assimilator`` for exactly this reason. Parsed statically, because the
     package has already imported the FiPy stack by the time this runs."""
     tree = ast.parse(pathlib.Path(_anchor.__file__).read_text(encoding="utf-8"))
     imported: set = set()

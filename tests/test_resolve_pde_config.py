@@ -3,10 +3,9 @@
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Unit tests for ``resolve_pde_config`` -- the helper that collapses the
-construct-``PDEConfig``-then-``apply_surface_forcing`` sequence shared by
-``SoilSimulation.configure``, ``FieldSimulation.configure``'s eager
-``_soil_pde_config`` parse, and ``SoilPredictor._resolve_ode_config``'s
-own-``[pde]`` branch. Exercised directly -- pure config parsing, no mesh.
+construct-``PDEConfig``-then-``apply_surface_forcing`` sequence into one
+canonical resolution (``engine.py`` builds the soil PDE config through it).
+Exercised directly -- pure config parsing, no mesh.
 """
 
 import pytest

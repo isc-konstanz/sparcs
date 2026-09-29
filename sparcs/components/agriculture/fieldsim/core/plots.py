@@ -5,9 +5,8 @@ sparcs.components.agriculture.fieldsim.core.plots
 
 Progress images as pure functions from data to PNG bytes: create the
 figure, draw, save to bytes, close it -- no channel, component, or
-figure-reuse state. Ported from ``simulation.plot_render`` +
-``simulation.plot_style`` (relative-saturation cross-section) and
-``simulation.ground_shading`` (shading pattern frame); the strike counter
+figure-reuse state (the relative-saturation cross-section and the shading
+pattern frame); the strike counter
 and the ``plot_strikes``/image channel writes stay in the IO layer.
 ``PlotConfig`` itself is declared in ``config`` with the other sections.
 """
@@ -40,8 +39,7 @@ _NON_GUI_BACKENDS = ("agg", "module://matplotlib_inline.backend_inline")
 
 
 def _ensure_safe_backend() -> None:
-    """Force ``Agg`` when the caller can't drive a GUI (port of
-    ``plot_render._ensure_safe_backend``)."""
+    """Force ``Agg`` when the caller can't drive a GUI."""
     backend = matplotlib.get_backend().lower()
     if backend in _NON_GUI_BACKENDS:
         return
@@ -56,7 +54,7 @@ def _ensure_safe_backend() -> None:
     matplotlib.use("Agg", force=True)
 
 
-# --------------------------------------------------------------------------- shared style (port of plot_style.py)
+# --------------------------------------------------------------------------- shared style
 
 _FIG_WIDTH_IN: float = 8.0
 _DPI: int = 120
@@ -130,7 +128,7 @@ def _format_progress_title(label: str, ts: pd.Timestamp, *, tz: Any = None) -> s
 
 
 class _SmoothstepNorm(Normalize):
-    """Smoothstep colormap norm ``f(x) = 3x^2 - 2x^3`` (port of ``plot_style.SmoothstepNorm``)."""
+    """Smoothstep colormap norm ``f(x) = 3x^2 - 2x^3``."""
 
     def __call__(self, value, clip=None):
         v_min = float(self.vmin)
@@ -323,10 +321,8 @@ def render_rel_sat_png(
     title: str = "Relative saturation",
     tz: Any = None,
 ) -> bytes:
-    """Relative-saturation cross-section (port of
-    ``plot_render.init_rel_sat_figure`` + ``render_rel_sat_png``, folded
-    into one call). ``mesh`` only needs ``.cellCenters`` (array shape
-    ``(2, N)``). Figure is created and closed per call."""
+    """Relative-saturation cross-section. ``mesh`` only needs ``.cellCenters``
+    (array shape ``(2, N)``). Figure is created and closed per call."""
     _ensure_safe_backend()
     fig, ax = plt.subplots(figsize=_compute_fig_size(width_m, height_m), dpi=_DPI)
     try:

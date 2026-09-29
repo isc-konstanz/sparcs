@@ -11,7 +11,7 @@ lories channels.
 against a ``Config`` class, bundles them into a frozen ``FieldSetup`` and
 builds the ``Simulation`` at configure; the runner and the ``Ticker`` start at
 activate. ``AgriculturalField`` builds it from its ``field_simulation``
-member, and the ``simulation`` package imports its channel constants from here.
+member.
 """
 
 from __future__ import annotations

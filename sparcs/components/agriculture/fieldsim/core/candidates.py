@@ -12,27 +12,18 @@ grid-building/selection functions live here as ``build_candidate_grid`` /
 
 from __future__ import annotations
 
-import copy
 import datetime
 import itertools
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
-from lories.typing import Configurations
 
-from .pde import (
-    PDEConfig,
-    apply_surface_forcing,
-    design_flow_lpm,
-    flow_m3s_per_m,
-    resolve_pde_config,
-)
+from .pde import design_flow_lpm, flow_m3s_per_m
 from .schedule import slot_floor
 
 __all__ = [
     "WateringWindow",
-    "resolve_ode_config",
     "current_boundary",
     "derive_flow_m3s",
     "build_flow_schedule",
@@ -55,56 +46,6 @@ class WateringWindow:
     """
 
     start: datetime.time
-
-
-def resolve_ode_config(
-    configs: Configurations,
-    soil_pde: PDEConfig,
-    model_configs: Configurations,
-) -> PDEConfig:
-    """Build the predictor's PDE config, inheriting surface forcing from the sim.
-
-    The predictor parses its OWN ``[pde]`` block (solver / IC / timestep), so
-    any key it does not restate falls back to the ``PDEConfig`` default. That
-    is intentional -- the predictor warm-starts from live soil state, so its IC
-    keys stay predictor-local. But the surface-forcing blocks ``[ponding]`` and
-    ``[feddes]`` are siblings of ``[pde]`` (``soil_pde`` already carries the
-    live sim's, attached by the caller), and they must track the sim unless the
-    predictor deliberately overrides them: a predictor left on the 5 mm
-    ``watering_h_max_mm`` default while the sim ponds to 50 mm overflows its
-    watering rolls ~10x sooner, reading too dry and biasing the recommendation.
-
-    Contract: with no ``[pde]`` block and no forcing override the predictor
-    inherits ``soil_pde`` wholesale, same object (``ode is soil_pde``). With
-    no ``[pde]`` but its OWN ``[ponding]``/``[feddes]``, a shallow copy of
-    ``soil_pde`` is built first -- ``apply_surface_forcing`` replaces
-    ``.ponding``/``.feddes`` wholesale, and without the copy ``ode_config``
-    would BE ``soil_pde``, silently rewriting the sim's own resolved forcing
-    (HAZARD, B4 review). With its own ``[pde]`` it always gets a fresh
-    ``PDEConfig``, overriding the solver keys but still inheriting the sim's
-    ponding + feddes unless it supplies its own ``[soil_predictor.ponding]`` /
-    ``[soil_predictor.feddes]`` (which then win via ``apply_surface_forcing``).
-    """
-    if configs.has_member("pde"):
-        return resolve_pde_config(configs, model_configs, inherit_forcing_from=soil_pde)
-    elif configs.has_member("ponding") or configs.has_member("feddes"):
-        # Shallow copy is sufficient: apply_surface_forcing only ever REPLACES
-        # .ponding/.feddes wholesale (never mutates them in place), so a copy
-        # keeps ode_config distinct from soil_pde while still sharing every
-        # other scalar field.
-        ode_config = copy.copy(soil_pde)
-    else:
-        # No [pde] and no forcing override: return the sim's object unchanged
-        # so `ode is soil_pde` holds for callers that never touch forcing.
-        return soil_pde
-    # Seed the sim's surface forcing onto ode_config, then let the predictor's
-    # own sibling blocks override it. ode_config is never soil_pde itself here
-    # (own-[pde]: a fresh PDEConfig; no-[pde]-with-override: the shallow copy),
-    # so the reassignment below can never touch the sim's object.
-    ode_config.ponding = soil_pde.ponding
-    ode_config.feddes = soil_pde.feddes
-    apply_surface_forcing(ode_config, configs, ponding_base=soil_pde.ponding, feddes_base=soil_pde.feddes)
-    return ode_config
 
 
 def current_boundary(now: pd.Timestamp, tz, interval_min: int, offset_min: int) -> pd.Timestamp:
