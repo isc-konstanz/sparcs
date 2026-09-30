@@ -23,7 +23,7 @@ import numpy as np
 pytestmark = pytest.mark.slow
 
 from lories import Configurations  # noqa: E402
-from sparcs.components.agriculture.fieldsim.core.pde import (  # noqa: E402
+from sparcs.components.agriculture.simulation.core.pde import (  # noqa: E402
     RHO_W,
     FluxRates,
     MeshConfig,
@@ -179,7 +179,7 @@ def test_rollback_and_skip_never_mutate_the_ponds(tmp_path, monkeypatch):
 
 
 def test_watering_h_max_config(tmp_path):
-    from sparcs.components.agriculture.fieldsim.core.pde import PondingConfig
+    from sparcs.components.agriculture.simulation.core.pde import PondingConfig
 
     inherits = PondingConfig(_configs(str(tmp_path), h_max_mm=7.0))
     assert inherits.watering_h_max_mm == 7.0
@@ -190,7 +190,7 @@ def test_watering_h_max_config(tmp_path):
 
 
 def test_ponding_config_base_merge_watering_follows_base_not_new_h_max(tmp_path):
-    from sparcs.components.agriculture.fieldsim.core.pde import PondingConfig
+    from sparcs.components.agriculture.simulation.core.pde import PondingConfig
 
     base = PondingConfig(_configs(str(tmp_path), h_max_mm=8.0, watering_h_max_mm=50.0))
     assert base.watering_h_max_mm == 50.0  # guard: base is fully resolved

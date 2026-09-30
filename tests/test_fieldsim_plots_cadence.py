@@ -9,8 +9,8 @@ the first frame always fires and a ``None`` config renders nothing.
 """
 
 import pandas as pd
-from sparcs.components.agriculture.fieldsim.core.config import PlotConfig
-from sparcs.components.agriculture.fieldsim.core.plots import render_due
+from sparcs.components.agriculture.simulation.core.config import PlotConfig
+from sparcs.components.agriculture.simulation.core.plots import render_due
 
 
 def _rendered(timestamps, config) -> list:

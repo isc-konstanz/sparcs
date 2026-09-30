@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-sparcs.components.agriculture.fieldsim.core.shading
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+sparcs.components.agriculture.simulation.core.shading
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Ground shading under the PV rows as a pure model: geometry in, per-segment
 shade factors out, over the live ``ground_shading`` geometry primitives.

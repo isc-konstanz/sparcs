@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-sparcs.components.agriculture.fieldsim.core.assimilator
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+sparcs.components.agriculture.simulation.core.assimilator
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Tensiometer assimilation ("anchoring") with its own state. The math lives in
 ``.anchor`` (fipy-free); this class holds the per-sensor history and the

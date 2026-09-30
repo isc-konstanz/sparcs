@@ -16,8 +16,8 @@ import numpy as np
 
 _pvgeom = pytest.importorskip("pvfactors.geometry")
 
-from sparcs.components.agriculture.fieldsim.core.pv import _pvfactors_is_pointing_right  # noqa: E402
-from sparcs.components.agriculture.fieldsim.core.shading import ShadingConfig, ShadingModel  # noqa: E402
+from sparcs.components.agriculture.simulation.core.pv import _pvfactors_is_pointing_right  # noqa: E402
+from sparcs.components.agriculture.simulation.core.shading import ShadingConfig, ShadingModel  # noqa: E402
 
 _WIDTH = 1.134
 _DISTANCE = 3.4

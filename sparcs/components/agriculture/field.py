@@ -15,8 +15,8 @@ import pandas as pd
 from lories import Component, Constant
 from lories.data import ChannelState
 from lories.typing import Configurations, Timestamp
-from sparcs.components.agriculture.fieldsim.components import FieldSimulation
 from sparcs.components.agriculture.irrigation import Irrigation
+from sparcs.components.agriculture.simulation.components import FieldSimulation
 from sparcs.components.agriculture.soil import SoilMoisture
 
 

@@ -6,10 +6,10 @@ a reader who has a basic grasp of soil-water flow but is not familiar
 with the codebase.
 
 The implementation lives in
-[`fieldsim/core/pde.py`](core/pde.py) (`SoilPDECore`, the shared PDE engine, and the mesh build),
-[`fieldsim/core/engine.py`](core/engine.py) and [`fieldsim/runtime/runner.py`](runtime/runner.py) (live driver),
-[`fieldsim/core/planner.py`](core/planner.py) and [`fieldsim/core/rollout.py`](core/rollout.py) (forecast roll-outs),
-[`fieldsim/components.py`](components.py) (the lories components),
+[`simulation/core/pde.py`](core/pde.py) (`SoilPDECore`, the shared PDE engine, and the mesh build),
+[`simulation/core/engine.py`](core/engine.py) and [`simulation/runtime/runner.py`](runtime/runner.py) (live driver),
+[`simulation/core/planner.py`](core/planner.py) and [`simulation/core/rollout.py`](core/rollout.py) (forecast roll-outs),
+[`simulation/components.py`](components.py) (the lories components),
 and [`agriculture/soil/models.py`](../soil/models.py) (hydraulic
 property models).
 

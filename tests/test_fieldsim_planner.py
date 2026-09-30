@@ -19,12 +19,12 @@ pytestmark = pytest.mark.slow
 
 from lories.components.weather import Weather  # noqa: E402
 from lories.core import ConfigurationError  # noqa: E402
-from sparcs.components.agriculture.fieldsim.core.candidates import build_candidate_grid  # noqa: E402
-from sparcs.components.agriculture.fieldsim.core.config import DripConfig, PlannerConfig, SoilConfig  # noqa: E402
-from sparcs.components.agriculture.fieldsim.core.engine import SoilEngine  # noqa: E402
-from sparcs.components.agriculture.fieldsim.core.planner import IrrigationPlanner  # noqa: E402
-from sparcs.components.agriculture.fieldsim.core.rollout import RolloutEngine  # noqa: E402
-from sparcs.components.agriculture.fieldsim.core.state import Forcing  # noqa: E402
+from sparcs.components.agriculture.simulation.core.candidates import build_candidate_grid  # noqa: E402
+from sparcs.components.agriculture.simulation.core.config import DripConfig, PlannerConfig, SoilConfig  # noqa: E402
+from sparcs.components.agriculture.simulation.core.engine import SoilEngine  # noqa: E402
+from sparcs.components.agriculture.simulation.core.planner import IrrigationPlanner  # noqa: E402
+from sparcs.components.agriculture.simulation.core.rollout import RolloutEngine  # noqa: E402
+from sparcs.components.agriculture.simulation.core.state import Forcing  # noqa: E402
 
 UTC = dt.timezone.utc
 
@@ -273,7 +273,7 @@ def test_parallel_rollout_failure_degrades_to_ladder(tmp_path, monkeypatch, capl
     weather, seg_et = _weather_and_seg_et(engine, horizon_start)
     ic = engine.initial_state(horizon_start.to_pydatetime())
 
-    with caplog.at_level("ERROR", logger="sparcs.components.agriculture.fieldsim.core.planner"):
+    with caplog.at_level("ERROR", logger="sparcs.components.agriculture.simulation.core.planner"):
         traj = planner.rollout(np.asarray(ic.se), weather, seg_et, weather.index[0], weather.index[-1])
 
     assert set(traj.keys()) == set(planner._ladder)

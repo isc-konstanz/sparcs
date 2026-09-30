@@ -18,13 +18,13 @@ import pytest
 import numpy as np
 import pandas as pd
 from lories.components.weather import Weather
-from sparcs.components.agriculture.fieldsim.components import ChannelOutputs
-from sparcs.components.agriculture.fieldsim.core.chain import WeatherChain
-from sparcs.components.agriculture.fieldsim.core.config import FieldConfig, FieldSetup, PlotConfig, SoilConfig
-from sparcs.components.agriculture.fieldsim.core.engine import SoilEngine
-from sparcs.components.agriculture.fieldsim.core.evapotranspiration import ETModel
-from sparcs.components.agriculture.fieldsim.core.shading import ShadingConfig, ShadingModel
-from sparcs.components.agriculture.fieldsim.core.state import SoilState, StepResult
+from sparcs.components.agriculture.simulation.components import ChannelOutputs
+from sparcs.components.agriculture.simulation.core.chain import WeatherChain
+from sparcs.components.agriculture.simulation.core.config import FieldConfig, FieldSetup, PlotConfig, SoilConfig
+from sparcs.components.agriculture.simulation.core.engine import SoilEngine
+from sparcs.components.agriculture.simulation.core.evapotranspiration import ETModel
+from sparcs.components.agriculture.simulation.core.shading import ShadingConfig, ShadingModel
+from sparcs.components.agriculture.simulation.core.state import SoilState, StepResult
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _NIGHT = (90.0, 0.0, None)

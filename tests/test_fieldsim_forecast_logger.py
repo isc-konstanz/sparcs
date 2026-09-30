@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from lories.core import ConfigurationUnavailableError
-from sparcs.components.agriculture.fieldsim import components
+from sparcs.components.agriculture.simulation import components
 
 _PREDICTOR_ID = "agri.field_1.field_simulation.soil_predictor"
 

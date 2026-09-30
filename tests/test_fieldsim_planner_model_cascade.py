@@ -18,10 +18,10 @@ from conftest import MESH_KW, load_configs
 
 from lories import Configurations
 from lories.components import Component
-from sparcs.components.agriculture.fieldsim.core import engine as engine_module
-from sparcs.components.agriculture.fieldsim.core.config import SoilConfig
-from sparcs.components.agriculture.fieldsim.core.engine import SoilEngine
-from sparcs.components.agriculture.fieldsim.core.pde import PDEConfig
+from sparcs.components.agriculture.simulation.core import engine as engine_module
+from sparcs.components.agriculture.simulation.core.config import SoilConfig
+from sparcs.components.agriculture.simulation.core.engine import SoilEngine
+from sparcs.components.agriculture.simulation.core.pde import PDEConfig
 
 
 def _configs(tmp_path, soil_simulation: dict, **field) -> Configurations:

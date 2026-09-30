@@ -17,7 +17,7 @@ import pytest
 import numpy as np
 import pandas as pd
 from lories.components.weather import Weather
-from sparcs.components.agriculture.fieldsim.core.shading import ShadingConfig, ShadingModel
+from sparcs.components.agriculture.simulation.core.shading import ShadingConfig, ShadingModel
 
 _SEGMENT_RANGES = {"seg": (-1.0, 1.0)}
 

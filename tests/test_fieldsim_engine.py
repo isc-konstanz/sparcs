@@ -17,12 +17,12 @@ import numpy as np
 
 pytestmark = pytest.mark.slow
 
-from sparcs.components.agriculture.fieldsim.core.anchor import AnchorSensor  # noqa: E402
-from sparcs.components.agriculture.fieldsim.core.config import SoilConfig  # noqa: E402
-from sparcs.components.agriculture.fieldsim.core.engine import SoilEngine  # noqa: E402
-from sparcs.components.agriculture.fieldsim.core.pde import FluxRates, SoilPDECore  # noqa: E402
-from sparcs.components.agriculture.fieldsim.core.simulation import Simulation  # noqa: E402
-from sparcs.components.agriculture.fieldsim.core.state import Forcing, SoilState  # noqa: E402
+from sparcs.components.agriculture.simulation.core.anchor import AnchorSensor  # noqa: E402
+from sparcs.components.agriculture.simulation.core.config import SoilConfig  # noqa: E402
+from sparcs.components.agriculture.simulation.core.engine import SoilEngine  # noqa: E402
+from sparcs.components.agriculture.simulation.core.pde import FluxRates, SoilPDECore  # noqa: E402
+from sparcs.components.agriculture.simulation.core.simulation import Simulation  # noqa: E402
+from sparcs.components.agriculture.simulation.core.state import Forcing, SoilState  # noqa: E402
 
 UTC = dt.timezone.utc
 

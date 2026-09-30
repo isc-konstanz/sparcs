@@ -2,8 +2,8 @@
 """sparcs.tests.test_schedule
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Unit tests for ``fieldsim.core.schedule.slot_floor``, the absolute wall-clock
-slot alignment used by ``fieldsim.core.candidates`` and the field runner.
+Unit tests for ``simulation.core.schedule.slot_floor``, the absolute wall-clock
+slot alignment used by ``simulation.core.candidates`` and the field runner.
 Pure function, exercised directly with pinned exact-timestamp cases.
 """
 
@@ -11,7 +11,7 @@ import pytest
 
 import pandas as pd
 
-_schedule = pytest.importorskip("sparcs.components.agriculture.fieldsim.core.schedule")
+_schedule = pytest.importorskip("sparcs.components.agriculture.simulation.core.schedule")
 slot_floor = _schedule.slot_floor
 
 

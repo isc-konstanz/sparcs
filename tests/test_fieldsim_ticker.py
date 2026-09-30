@@ -16,9 +16,9 @@ import logging
 import pandas as pd
 import pytz
 from lories.scheduler import TickScheduler
-from sparcs.components.agriculture.fieldsim import components
-from sparcs.components.agriculture.fieldsim.core.config import FieldConfig, FieldSetup, SoilConfig
-from sparcs.components.agriculture.fieldsim.runtime import Ticker
+from sparcs.components.agriculture.simulation import components
+from sparcs.components.agriculture.simulation.core.config import FieldConfig, FieldSetup, SoilConfig
+from sparcs.components.agriculture.simulation.runtime import Ticker
 
 LORIES_SCHEDULER_LOGGER = "lories.scheduler"
 

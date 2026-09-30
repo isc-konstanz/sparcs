@@ -21,11 +21,11 @@ import pytest
 import numpy as np
 import pandas as pd
 from lories.components.weather import Weather
-from sparcs.components.agriculture.fieldsim.core import rollout as _rollout
-from sparcs.components.agriculture.fieldsim.core.candidates import WateringWindow, build_candidate_grid
-from sparcs.components.agriculture.fieldsim.core.config import PlannerConfig
-from sparcs.components.agriculture.fieldsim.core.planner import IrrigationPlanner
-from sparcs.components.agriculture.fieldsim.core.rollout import RolloutEngine
+from sparcs.components.agriculture.simulation.core import rollout as _rollout
+from sparcs.components.agriculture.simulation.core.candidates import WateringWindow, build_candidate_grid
+from sparcs.components.agriculture.simulation.core.config import PlannerConfig
+from sparcs.components.agriculture.simulation.core.planner import IrrigationPlanner
+from sparcs.components.agriculture.simulation.core.rollout import RolloutEngine
 
 _TZ = "Europe/Berlin"
 

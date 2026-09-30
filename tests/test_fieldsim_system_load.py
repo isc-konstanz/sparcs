@@ -27,8 +27,8 @@ import sparcs
 from lories.application.settings import Settings
 from lories.core import ConfigurationError, ConfigurationUnavailableError
 from lories.data import Channels
-from sparcs.components.agriculture.fieldsim.components import ChannelOutputs, FieldSimulation
-from sparcs.components.agriculture.fieldsim.core.state import SoilState, StepResult
+from sparcs.components.agriculture.simulation.components import ChannelOutputs, FieldSimulation
+from sparcs.components.agriculture.simulation.core.state import SoilState, StepResult
 
 pytestmark = pytest.mark.slow  # builds a Gmsh mesh
 

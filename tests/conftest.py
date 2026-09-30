@@ -46,7 +46,7 @@ def pde_core_factory(tmp_path_factory):
     ``dt`` stays parameterizable -- ``test_soil_core_integration.py`` keeps
     its own dt='50s' fixture.
     """
-    from sparcs.components.agriculture.fieldsim.core.pde import (
+    from sparcs.components.agriculture.simulation.core.pde import (
         MeshConfig,
         PDEConfig,
         SoilPDECore,
@@ -70,7 +70,7 @@ def strip_probe_factory():
     """Point probe under the watering strip (bay-center, just below the
     surface), where irrigation ponding directly affects the sampled Se."""
     import numpy as np
-    from sparcs.components.agriculture.fieldsim.core.pde import (
+    from sparcs.components.agriculture.simulation.core.pde import (
         ProbeSpec,
         SoilPDECore,
         _coords_to_cell,
@@ -92,7 +92,7 @@ def strip_probe_factory():
 def rollout_engine_factory():
     """Bare ``RolloutEngine`` over a core/probe pair, carrying only the loose
     fields the roll-out methods read."""
-    from sparcs.components.agriculture.fieldsim.core.rollout import RolloutEngine
+    from sparcs.components.agriculture.simulation.core.rollout import RolloutEngine
 
     def make_engine(
         core,

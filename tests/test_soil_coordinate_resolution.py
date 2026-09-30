@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 import numpy as np
-from sparcs.components.agriculture.fieldsim.core.pde import (
+from sparcs.components.agriculture.simulation.core.pde import (
     _coords_to_cell,
     _nearest_cell_m,
     resolve_probe_from_sensor,

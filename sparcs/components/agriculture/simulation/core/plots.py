@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-sparcs.components.agriculture.fieldsim.core.plots
+sparcs.components.agriculture.simulation.core.plots
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Progress images as pure functions from data to PNG bytes: create the

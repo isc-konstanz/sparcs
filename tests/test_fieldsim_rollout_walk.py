@@ -12,10 +12,10 @@ shared ``core.pde`` functions, not copies.
 from types import SimpleNamespace
 
 import pandas as pd
-from sparcs.components.agriculture.fieldsim.core import pde as _pde
-from sparcs.components.agriculture.fieldsim.core import rollout as _rollout
-from sparcs.components.agriculture.fieldsim.core.pde import ClipDiagnostics
-from sparcs.components.agriculture.fieldsim.core.rollout import RolloutEngine
+from sparcs.components.agriculture.simulation.core import pde as _pde
+from sparcs.components.agriculture.simulation.core import rollout as _rollout
+from sparcs.components.agriculture.simulation.core.pde import ClipDiagnostics
+from sparcs.components.agriculture.simulation.core.rollout import RolloutEngine
 
 _TZ = "Europe/Berlin"
 

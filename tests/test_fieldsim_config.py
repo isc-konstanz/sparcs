@@ -12,8 +12,8 @@ import pytest
 import pandas as pd
 from lories.core import ConfigurationError
 from lories.core.configs.configurations import Configurations
-from sparcs.components.agriculture.fieldsim.core.assimilator import parse_anchor_config
-from sparcs.components.agriculture.fieldsim.core.config import (
+from sparcs.components.agriculture.simulation.core.assimilator import parse_anchor_config
+from sparcs.components.agriculture.simulation.core.config import (
     DripConfig,
     EvapotranspirationConfig,
     FieldConfig,
@@ -22,7 +22,7 @@ from sparcs.components.agriculture.fieldsim.core.config import (
     PlotConfig,
     SoilConfig,
 )
-from sparcs.components.agriculture.fieldsim.core.shading import ShadingConfig
+from sparcs.components.agriculture.simulation.core.shading import ShadingConfig
 
 SOIL_CONF = """
 type = "soil_simulation"

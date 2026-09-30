@@ -22,11 +22,11 @@ import pandas as pd
 
 pytestmark = pytest.mark.slow
 
-from sparcs.components.agriculture.fieldsim.core.candidates import (  # noqa: E402
+from sparcs.components.agriculture.simulation.core.candidates import (  # noqa: E402
     WateringWindow,
     build_candidate_grid,
 )
-from sparcs.components.agriculture.fieldsim.core.pde import FluxRates  # noqa: E402
+from sparcs.components.agriculture.simulation.core.pde import FluxRates  # noqa: E402
 
 WATERING = "WateringTopSegment"
 

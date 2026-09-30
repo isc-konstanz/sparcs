@@ -13,7 +13,7 @@ import datetime
 import pytest
 
 import pandas as pd
-from sparcs.components.agriculture.fieldsim.core.candidates import (
+from sparcs.components.agriculture.simulation.core.candidates import (
     WateringWindow,
     build_flow_schedule,
     derive_flow_m3s,

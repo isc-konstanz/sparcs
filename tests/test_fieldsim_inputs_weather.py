@@ -14,10 +14,10 @@ import logging
 from types import SimpleNamespace
 
 import pandas as pd
-from sparcs.components.agriculture.fieldsim import components
-from sparcs.components.agriculture.fieldsim.core.config import SoilConfig
+from sparcs.components.agriculture.simulation import components
+from sparcs.components.agriculture.simulation.core.config import SoilConfig
 
-COMPONENTS_LOGGER = "sparcs.components.agriculture.fieldsim.components"
+COMPONENTS_LOGGER = "sparcs.components.agriculture.simulation.components"
 
 
 class _RecordingData:

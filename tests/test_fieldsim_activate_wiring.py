@@ -17,7 +17,7 @@ import pytest
 import pandas as pd
 from lories import Component, Configurations
 from lories.core import ConfigurationUnavailableError
-from sparcs.components.agriculture.fieldsim.components import ChannelNamespace, FieldSimulation, SoilSimulation
+from sparcs.components.agriculture.simulation.components import ChannelNamespace, FieldSimulation, SoilSimulation
 
 
 def _field(**attrs) -> FieldSimulation:

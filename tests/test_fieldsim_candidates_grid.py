@@ -11,7 +11,7 @@ import pytest
 from conftest import td
 
 import pandas as pd
-from sparcs.components.agriculture.fieldsim.core.candidates import build_candidate_grid, check_candidate_cap
+from sparcs.components.agriculture.simulation.core.candidates import build_candidate_grid, check_candidate_cap
 
 # --- fill_order ladder generation --------------------------------------------
 

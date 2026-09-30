@@ -17,9 +17,9 @@ import pytest
 
 import numpy as np
 import pandas as pd
-from sparcs.components.agriculture.fieldsim.core.anchor import AnchorConfig, AnchorSensor
-from sparcs.components.agriculture.fieldsim.core.assimilator import Assimilator, parse_anchor_config
-from sparcs.components.agriculture.fieldsim.core.state import SoilState
+from sparcs.components.agriculture.simulation.core.anchor import AnchorConfig, AnchorSensor
+from sparcs.components.agriculture.simulation.core.assimilator import Assimilator, parse_anchor_config
+from sparcs.components.agriculture.simulation.core.state import SoilState
 
 UTC = dt.timezone.utc
 T0 = dt.datetime(2026, 9, 25, 12, 0, tzinfo=UTC)
@@ -228,7 +228,7 @@ def test_ingest_empty_series_warns_once_and_keeps_previous(caplog):
 
 
 def test_matches_live_anchor_update():
-    live = pytest.importorskip("sparcs.components.agriculture.fieldsim.core.anchor")
+    live = pytest.importorskip("sparcs.components.agriculture.simulation.core.anchor")
 
     engine, sensor, state = _near_far_setup()
     cfg = _cfg()

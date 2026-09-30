@@ -9,7 +9,7 @@ timestamps, and carries no ``mode`` suffix.
 """
 
 import pandas as pd
-from sparcs.components.agriculture.fieldsim.core.plots import _format_progress_title
+from sparcs.components.agriculture.simulation.core.plots import _format_progress_title
 
 
 def test_naive_timestamp_has_no_offset():

@@ -10,7 +10,7 @@ within staleness.
 
 import numpy as np
 import pandas as pd
-from sparcs.components.agriculture.fieldsim.core.anchor import (
+from sparcs.components.agriculture.simulation.core.anchor import (
     AnchorConfig,
     AnchorSensor,
     SensorOverrides,

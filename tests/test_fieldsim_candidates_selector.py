@@ -15,8 +15,8 @@ from conftest import td
 
 import numpy as np
 import pandas as pd
-from sparcs.components.agriculture.fieldsim.core.candidates import score_candidate, select_candidate
-from sparcs.components.agriculture.fieldsim.core.planner import IrrigationPlanner
+from sparcs.components.agriculture.simulation.core.candidates import score_candidate, select_candidate
+from sparcs.components.agriculture.simulation.core.planner import IrrigationPlanner
 from sparcs.components.agriculture.soil.models import Genuchten
 
 _TZ = "Europe/Berlin"

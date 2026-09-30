@@ -10,11 +10,11 @@ import logging
 
 import pytest
 
-from sparcs.components.agriculture.fieldsim.core.chain import WeatherChain, flow_m3s_per_m
-from sparcs.components.agriculture.fieldsim.core.config import FieldConfig, FieldSetup, SoilConfig
-from sparcs.components.agriculture.fieldsim.core.shading import ShadingConfig, ShadingModel
+from sparcs.components.agriculture.simulation.core.chain import WeatherChain, flow_m3s_per_m
+from sparcs.components.agriculture.simulation.core.config import FieldConfig, FieldSetup, SoilConfig
+from sparcs.components.agriculture.simulation.core.shading import ShadingConfig, ShadingModel
 
-CHAIN_LOGGER = "sparcs.components.agriculture.fieldsim.core.chain"
+CHAIN_LOGGER = "sparcs.components.agriculture.simulation.core.chain"
 
 
 def _chain(drip_line_length_m: float) -> WeatherChain:

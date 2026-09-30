@@ -19,8 +19,8 @@ import pytest
 
 import pandas as pd
 from lories.core import ConfigurationError
-from sparcs.components.agriculture.fieldsim import components
-from sparcs.components.agriculture.fieldsim.components import SoilPredictor
+from sparcs.components.agriculture.simulation import components
+from sparcs.components.agriculture.simulation.components import SoilPredictor
 
 _TZ = "Europe/Berlin"
 _PNG_A = b"\x89PNG\r\n\x1a\nA"

@@ -20,9 +20,9 @@ from types import SimpleNamespace
 import pytest
 
 from lories.core import ConfigurationUnavailableError
-from sparcs.components.agriculture.fieldsim.components import FieldSimulation
-from sparcs.components.agriculture.fieldsim.core import anchor as _anchor
-from sparcs.components.agriculture.fieldsim.core.assimilator import parse_anchor_config
+from sparcs.components.agriculture.simulation.components import FieldSimulation
+from sparcs.components.agriculture.simulation.core import anchor as _anchor
+from sparcs.components.agriculture.simulation.core.assimilator import parse_anchor_config
 
 moisture = pytest.importorskip("sparcs.components.agriculture.soil.moisture")
 SoilMoisture = moisture.SoilMoisture

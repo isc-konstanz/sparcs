@@ -22,11 +22,11 @@ import pytest
 
 import numpy as np
 import pandas as pd
-from sparcs.components.agriculture.fieldsim import components
-from sparcs.components.agriculture.fieldsim.components import ChannelOutputs
-from sparcs.components.agriculture.fieldsim.core.config import PlotConfig
-from sparcs.components.agriculture.fieldsim.core.plots import ShadingEnvelope
-from sparcs.components.agriculture.fieldsim.core.state import ChainResult, SoilState, StepResult
+from sparcs.components.agriculture.simulation import components
+from sparcs.components.agriculture.simulation.components import ChannelOutputs
+from sparcs.components.agriculture.simulation.core.config import PlotConfig
+from sparcs.components.agriculture.simulation.core.plots import ShadingEnvelope
+from sparcs.components.agriculture.simulation.core.state import ChainResult, SoilState, StepResult
 
 T0 = pd.Timestamp("2026-07-12 10:00", tz="UTC")
 

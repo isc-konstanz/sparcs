@@ -25,12 +25,12 @@ from lories import Constant
 from lories.components.weather import Weather, WeatherProvider
 from lories.core import ConfigurationError
 from lories.data import Channels
-from sparcs.components.agriculture.fieldsim import components
-from sparcs.components.agriculture.fieldsim.core.anchor import AnchorSensor
-from sparcs.components.agriculture.fieldsim.core.assimilator import parse_anchor_config
-from sparcs.components.agriculture.fieldsim.core.config import FieldConfig, FieldSetup, PlannerConfig, SoilConfig
-from sparcs.components.agriculture.fieldsim.core.simulation import Simulation
-from sparcs.components.agriculture.fieldsim.core.state import ChainResult, Plan, SoilState, StepResult
+from sparcs.components.agriculture.simulation import components
+from sparcs.components.agriculture.simulation.core.anchor import AnchorSensor
+from sparcs.components.agriculture.simulation.core.assimilator import parse_anchor_config
+from sparcs.components.agriculture.simulation.core.config import FieldConfig, FieldSetup, PlannerConfig, SoilConfig
+from sparcs.components.agriculture.simulation.core.simulation import Simulation
+from sparcs.components.agriculture.simulation.core.state import ChainResult, Plan, SoilState, StepResult
 
 UTC = dt.timezone.utc
 

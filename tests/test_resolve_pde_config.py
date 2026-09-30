@@ -12,7 +12,7 @@ import pytest
 
 from lories import Configurations
 
-_soil = pytest.importorskip("sparcs.components.agriculture.fieldsim.core.pde")
+_soil = pytest.importorskip("sparcs.components.agriculture.simulation.core.pde")
 resolve_pde_config = _soil.resolve_pde_config
 apply_surface_forcing = _soil.apply_surface_forcing
 PDEConfig = _soil.PDEConfig

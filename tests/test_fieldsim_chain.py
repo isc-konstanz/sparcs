@@ -14,11 +14,11 @@ import numpy as np
 import pandas as pd
 from lories.components.weather import Weather
 from lories.core.configs.configurations import Configurations
-from sparcs.components.agriculture.fieldsim.core.chain import WeatherChain
-from sparcs.components.agriculture.fieldsim.core.config import FieldConfig, FieldSetup, SoilConfig
-from sparcs.components.agriculture.fieldsim.core.evapotranspiration import ETModel, SegmentProperties
-from sparcs.components.agriculture.fieldsim.core.pde import flow_m3s_per_m, rain_flux, segment_flux_dicts
-from sparcs.components.agriculture.fieldsim.core.shading import ShadingConfig, ShadingModel
+from sparcs.components.agriculture.simulation.core.chain import WeatherChain
+from sparcs.components.agriculture.simulation.core.config import FieldConfig, FieldSetup, SoilConfig
+from sparcs.components.agriculture.simulation.core.evapotranspiration import ETModel, SegmentProperties
+from sparcs.components.agriculture.simulation.core.pde import flow_m3s_per_m, rain_flux, segment_flux_dicts
+from sparcs.components.agriculture.simulation.core.shading import ShadingConfig, ShadingModel
 
 _GROUND_SHADING_CONF = Path(
     r"C:\Users\jb\My_Nextcloud\ISC_Share\Software\lories_sparcs\sparcs\data\copperhead\conf\agri_pv.d"

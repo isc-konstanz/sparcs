@@ -8,7 +8,7 @@ Asserts external behaviour (the corrected field), not the internal call sequence
 """
 
 import numpy as np
-from sparcs.components.agriculture.fieldsim.core.anchor import (
+from sparcs.components.agriculture.simulation.core.anchor import (
     AnchorObservation,
     _localization_weights,
     anchor_field,

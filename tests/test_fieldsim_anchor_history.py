@@ -12,7 +12,7 @@ of smearing the latest value onto a different step.
 import math
 
 import pandas as pd
-from sparcs.components.agriculture.fieldsim.core.anchor import latest_reading_at
+from sparcs.components.agriculture.simulation.core.anchor import latest_reading_at
 
 
 def _series(pairs):

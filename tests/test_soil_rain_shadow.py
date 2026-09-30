@@ -14,7 +14,7 @@ import types
 import pytest
 
 from lories import Configurations
-from sparcs.components.agriculture.fieldsim.core.pde import (
+from sparcs.components.agriculture.simulation.core.pde import (
     MeshConfig,
     PDEConfig,
     SoilPDECore,

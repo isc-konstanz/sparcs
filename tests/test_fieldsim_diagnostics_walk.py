@@ -15,9 +15,9 @@ import logging
 import types
 
 import numpy as np
-from sparcs.components.agriculture.fieldsim.core.engine import SoilEngine
-from sparcs.components.agriculture.fieldsim.core.pde import WalkResult
-from sparcs.components.agriculture.fieldsim.core.state import Forcing, SoilState
+from sparcs.components.agriculture.simulation.core.engine import SoilEngine
+from sparcs.components.agriculture.simulation.core.pde import WalkResult
+from sparcs.components.agriculture.simulation.core.state import Forcing, SoilState
 
 UTC = dt.timezone.utc
 

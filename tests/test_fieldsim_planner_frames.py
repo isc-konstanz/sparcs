@@ -20,8 +20,8 @@ import pandas as pd
 import pytz
 from lories.connectors.sql.columns import DatetimeColumn
 from lories.core.errors import ResourceError
-from sparcs.components.agriculture.fieldsim.core.candidates import WateringWindow
-from sparcs.components.agriculture.fieldsim.core.planner import (
+from sparcs.components.agriculture.simulation.core.candidates import WateringWindow
+from sparcs.components.agriculture.simulation.core.planner import (
     build_detail_frame,
     build_header_frame,
     build_irrigation_frame,

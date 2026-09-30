@@ -18,7 +18,7 @@ import numpy as np
 pytestmark = pytest.mark.slow
 
 from lories import Configurations  # noqa: E402
-from sparcs.components.agriculture.fieldsim.core.pde import (  # noqa: E402
+from sparcs.components.agriculture.simulation.core.pde import (  # noqa: E402
     SE_MAX,
     SE_MIN,
     FluxRates,

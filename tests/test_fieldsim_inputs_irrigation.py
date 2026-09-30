@@ -20,12 +20,12 @@ import pytest
 import numpy as np
 import pandas as pd
 from lories.data import Channels
-from sparcs.components.agriculture.fieldsim import components
-from sparcs.components.agriculture.fieldsim.core.candidates import derive_flow_m3s
-from sparcs.components.agriculture.fieldsim.core.config import SoilConfig
-from sparcs.components.agriculture.fieldsim.core.pde import design_flow_lpm
-from sparcs.components.agriculture.fieldsim.runtime.ports import IRRIGATION_LOOKBACK
-from sparcs.components.agriculture.fieldsim.runtime.runner import FieldRunner
+from sparcs.components.agriculture.simulation import components
+from sparcs.components.agriculture.simulation.core.candidates import derive_flow_m3s
+from sparcs.components.agriculture.simulation.core.config import SoilConfig
+from sparcs.components.agriculture.simulation.core.pde import design_flow_lpm
+from sparcs.components.agriculture.simulation.runtime.ports import IRRIGATION_LOOKBACK
+from sparcs.components.agriculture.simulation.runtime.runner import FieldRunner
 
 
 def _index(start="2026-05-01 10:00", periods=4, freq="15min"):

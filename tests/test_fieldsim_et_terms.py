@@ -14,7 +14,7 @@ floor) instead of silently zeroing the aerodynamic term via ra = inf.
 
 import numpy as np
 import pandas as pd
-from sparcs.components.agriculture.fieldsim.core.evapotranspiration import ETModel
+from sparcs.components.agriculture.simulation.core.evapotranspiration import ETModel
 
 
 def _series(value: float) -> pd.Series:

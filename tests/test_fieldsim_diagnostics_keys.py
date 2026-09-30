@@ -13,9 +13,9 @@ import types
 
 import pytest
 
-from sparcs.components.agriculture.fieldsim.components import SoilSimulation
-from sparcs.components.agriculture.fieldsim.core.engine import SoilEngine
-from sparcs.components.agriculture.fieldsim.core.pde import ClipDiagnostics, FluxRates
+from sparcs.components.agriculture.simulation.components import SoilSimulation
+from sparcs.components.agriculture.simulation.core.engine import SoilEngine
+from sparcs.components.agriculture.simulation.core.pde import ClipDiagnostics, FluxRates
 
 
 @pytest.mark.parametrize(

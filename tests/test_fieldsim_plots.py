@@ -13,8 +13,8 @@ import logging
 
 import numpy as np
 import pandas as pd
-from sparcs.components.agriculture.fieldsim.core.config import PlotConfig
-from sparcs.components.agriculture.fieldsim.core.plots import (
+from sparcs.components.agriculture.simulation.core.config import PlotConfig
+from sparcs.components.agriculture.simulation.core.plots import (
     ShadingEnvelope,
     count_render_failure,
     render_due,

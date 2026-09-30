@@ -23,11 +23,11 @@ import pytest
 import numpy as np
 import pandas as pd
 import pytz
-from sparcs.components.agriculture.fieldsim.core.chain import WeatherChain
-from sparcs.components.agriculture.fieldsim.core.config import FieldConfig, FieldSetup, PlannerConfig, SoilConfig
-from sparcs.components.agriculture.fieldsim.core.evapotranspiration import SegmentProperties
-from sparcs.components.agriculture.fieldsim.core.simulation import Simulation
-from sparcs.components.agriculture.fieldsim.core.state import (
+from sparcs.components.agriculture.simulation.core.chain import WeatherChain
+from sparcs.components.agriculture.simulation.core.config import FieldConfig, FieldSetup, PlannerConfig, SoilConfig
+from sparcs.components.agriculture.simulation.core.evapotranspiration import SegmentProperties
+from sparcs.components.agriculture.simulation.core.simulation import Simulation
+from sparcs.components.agriculture.simulation.core.state import (
     Forcing,
     Plan,
     SoilState,
@@ -35,14 +35,14 @@ from sparcs.components.agriculture.fieldsim.core.state import (
     decode_state_blob,
     encode_state_blob,
 )
-from sparcs.components.agriculture.fieldsim.runtime.memory import FrameInputs, Recorder
-from sparcs.components.agriculture.fieldsim.runtime.runner import FieldRunner
-from sparcs.components.agriculture.fieldsim.runtime.scenario import ScenarioRunner
+from sparcs.components.agriculture.simulation.runtime.memory import FrameInputs, Recorder
+from sparcs.components.agriculture.simulation.runtime.runner import FieldRunner
+from sparcs.components.agriculture.simulation.runtime.scenario import ScenarioRunner
 
 UTC = dt.timezone.utc
 PLUS_TWO = dt.timezone(dt.timedelta(hours=2))
 BERLIN = "Europe/Berlin"
-RUNNER_LOGGER = "sparcs.components.agriculture.fieldsim.runtime.runner"
+RUNNER_LOGGER = "sparcs.components.agriculture.simulation.runtime.runner"
 
 
 class _Probe:

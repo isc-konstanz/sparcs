@@ -14,8 +14,8 @@ import types
 import pytest
 
 import numpy as np
-from sparcs.components.agriculture.fieldsim.components import SoilSimulation
-from sparcs.components.agriculture.fieldsim.core.engine import SoilEngine
+from sparcs.components.agriculture.simulation.components import SoilSimulation
+from sparcs.components.agriculture.simulation.core.engine import SoilEngine
 from sparcs.components.agriculture.soil.models import Genuchten
 
 _MODEL = Genuchten(theta_r=0.05, theta_s=0.43, alpha=0.08, n=1.6, k_s=1.0e-4)
