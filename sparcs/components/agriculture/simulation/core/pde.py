@@ -17,9 +17,8 @@ from typing import Any, Callable, Optional
 
 import gmsh
 
-# FiPy 4.0.2 imports the numpy-2-deprecated `numpy.core` in its numerix module;
-# silence that import-time DeprecationWarning before importing fipy (E402-ignored
-# per file). No fixed FiPy release exists yet.
+# FiPy 4.0.2 imports the numpy-2-deprecated `numpy.core`; silence that DeprecationWarning
+# before importing fipy (E402 ignored per file). No fixed FiPy release exists yet.
 warnings.filterwarnings(
     "ignore",
     message=r"numpy\.core is deprecated",
@@ -58,36 +57,20 @@ IRR_HEADROOM_EPS: float = 1e-4
 
 def design_flow_lpm(nozzle_count: int, nozzle_flow_lph: float) -> float:
     """Whole-field design flow [l/min] from the drip layout: nozzle output x count.
-
-    The single source for the drip-derived flow, shared by the live sim (which
-    feeds it when the physical meter is unavailable) and the predictor's
-    ``_derive_flow_m3s`` (which normalizes it per out-of-plane metre). Same
-    l/min unit the physical flow meter reports.
-    """
+    Same l/min unit the physical flow meter reports."""
     return nozzle_count * nozzle_flow_lph / 60.0
 
 
 def flow_m3s_per_m(flow_lpm: float, total_drip_line_length_m: float) -> float:
-    """Whole-field flow [l/min] normalized to m³/s per out-of-plane metre of row.
-
-    The single source for the 60_000.0 l/min -> m³/s conversion combined with
-    the total-drip-line-length spread (see ``SoilSimulation.configure``'s
-    ``total_drip_line_length_m`` docstring): ``SoilSimulation._compute_flux_rates``
-    feeds the metered flow through this, and ``SoilPredictor._derive_flow_m3s``
-    feeds the layout-derived ``design_flow_lpm`` through the SAME expression, so
-    the two normalization sites can never diverge.
-    """
+    """Whole-field flow [l/min] normalized to m³/s per out-of-plane metre of row,
+    spread over the total drip-line length."""
     return flow_lpm / (60_000.0 * total_drip_line_length_m)
 
 
 @dataclass
 class SolveResult:
-    """One Picard sweep loop's outcome.
-
-    ``converged``: ``max|Δθ_per_sweep| ≤ tol_th``. ``finite``: False when the
-    post-sweep field contains NaN/Inf; state not committed, caller must roll back.
-    ``error``: exception message if the sweep raised.
-    """
+    """One Picard sweep loop's outcome; ``converged`` means ``max|Δθ_per_sweep| ≤ tol_th``.
+    ``finite`` is False on NaN/Inf after the sweep: state not committed, the caller must roll back."""
 
     residual: float
     converged: bool
@@ -103,12 +86,8 @@ class SolveResult:
 
 @dataclass
 class WalkResult:
-    """Outcome of one :meth:`SoilPDECore.walk_window` call.
-
-    ``ok`` is False in strict mode when a substep failed at ``dt_min`` or
-    ``cancel()`` fired. In accept mode, non-finite substeps are skipped (state
-    held) and their seconds accumulate in ``skipped_s``.
-    """
+    """Outcome of one :meth:`SoilPDECore.walk_window` call; ``ok`` is False in strict mode on a failure at ``dt_min``
+    or a ``cancel()``. In accept mode non-finite substeps are skipped and their seconds add up in ``skipped_s``."""
 
     ok: bool = True
     reason: Optional[str] = None
@@ -120,14 +99,8 @@ class WalkResult:
 
 @dataclass
 class ClipDiagnostics:
-    """Mass (kg per metre of out-of-plane row depth, integrated over dt) that
-    did not enter or leave the soil as requested.
-
-    - ``top_rejected``: rain clipped at a saturated cell (only with ponding
-      disabled; irrigation never contributes — its excess ponds instead).
-    - ``bottom_rejected``: unmet evaporation or root-uptake demand (cell too dry).
-    - ``ponding_overflow``: true runoff — pond overflow past ``PondingConfig.h_max_mm``.
-    """
+    """Mass [kg per metre of row, over dt] that did not move as requested: ``top_rejected`` rain at saturated cells
+    (ponding off), ``bottom_rejected`` unmet ET demand, ``ponding_overflow`` runoff past ``h_max_mm``."""
 
     top_rejected: float = 0.0
     bottom_rejected: float = 0.0
@@ -141,21 +114,8 @@ class ClipDiagnostics:
 
 @dataclass
 class PondingPlan:
-    """Deferred surface-pond bookkeeping for one substep.
-
-    ``apply_source`` plans pond updates without mutating ``surface_h``;
-    :meth:`SoilPDECore.commit_ponding` applies them only after the substep's
-    solve is committed, so adaptive-walk rollbacks and skips cannot
-    double-count inflow into the buckets.
-
-    - ``rain_bucket_m``: per open-sky segment bucket depth after this substep's
-      inflow and planned infiltration, before the ``h_max_mm`` overflow trim.
-    - ``irr_available_m``: watering-strip pond plus this substep's irrigation
-      inflow (water-column metres over the strip); the actual intake is read
-      back from the implicit source at commit time.
-    - ``irr_cells`` / ``irr_b``: strip cells and the frozen per-cell intake
-      coefficient B [1/s]; ``None`` when no irrigation water is on offer.
-    """
+    """Pond updates planned by ``apply_source`` and applied by :meth:`SoilPDECore.commit_ponding` only after the
+    substep's solve commits, so rollbacks cannot double-count inflow. Depths in m of water column, ``irr_b`` in 1/s."""
 
     dt: float
     rain_bucket_m: dict[str, float] = field(default_factory=dict)
@@ -166,12 +126,8 @@ class PondingPlan:
 
 @dataclass
 class FluxRates:
-    """Per-callback fluxes for ``_apply_source`` and diagnostics.
-
-    Flux densities in kg/(m²·s); ``flow_m3s`` in m³/s per out-of-plane metre of
-    row (the whole-field metered flow divided by the total drip-line length).
-    ``seg_evap`` and ``seg_transp`` are keyed by mesh segment name.
-    """
+    """Per-callback fluxes keyed by mesh segment name, in kg/(m²·s); ``flow_m3s`` in m³/s per out-of-plane metre
+    of row (whole-field flow divided by the total drip-line length)."""
 
     seg_evap: dict[str, float]
     seg_transp: dict[str, float]
@@ -183,12 +139,8 @@ def segment_flux_dicts(
     seg_et: dict[str, pd.DataFrame],
     ts: pd.Timestamp,
 ) -> tuple[dict[str, float], dict[str, float]]:
-    """Per-segment ET flux dicts at ``ts``: negative ET (radiative cooling) is
-    clipped to zero and zero-flux segments are skipped, so ``FluxRates`` only
-    carries segments that actually pull water. Shared by the predictor's roll
-    loop and the sim's ``_compute_flux_rates`` (which passes its frame's last
-    timestamp).
-    """
+    """Per-segment ET flux dicts at ``ts``; negative ET (radiative cooling) clips to zero and zero-flux segments
+    are skipped."""
     seg_evap: dict[str, float] = {}
     seg_transp: dict[str, float] = {}
     for name, frame in seg_et.items():
@@ -204,11 +156,8 @@ def segment_flux_dicts(
 
 
 def rain_flux(et_data: pd.DataFrame, ts: pd.Timestamp, elapsed_s: float) -> float:
-    """Rain flux density [kg/(m²·s)] for the interval ending at ``ts``:
-    ``precip_mm / elapsed_s`` distributes the precipitation mass-conservatively
-    over the interval; missing column / missing row / NaN / non-positive
-    precipitation all mean "no rain".
-    """
+    """Rain flux density [kg/(m²·s)] for the interval ending at ``ts``, spread evenly over ``elapsed_s``.
+    A missing column or row, NaN or non-positive precipitation means no rain."""
     col = Weather.PRECIPITATION
     if elapsed_s <= 0 or col not in et_data.columns or ts not in et_data.index:
         return 0.0
@@ -218,9 +167,7 @@ def rain_flux(et_data: pd.DataFrame, ts: pd.Timestamp, elapsed_s: float) -> floa
     return float(precip) / elapsed_s  # mm/s == kg/(m²·s)
 
 
-# Shared with FieldSimulation._bay_width's default (base.py) so the standalone
-# and in-context mesh parses agree on one fallback: 3.5 m is real rig bay
-# geometry, not an invented standalone default (was 10.0; see B6).
+# Real rig bay width [m]; matches the ``bay_width`` parameter default.
 _DEFAULT_BAY_WIDTH: float = 3.5
 
 
@@ -245,12 +192,8 @@ def _nearest_cell_m(
     depth_m: float,
     x_offset: float,
 ) -> int:
-    """Return the index of the cell nearest to (x_m, depth_m) in mesh coordinates.
-
-    ``x_offset`` is ``mesh_config.width / 2.0``, the bay-center shift that maps
-    bay-centered x to absolute mesh x. ``depth_m`` is positive-downward depth; the
-    mesh uses negative-y for depth, so cell_y target is ``-depth_m``.
-    """
+    """Index of the cell nearest to bay-centered ``x_m`` and positive-downward ``depth_m`` (mesh y is ``-depth_m``).
+    ``x_offset`` is the bay-center shift, ``mesh_config.width / 2.0``."""
     return int(np.argmin((cell_x - (x_m + x_offset)) ** 2 + (cell_y - (-depth_m)) ** 2))
 
 
@@ -260,11 +203,7 @@ def _coords_to_cell(
     x_offset_cm: float,
     depth_cm: float,
 ) -> int:
-    """Convert sensor coordinates (cm, bay-centered) to the nearest FiPy cell index.
-
-    Converts cm to metres (×0.01), then applies the same nearest-cell mapping used
-    by :func:`resolve_probes` for point probes.
-    """
+    """Nearest FiPy cell index for bay-centered sensor coordinates in cm."""
     x_m = x_offset_cm * 0.01
     depth_m = depth_cm * 0.01
     cell_centers = np.asarray(mesh_fipy.cellCenters)
@@ -280,12 +219,7 @@ def resolve_sensor_probe(
     mesh_fipy: "Gmsh2D",
     mesh_config: "MeshConfig",
 ) -> ProbeSpec:
-    """Build a point :class:`ProbeSpec` at a sensor's location.
-
-    A sensor is a probe that also carries measured data: its ``x_offset_cm`` and
-    ``depth_cm`` (bay-centered) resolve to a single mesh cell exactly as a
-    configured point probe would. ``channel_id`` is the sensor key.
-    """
+    """Point :class:`ProbeSpec` at a sensor's bay-centered cm location; ``channel_id`` is the sensor key."""
     idx = _coords_to_cell(mesh_fipy, mesh_config, x_offset_cm, depth_cm)
     return ProbeSpec(
         name=f"Sensor {key} (x_offset={x_offset_cm:.1f}cm, depth={depth_cm:.1f}cm)",
@@ -310,14 +244,8 @@ def resolve_probes(
     mesh_config: "MeshConfig",
     log_name: Optional[str] = None,
 ) -> list[ProbeSpec]:
-    """Resolve ``[probes.points.<name>]`` config blocks against a FiPy mesh into
-    a list of point ``ProbeSpec`` sampling recipes.
-
-    Coordinates use the same vocabulary and unit as a SoilMoisture sensor
-    (a sensor is-a probe): ``x_offset`` bay-centered and signed (left negative),
-    ``depth`` positive-downward, both in centimetres. See
-    ``docs/adr/0001-soil-coordinate-units-cm.md``.
-    """
+    """Point ``ProbeSpec`` list from ``[probes.points.<name>]`` blocks, in centimetres like a SoilMoisture sensor:
+    ``x_offset`` bay-centered (left negative), ``depth`` positive-downward. Missing keys raise ValueError."""
     probes: list[ProbeSpec] = []
     if not probes_cfg.has_member("points"):
         return probes
@@ -357,19 +285,8 @@ def top_segment_names_from_mesh(mesh: "MeshConfig") -> list[str]:
 
 @dataclass
 class FeddesConfig:
-    """Feddes (1978) piecewise-linear root-water-uptake stress factor α(h) ∈ [0, 1].
-
-    Four pF thresholds (pF = log10(|h|), |h| in cm water) bracket the stress curve::
-
-        |h| < |P0|          α = 0    (anaerobic; too wet)
-        |P0|–|P1|           α : 0 → 1 (anaerobic ramp)
-        |P1|–|P2|           α = 1    (optimal)
-        |P2|–|P3|           α : 1 → 0 (dry ramp)
-        |h| ≥ |P3|          α = 0    (wilting point)
-
-    Thresholds are converted to Se at build time; the runtime path does a
-    piecewise-linear interpolation on Se per plant cell.
-    """
+    """Feddes (1978) piecewise-linear root-water-uptake stress factor α(h) ∈ [0, 1], off by default.
+    pF = log10(|h| in cm): α is 0 wetter than P0 (if anaerobic), 1 from P1 to P2, 0 at P3, linear ramps between."""
 
     enabled: bool = False
     anaerobic: bool = False
@@ -378,26 +295,19 @@ class FeddesConfig:
     p2_pf: float = 3.0  # optimal upper bound
     p3_pf: float = 4.2  # wilting point
 
-    # Root distribution β(z): "uniform" (volume-weighted), "linear" (decays to 0
-    # at plant_height), or "exponential" (exp(-z / root_decay_length)).
-    # Normalised so Σ β · cell_vol = 1.
+    # Root distribution β(z), normalised so Σ β · cell_vol = 1: "uniform", "linear" (0 at plant_height)
+    # or "exponential" (exp(-z / root_decay_length)).
     root_distribution: str = "uniform"
     root_decay_length: float = 0.3  # m; only used for "exponential"
 
-    # Šimůnek compensation threshold ω_c. At ω_c < 1 demand is redistributed
-    # to less-stressed cells so total uptake = T_pot when ω ≥ ω_c;
-    # below ω_c total uptake = T_pot · ω / ω_c.
+    # Šimůnek compensation threshold ω_c: below 1, demand moves to less-stressed cells so uptake is T_pot
+    # while ω ≥ ω_c and T_pot · ω / ω_c below.
     omega_c: float = 1.0
 
     @classmethod
     def from_configs(cls, configs: Configurations, base: Optional[FeddesConfig] = None) -> FeddesConfig:
-        """Single parse site for every field: read ``configs`` against the
-        dataclass field default, or against ``base.<field>`` when ``base`` is
-        given — a key-level merge for a predictor overriding only some of the
-        sim's fields (see ``apply_surface_forcing``); an explicit key in
-        ``configs`` always wins over ``base``. ``root_distribution`` keeps its
-        ``.strip().lower()`` normalization on both the default and base paths.
-        """
+        """Parse every field from ``configs``; a missing key falls back to ``base.<field>`` when given,
+        else the field default, so an explicit key always wins over ``base``."""
         self = cls()
         for f in fields(cls):
             default = f.default if base is None else getattr(base, f.name)
@@ -415,11 +325,7 @@ class FeddesConfig:
         return self
 
     def __init__(self, configs: Optional[Configurations] = None, base: Optional[FeddesConfig] = None):
-        # Shim only -- no parse logic of its own. configs=None ignores base and
-        # returns the plain field defaults (does NOT go through from_configs);
-        # otherwise delegate to the single parse site and copy its resolved
-        # fields onto self (the shim takes no field kwargs, so it cannot just
-        # return from_configs' result).
+        # configs=None ignores base and keeps the plain field defaults; otherwise copy from_configs' fields.
         if configs is None:
             for f in fields(self):
                 setattr(self, f.name, f.default)
@@ -437,11 +343,8 @@ def _alpha_feddes_per_cell(
     se_p0: Optional[float] = None,
     se_p1: Optional[float] = None,
 ) -> np.ndarray:
-    """Piecewise-linear α ∈ [0, 1] per cell from Se thresholds.
-
-    Se thresholds ordered se_p0 ≥ se_p1 ≥ se_p2 ≥ se_p3 (drier ⇒ smaller Se).
-    When se_p0 / se_p1 are None the anaerobic branch is skipped.
-    """
+    """Piecewise-linear α ∈ [0, 1] per cell from Se thresholds ordered se_p0 ≥ se_p1 ≥ se_p2 ≥ se_p3.
+    With se_p0 or se_p1 None the anaerobic branch is skipped."""
     se = np.asarray(se, dtype=float)
     alpha = np.zeros_like(se)
     anaerobic = se_p0 is not None and se_p1 is not None
@@ -465,25 +368,8 @@ def _alpha_feddes_per_cell(
 
 @dataclass
 class PondingConfig:
-    """Per-top-segment surface-ponding bucket (metres of water column).
-
-    When enabled, rain accumulates per segment and drains into the soil up to
-    the segment's infiltration capacity; excess above ``h_max_mm`` overflows
-    as runoff. When disabled, rain goes straight to soil cells and the
-    clipper-rejected mass surfaces via ``ClipDiagnostics.top_rejected``.
-
-    Irrigation always ponds on the watering strip regardless of ``enabled``
-    (the drip emitter physically ponds; discarding the excess was a numerics
-    bug). ``watering_h_max_mm`` bounds that pond separately — an emitter
-    basin holds far more water column over its narrow strip than sheet
-    ponding does on open ground — and defaults to ``h_max_mm`` when unset
-    (with no ``base``; see ``base`` below).
-
-    ``base``, when supplied, becomes the per-key parse default instead of the
-    hardcoded defaults (a key-level merge rather than whole-block replacement)
-    and ``watering_h_max_mm`` then defaults to ``base.watering_h_max_mm``
-    instead of the just-parsed ``h_max_mm``.
-    """
+    """Per-top-segment rain pond, off by default; overflow above ``h_max_mm`` is runoff. Irrigation always ponds
+    on the watering strip, capped by ``watering_h_max_mm`` (defaults to ``h_max_mm``, or to ``base``'s when given)."""
 
     enabled: bool = False
     h_max_mm: float = 5.0  # max rain-ponding depth before overflow [mm]
@@ -491,15 +377,8 @@ class PondingConfig:
 
     @classmethod
     def from_configs(cls, configs: Configurations, base: Optional[PondingConfig] = None) -> PondingConfig:
-        """Single parse site for every field: read ``configs`` against the
-        dataclass field default, or against ``base.<field>`` when ``base`` is
-        given. ``watering_h_max_mm`` keeps its dynamic base=None default: it
-        follows the just-resolved ``h_max_mm`` rather than its own field
-        default, so field declaration order (``enabled``, ``h_max_mm``,
-        ``watering_h_max_mm``) matters — ``h_max_mm`` resolves first. With
-        ``base`` given, that coupling does not apply — the default is
-        ``base``'s own resolved ``watering_h_max_mm``.
-        """
+        """Parse every field from ``configs``; a missing key falls back to ``base.<field>`` when given, else the field
+        default; without ``base``, ``watering_h_max_mm`` defaults to the parsed ``h_max_mm`` (field order matters)."""
         self = cls()
         for f in fields(cls):
             if base is not None:
@@ -520,7 +399,7 @@ class PondingConfig:
         return self
 
     def __init__(self, configs: Optional[Configurations] = None, base: Optional[PondingConfig] = None):
-        # Shim only -- no parse logic of its own; see FeddesConfig.__init__.
+        # configs=None ignores base and keeps the plain field defaults; otherwise copy from_configs' fields.
         if configs is None:
             for f in fields(self):
                 setattr(self, f.name, f.default)
@@ -553,11 +432,8 @@ class PDEConfig:
         # Fraction of intercepted rain that runs off onto the open soil (1.0 = all).
         self.rain_runoff_fraction: float = float(configs.get("rain_runoff_fraction", default=1.0))
 
-        # Fraction of rain that passes THROUGH the PV shadow onto the shaded soil
-        # (0 = fully blocked, the default; 1 = the shadow admits all rain). Models
-        # an imperfectly sealing PV roof / edge drip reaching the bay-center column,
-        # so a physical k_s can respond to rain there without over-draining. Clamped
-        # to [0, 1].
+        # Fraction of rain passing through the PV shadow onto shaded soil (leaky roof, edge drip),
+        # clamped to [0, 1]; 0 = fully blocked, the default.
         self.rain_shadow_passthrough: float = min(
             1.0, max(0.0, float(configs.get("rain_shadow_passthrough", default=0.0)))
         )
@@ -577,10 +453,8 @@ class PDEConfig:
         else:
             self.cold_start = to_timedelta("3h")
 
-        # Surface-forcing configs (ponding, feddes) are sibling blocks of [pde] at
-        # the soil-component level, NOT nested under [pde] -- so a whole-block [pde]
-        # override cannot silently drop them. They default here and are populated
-        # from the component's [ponding]/[feddes] blocks via apply_surface_forcing.
+        # [ponding]/[feddes] are siblings of [pde], not nested, so a whole-block [pde] override cannot drop them;
+        # apply_surface_forcing fills these defaults.
         self.feddes: FeddesConfig = FeddesConfig(None)
         self.ponding: PondingConfig = PondingConfig(None)
 
@@ -604,20 +478,8 @@ def apply_surface_forcing(
     ponding_base: Optional[PondingConfig] = None,
     feddes_base: Optional[FeddesConfig] = None,
 ) -> PDEConfig:
-    """Populate ``ode_config.ponding`` / ``.feddes`` from a soil component's
-    sibling ``[ponding]`` / ``[feddes]`` blocks (peers of ``[pde]``, not nested).
-
-    A block that is absent leaves the current value untouched, so the caller can
-    seed inherited defaults first (e.g. a predictor seeding the live sim's forcing)
-    and let the component's own block override. Keeping ponding and feddes out of
-    ``[pde]`` means a whole-block ``[pde]`` override can never silently drop them.
-
-    ``ponding_base`` / ``feddes_base``, when given, become the per-key parse
-    defaults for a present block -- a key-level merge instead of a whole-block
-    replacement against hardcoded defaults, so a predictor overriding only some
-    keys does not silently reset the rest. Sim-block parses pass neither (fresh
-    parse against the hardcoded defaults, unchanged).
-    """
+    """Set ``ode_config.ponding``/``.feddes`` from sibling ``[ponding]``/``[feddes]`` blocks; an absent block keeps
+    the current value. ``ponding_base``/``feddes_base`` are per-key defaults, so a present block merges by key."""
     if configs is not None and hasattr(configs, "has_member"):
         if configs.has_member("ponding"):
             ode_config.ponding = PondingConfig(configs.get_member("ponding", defaults={}), base=ponding_base)
@@ -631,37 +493,8 @@ def resolve_pde_config(
     model_block: Configurations,
     inherit_forcing_from: Optional[PDEConfig] = None,
 ) -> PDEConfig:
-    """Build a component's ``PDEConfig`` and populate its surface forcing in one place.
-
-    Collapses the construct-then-``apply_surface_forcing`` sequence into one
-    canonical resolution (``engine.py`` builds the soil PDE config through
-    this), so parsing ``[pde]``/``[model]``/forcing can never diverge between
-    call sites.
-
-    ``component_block.get_member("pde", defaults={}, ensure_exists=True)`` parses
-    against the component's own ``[pde]`` block -- a no-op merge when the block
-    already exists; harmlessly materializes an empty one when absent.
-
-    When ``inherit_forcing_from`` is given, ``cfg.ponding``/``cfg.feddes`` are
-    seeded to ``inherit_forcing_from``'s SAME objects (``is`` identity) BEFORE
-    ``apply_surface_forcing`` runs, and that call passes
-    ``ponding_base``/``feddes_base=inherit_forcing_from.ponding``/``.feddes`` so a
-    present sibling block key-merges against the inherited resolved values
-    instead of the hardcoded ``PondingConfig``/``FeddesConfig`` defaults.
-
-    The seed-before-apply ORDER is mandatory, not cosmetic: reversing it --
-    seeding AFTER calling ``apply_surface_forcing`` -- would let the plain
-    identity assignment clobber ``apply_surface_forcing``'s merge result
-    whenever the component states its OWN explicit ``[ponding]``/``[feddes]``
-    override, silently discarding that override in favour of the inherited
-    object. Seeding first means ``apply_surface_forcing``'s own-block branch
-    (when present) always has the last word; the seed only supplies the
-    correct fallback ``cfg.ponding``/``.feddes`` for the absent-block case,
-    where ``apply_surface_forcing`` is a no-op.
-
-    With no ``inherit_forcing_from`` (fresh-parse semantics) this calls plain
-    ``apply_surface_forcing(cfg, component_block)``.
-    """
+    """Build a component's ``PDEConfig`` with surface forcing. ``inherit_forcing_from``'s ponding/feddes objects are
+    seeded first and kept when the block is absent; a component's own block key-merges over them and wins."""
     cfg = PDEConfig(component_block.get_member("pde", defaults={}, ensure_exists=True), model_configs=model_block)
     if inherit_forcing_from is not None:
         cfg.ponding = inherit_forcing_from.ponding
@@ -680,11 +513,8 @@ def resolve_pde_config(
 # eq=False: identity equality avoids ambiguous numpy array comparisons.
 @dataclass(eq=False)
 class ProbeSpec:
-    """Resolved sampling recipe for one probe (point or area).
-
-    ``cell_indices`` selects FiPy ``rel_sat`` cells; ``weights`` are 1.0 for
-    a point probe or per-cell volumes for an area (volume-weighted mean).
-    """
+    """Resolved sampling recipe for one probe: ``rel_sat`` cell indices with weight 1.0 for a point
+    or per-cell volumes for an area (volume-weighted mean)."""
 
     name: str
     channel_id: str
@@ -693,11 +523,7 @@ class ProbeSpec:
 
 
 class SoilPDECore:
-    """Shared FiPy / Richards-equation core for both the live solver and predictor.
-
-    Owns the mesh, Richards PDE, segment index, and integration primitives
-    (apply_source, solve, sample, total_water, state I/O).
-    """
+    """FiPy Richards-equation core: mesh, PDE, segment index, integration primitives and state I/O."""
 
     soil_model: SoilModel
 
@@ -751,34 +577,27 @@ class SoilPDECore:
         self._build_segment_index()
         self._build_feddes_thresholds()
         self._build_root_beta()
-        # Per-segment surface-pond depth [m of water column]; persists via state blob.
-        # Rain ponds on the open-sky segments (gated on PondingConfig.enabled);
-        # irrigation always ponds on the watering strip.
+        # Per-segment surface-pond depth [m of water column], kept in the state blob. Rain ponds on open-sky
+        # segments when PondingConfig.enabled; irrigation always ponds on the watering strip.
         self.surface_h: dict[str, float] = {name: 0.0 for name in [*self.open_sky_segment_names, "WateringTopSegment"]}
 
-    # -- PDE assembly ----------------------------------------------------------
+    # PDE assembly
 
     def _build_eq(self, rel_sat_name: str) -> None:
         mesh = self.mesh
         rel_sat = CellVariable(mesh=mesh, name=rel_sat_name, hasOld=True)
         g_faces = FaceVariable(mesh=mesh, name="gravity faces", value=(0, 1.0))
         source = CellVariable(mesh=mesh, name="source", value=0.0)
-        # Irrigation intake as a linearized implicit source r(Se) = A - B·Se
-        # (A = B·SE_MAX, B ≥ 0, frozen per substep): the solver throttles intake
-        # to zero as the strip cell saturates, instead of inject-then-clip.
-        # Both variables stay 0 outside irrigation substeps (no-op in the matrix).
+        # Irrigation intake as a linearized implicit source r(Se) = B·(SE_MAX - Se), B frozen per substep,
+        # so intake throttles to zero as the strip saturates. Both stay 0 outside irrigation substeps.
         irr_source = CellVariable(mesh=mesh, name="irrigation source", value=0.0)
         irr_impl = CellVariable(mesh=mesh, name="irrigation intake coeff", value=0.0)
 
         kf = self.soil_model.k_from_se(rel_sat)
         d_h = self.soil_model.dh_dse(rel_sat)
 
-        # Richards' equation in Se form:
-        #   (θs-θr) ∂Se/∂t = ∇·[K · |dh/dSe| ∇Se] + ∂K/∂y + source
-        # Free-drainage BC emerges from FiPy's zero-gradient Neumann + gravity divergence.
-        # The divergence also sums exterior faces (face K = cell K): that drains
-        # K(Se_bottom) out of the bottom, but would feed K(Se_top) IN through the
-        # top faces. Keep gravity on the bottom face only.
+        # Richards' equation in Se form; free drainage comes from FiPy's zero-gradient Neumann BC plus gravity.
+        # Its divergence also sums exterior faces and would feed K(Se_top) in at the top, so keep the bottom face only.
         g_values = np.array(g_faces.value, dtype=float)
         g_values[:, np.asarray(mesh.exteriorFaces) & ~np.asarray(mesh.physicalFaces["GroundBottomSegment"])] = 0.0
         g_faces.setValue(g_values)
@@ -810,9 +629,8 @@ class SoilPDECore:
         self.richards = richards
 
     def _hydrostatic_ic_array(self, water_table_depth_m: float) -> np.ndarray:
-        """Hydrostatic-equilibrium Se field: saturated at/below the water table,
-        Se(z) from gravity-matric balance above it. y positive upward, surface at 0.
-        """
+        """Hydrostatic-equilibrium Se field: saturated at and below the water table, gravity-matric balance above it.
+        y is positive upward with the surface at 0."""
         y_centers = np.asarray(self.mesh.cellCenters[1], dtype=float)
         y_wt = -float(water_table_depth_m)
         h_above_wt_m = np.maximum(y_centers - y_wt, 0.0)
@@ -855,9 +673,8 @@ class SoilPDECore:
         self.rain_face_len = open_face_len * self.rain_runoff_amplification
 
     def _compute_rain_open_fractions(self, names: list) -> dict:
-        """Fraction of each top segment reached by rain: fully open outside the PV
-        shadow (rain_shadow_width [m], centered), and ``rain_shadow_passthrough``
-        of the rain inside it (0 = fully blocked, the default)."""
+        """Fraction of each top segment reached by rain: 1 outside the centered PV shadow (``rain_shadow_width`` [m]),
+        ``rain_shadow_passthrough`` inside it."""
         mc = self.mesh_config
         shadow = max(0.0, float(getattr(self.ode_config, "rain_shadow_width", 0.0)))
         passthrough = min(1.0, max(0.0, float(getattr(self.ode_config, "rain_shadow_passthrough", 0.0))))
@@ -924,11 +741,8 @@ class SoilPDECore:
             )
 
     def _build_root_beta(self) -> None:
-        """Precompute normalised root density β̂(z) on plant cells (Σ β̂_i · V_i = 1).
-
-        Shapes: "uniform" (volume-weighted), "linear" (decays to 0 at plant_height),
-        "exponential" (exp(-z / root_decay_length)).
-        """
+        """Precompute normalised root density β̂(z) on plant cells (Σ β̂_i · V_i = 1); unknown shapes fall back to
+        "uniform" with a warning."""
         cell_vols = np.asarray(self.mesh.cellVolumes)[self.plant_cells]
         if cell_vols.size == 0:
             self._root_beta_normalized = np.zeros(0)
@@ -957,10 +771,7 @@ class SoilPDECore:
         self._root_beta_normalized = (raw / norm) if norm > 0 else np.zeros_like(raw)
 
     def feddes_alpha(self, se: np.ndarray) -> np.ndarray:
-        """Per-cell Feddes α(Se) ∈ [0, 1]. Returns a constant-1 array when
-        Feddes is disabled, kept callable in both regimes so callers
-        don't need to branch.
-        """
+        """Per-cell Feddes α(Se) ∈ [0, 1]; all ones when Feddes is disabled."""
         if self._feddes_se_p2 is None:
             return np.ones_like(se)
         return _alpha_feddes_per_cell(
@@ -989,11 +800,8 @@ class SoilPDECore:
         rain_flux: float,
         dt: float,
     ) -> tuple[dict[str, float], dict[str, float]]:
-        """Plan one dt of the per-segment rain ponding buckets (no state mutation).
-
-        Returns (effective_seg_flux [kg/(m²·s)], bucket_after_m per segment —
-        pre-overflow; the ``h_max_mm`` trim happens in :meth:`commit_ponding`).
-        """
+        """Plan one dt of the rain ponding buckets without mutating state: effective flux [kg/(m²·s)] and
+        bucket depth [m] per segment, before the ``h_max_mm`` trim in :meth:`commit_ponding`."""
         effective: dict[str, float] = {}
         bucket_after: dict[str, float] = {}
         for name in self.open_sky_segment_names:
@@ -1009,7 +817,7 @@ class SoilPDECore:
             effective[name] = infiltrated_m * RHO_W / dt if dt > 0 else 0.0
         return effective, bucket_after
 
-    # -- integration primitives -----------------------------------------------
+    # Integration primitives
 
     def apply_source(
         self,
@@ -1020,15 +828,8 @@ class SoilPDECore:
         flow_m3s: float,
         dt: float,
     ) -> tuple[ClipDiagnostics, PondingPlan]:
-        """Rebuild the source variables for the next ``dt`` step.
-
-        Sums rain / evap / transpiration as θ-rate [1/s] per cell and clips to
-        keep Se ∈ [SE_MIN, SE_MAX]; irrigation (plus any ponded strip water) is
-        offered through the linearized implicit source instead, so the solver
-        throttles intake near saturation. Returns the clipped mass as
-        :class:`ClipDiagnostics` plus a :class:`PondingPlan` the caller must
-        pass to :meth:`commit_ponding` once the substep's solve is committed.
-        """
+        """Rebuild the sources for the next ``dt``: rain and ET as clipped θ-rate [1/s], irrigation as implicit source.
+        Pass the returned :class:`PondingPlan` to :meth:`commit_ponding` once the substep's solve is committed."""
         se = self.rel_sat.value
         coeff = self.theta_diff
         theta_rate = np.zeros_like(se)
@@ -1090,9 +891,7 @@ class SoilPDECore:
                 plan.irr_cells = cells
                 plan.irr_b = b
 
-        # Šimůnek & Hopmans (2009) compensated uptake:
-        #   S_i = T_pot · α_i · β̂_i / max(ω, ω_c)  [kg/m³/s]
-        # where ω = Σ α_j · β̂_j · V_j (volume-weighted mean stress factor).
+        # Šimůnek & Hopmans (2009) compensated uptake; ω is the volume-weighted mean stress factor.
         if seg_transp and self.plant_volume > 0 and self._root_beta_normalized.size > 0:
             transp_mass = sum(v * self.segment_face_len.get(name, 0.0) for name, v in seg_transp.items())
             if transp_mass > 0:
@@ -1120,13 +919,8 @@ class SoilPDECore:
         return clip, plan
 
     def commit_ponding(self, plan: PondingPlan) -> float:
-        """Apply a substep's deferred pond updates after its solve committed.
-
-        Decrements the watering pond by the intake the implicit source actually
-        delivered (read back from the committed field), stores the planned rain
-        buckets, and trims every bucket to ``h_max_mm``. Returns the trimmed
-        (true-runoff) mass [kg per metre of row].
-        """
+        """Apply a substep's planned pond updates after its solve committed; watering intake is read back from the
+        committed field. Returns the overflow (runoff) mass [kg per metre of row]."""
         h_max_m = self.ode_config.ponding.h_max_mm / 1000.0
         overflow_mass = 0.0
 
@@ -1165,12 +959,8 @@ class SoilPDECore:
         tol_th: float = DEFAULT_TOL_TH,
         log_name: Optional[str] = None,
     ) -> SolveResult:
-        """Picard sweep loop; converges on ``max|Δθ_per_sweep| ≤ tol_th``.
-
-        Raised sweeps and non-finite fields are reported via :class:`SolveResult`
-        without committing state. Finite fields are safety-clipped to
-        ``[SE_MIN, SE_MAX]`` before ``updateOld()``.
-        """
+        """Picard sweep loop until ``max|Δθ_per_sweep| ≤ tol_th``; a raise or non-finite field is reported without
+        committing state. A finite field is clipped to ``[SE_MIN, SE_MAX]`` before ``updateOld()``."""
         eq = self.richards
         rel_sat = self.rel_sat
         coeff = self.theta_diff
@@ -1253,15 +1043,8 @@ class SoilPDECore:
         on_step: Optional[Callable[[float], None]] = None,
         log_name: Optional[str] = None,
     ) -> WalkResult:
-        """Adaptive-dt walk over ``window_s`` seconds.
-
-        On failure, rolls back and retries at ``sub_dt / 3`` down to ``dt_min``.
-        After fast convergence (≤ 3 sweeps), ``sub_dt`` grows back toward ``dt`` (×1.5).
-
-        At ``dt_min``: ``accept_at_dt_min=True`` accepts finite under-converged states
-        and skips non-finite ones (``WalkResult.skipped_s``);
-        ``accept_at_dt_min=False`` aborts with ``WalkResult(ok=False)``.
-        """
+        """Adaptive-dt walk over ``window_s``: a failed substep rolls back and retries at a third, down to ``dt_min``.
+        At ``dt_min``, ``accept_at_dt_min`` keeps finite unconverged states and skips non-finite ones, else aborts."""
         dt_max = self.ode_config.dt
         dt_min = max(self.ode_config.dt_min, 1.0e-6)
         sub_dt = dt_max
@@ -1327,7 +1110,7 @@ class SoilPDECore:
 
         return out
 
-    # -- diagnostics & state ---------------------------------------------------
+    # Diagnostics and state
 
     def sample(self, probe: ProbeSpec) -> float:
         rel_sat = np.asarray(self.rel_sat.value)
@@ -1341,8 +1124,7 @@ class SoilPDECore:
         return float(np.sum(theta * np.asarray(self.mesh.cellVolumes))) * RHO_W
 
     def surface_water(self) -> float:
-        """Σ pond depth · face_len · ρ_w — water held in the surface ponds
-        (kg per unit out-of-plane depth), on top of :meth:`total_water`."""
+        """Water held in the surface ponds (kg per unit out-of-plane depth), on top of :meth:`total_water`."""
         return float(sum(h * self.segment_face_len.get(name, 0.0) for name, h in self.surface_h.items())) * RHO_W
 
     def bottom_drainage_estimate(self) -> float:
@@ -1355,7 +1137,7 @@ class SoilPDECore:
         return k_bot * RHO_W
 
     def snapshot(self) -> np.ndarray:
-        """Copy of the live saturation field."""
+        """Copy of the current saturation field."""
         return np.asarray(self.rel_sat.value).copy()
 
     def set_state(self, arr: np.ndarray, *, update_old: bool = True) -> None:
@@ -1387,11 +1169,7 @@ class SoilPDECore:
 
 
 def create_mesh(mesh_config: MeshConfig) -> None:
-    """Build the soil cross-section .msh file at ``mesh_config.filename``.
-
-    Heavy gmsh call; callers should gate on file existence via
-    :func:`ensure_mesh` rather than invoking this directly.
-    """
+    """Build the soil cross-section .msh file at ``mesh_config.filename``; slow, so call :func:`ensure_mesh`."""
     dl = mesh_config.dl
     width = mesh_config.width
     height = mesh_config.height
