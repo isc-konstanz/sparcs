@@ -3,15 +3,8 @@
 tests.test_fieldsim_system_load
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-A copperhead-shaped conf tree loaded through ``sparcs.load()``: the field
-simulation configures under a real ``lories`` system, its probe and
-forecast-table channels exist before any connector connects, and ``activate``
-starts the ticker from the system's weather and location. ``ChannelOutputs``
-hands every row of a chunk to the real channels. A duplicate probe
-``soil_id`` is refused at configure even without a predictor, and a system
-without weather is refused at activate. Tension-measured ``SoilMoisture``
-children of the field become sensor probes at activate and, with ``[anchor]``
-on, reach the assimilator.
+The field simulation in a copperhead-shaped conf tree loaded through ``sparcs.load()``.
+Its probe and forecast-table channels exist before any connector connects.
 """
 
 import datetime as dt

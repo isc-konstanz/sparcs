@@ -3,10 +3,8 @@
 tests.test_fieldsim_plots_wiring
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The progress images through the real wiring: ``ShadingModel`` remembers the
-live tick's frame inputs and not the planner's horizon roll, ``WeatherChain``
-hands them on in the ``ChainResult``, and ``ChannelOutputs`` renders real
-matplotlib PNGs into the image channels, the soil frame off the engine's mesh.
+Progress images through the real wiring: ``ShadingModel`` keeps the current tick's frame inputs,
+not the planner's horizon roll, and ``ChannelOutputs`` renders real matplotlib PNGs.
 """
 
 import datetime as dt

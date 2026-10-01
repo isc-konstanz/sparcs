@@ -3,11 +3,7 @@
 tests.test_fieldsim_simulation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``Simulation.run`` over the real ``WeatherChain`` and a stub engine: cold-start
-spin-up (and its cancellation), the already-simulated guard, the
-``extra_diagnostics`` merge and the per-row anchor increment;
-``Simulation.add_sensors`` handing discovered tensiometers to the assimilator;
-and ``Simulation.plan`` handing the forecast's issue time to the planner.
+``Simulation.run``, ``add_sensors`` and ``plan`` over the real ``WeatherChain`` and a stub engine.
 """
 
 import logging

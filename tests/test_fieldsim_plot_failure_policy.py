@@ -3,16 +3,8 @@
 tests.test_fieldsim_plot_failure_policy
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The progress-image render policy at the ``ChannelOutputs`` seams, for the
-shading frame (``chain``) and the soil frame (``steps``) alike: a failing
-render is logged with its traceback and skipped, ``disable_after_failures``
-consecutive failures switch the child's plotting off for the rest of the
-process with one ERROR announcing it, a successful render resets the count,
-every count reaches the child's in-memory ``plot_strikes`` channel, a failing
-render never writes a frame, a failing image write is a failed render, a
-failing ``plot_strikes`` write never escapes, and ``[plot] interval`` collapses
-chunks to one frame per interval. Fake renderers stand in for matplotlib; the
-real ones run in ``test_fieldsim_plots_wiring``.
+The ``ChannelOutputs`` progress-image failure policy for the shading and soil frames.
+Fake renderers stand in for matplotlib.
 """
 
 import logging

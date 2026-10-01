@@ -3,11 +3,8 @@
 tests.test_fieldsim_shading_aframe
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The mirrored ``as_is`` roof must be a peak ("/\\"), not a valley ("\\/"), for
-any ``axis_azimuth``: pvfactors derives a signed rotation from
-``(surface_azimuth - axis_azimuth)`` and the row geometry follows that sign.
-Ground truth is pvfactors itself, so the pins are not a tautology against the
-builder's own sign formula.
+The mirrored ``as_is`` roof is a peak ("/\\"), not a valley ("\\/"), for any ``axis_azimuth``.
+pvfactors signs the rotation by ``(surface_azimuth - axis_azimuth)``; pvfactors is the ground truth.
 """
 
 import pytest

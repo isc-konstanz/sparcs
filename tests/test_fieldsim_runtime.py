@@ -3,13 +3,8 @@
 tests.test_fieldsim_runtime
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Runtime layer of the ``fieldsim`` skeleton: ``FrameInputs`` slicing,
-``Recorder`` frames, and the live tick policy of ``FieldRunner`` -- frontier
-alignment, midnight-aligned chunks (also across a DST change), per-chunk
-isolated writes, the queued warm-start restore, incompatible states, the
-planner slot gate and the stall/failure tallies -- driven through
-``ScenarioRunner`` and directly. The engine, shading and ET are stubs;
-everything between them is the real code path.
+``FrameInputs``, ``Recorder`` and the ``FieldRunner`` tick policy, driven directly and through
+``ScenarioRunner``. Engine, shading and ET are stubs; everything between them is real.
 """
 
 import datetime as dt

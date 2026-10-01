@@ -3,10 +3,8 @@
 tests.test_fieldsim_planner_frames
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The planner's three forecast-table frame builders: the ``agri_field_forecast``
-header (one row per candidate per run), the ``agri_soil_forecast`` detail
-(per-probe LONG rows) and the ``agri_field_forecast_irrigation`` edge rows.
-All pure -- no engine, no mesh.
+The planner's frame builders for ``agri_field_forecast``, ``agri_soil_forecast`` and
+``agri_field_forecast_irrigation``. Pure: no engine, no mesh.
 """
 
 import datetime
@@ -88,8 +86,7 @@ def test_header_frame_indexed_at_run_timestamp_for_every_row():
 
 
 def test_header_frame_unconfigured_windows_are_null_not_sentinel():
-    """Ladder has 2 active windows but max_windows=4 -- w2/w3 columns must be
-    NULL for every row; no -1.0 fill sentinel."""
+    """Ladder has 2 active windows but max_windows=4: w2/w3 columns are NULL, no -1.0 sentinel."""
     ladder = _synthetic_ladder()
 
     frame = _header(ladder, ladder[0])
@@ -136,8 +133,7 @@ def test_header_frame_weather_creation_is_constant_across_rows():
 
 
 def test_header_frame_forecast_id_is_deterministic_ladder_position():
-    """forecast_id is the candidate's position in the ladder -- stable across
-    repeated calls with the SAME ladder."""
+    """forecast_id is the candidate's position in the ladder, stable across calls with the same ladder."""
     ladder = _synthetic_ladder()
 
     frame_1 = _header(ladder, ladder[0])
@@ -194,9 +190,8 @@ def _detail(ladder, trajectories, run_ts=_RUN_TS):
 
 
 def test_detail_frame_has_expected_columns():
-    """Each probe gets its OWN timestamp_creation/forecast_id twins (per-probe
-    PK partners) -- a single shared pair could not carry N probes' different
-    soil_id surrogate attributes."""
+    """Each probe gets its own timestamp_creation/forecast_id twins as per-probe PK partners,
+    since each probe carries its own soil_id surrogate attributes."""
     ladder, trajectories, _ = _synthetic_ladder_trajectories()
 
     frame = _detail(ladder, trajectories)
@@ -212,8 +207,7 @@ def test_detail_frame_has_expected_columns():
 
 
 def test_detail_frame_row_count_is_candidates_times_timestamps_times_probes():
-    """The frame is LONG -- one row per candidate x timestamp x probe -- not wide
-    with probes packed as columns."""
+    """The frame is long, not wide with probes packed as columns."""
     ladder, trajectories, timestamps = _synthetic_ladder_trajectories()
 
     frame = _detail(ladder, trajectories)
@@ -222,10 +216,8 @@ def test_detail_frame_row_count_is_candidates_times_timestamps_times_probes():
 
 
 def test_detail_frame_is_long_one_probes_full_triplet_populated_per_row():
-    """Each row populates exactly ONE probe's full column TRIPLET; the other
-    probe's triplet is NaN on that row. That is what lets the direct write's
-    per-attribute-set grouping split rows back out per probe by its own
-    surrogate soil_id/field_id."""
+    """The other probe's triplet is NaN on each row, so the direct write's per-attribute-set
+    grouping can split rows back out per probe by its surrogate soil_id/field_id."""
     ladder, trajectories, _ = _synthetic_ladder_trajectories()
 
     frame = _detail(ladder, trajectories)
@@ -257,9 +249,8 @@ def test_detail_frame_all_candidates_present():
 
 
 def test_header_and_detail_frames_agree_on_forecast_id_per_candidate():
-    """Header and detail rows built for one run must label the SAME candidate
-    with the SAME forecast_id -- the join key readers use to pull the recommended
-    candidate's trajectory out of ``agri_soil_forecast``."""
+    """forecast_id is the join key readers use to pull the recommended candidate's trajectory
+    out of ``agri_soil_forecast``."""
     ladder, trajectories, _ = _synthetic_ladder_trajectories()
 
     header = _header(ladder, ladder[1])
@@ -287,9 +278,7 @@ def test_detail_frame_timestamp_creation_is_run_time_not_weather_issue_time():
 
 
 def test_detail_frame_two_runs_same_weather_issue_get_distinct_run_timestamps():
-    """The no-upsert-overwrite invariant at the frame level: two runs that shared
-    the SAME weather issue must still produce DISTINCT timestamp_creation values
-    on every probe's twin."""
+    """Distinct run timestamps keep a later run from upserting over an earlier one."""
     ladder, trajectories, _ = _synthetic_ladder_trajectories()
     run_1 = pd.Timestamp("2026-07-03 01:00", tz=_TZ)
     run_2 = pd.Timestamp("2026-07-04 01:00", tz=_TZ)
@@ -387,9 +376,8 @@ def test_irrigation_frame_empty_schedule_returns_empty_frame_with_columns():
 
 
 def test_irrigation_frame_touching_windows_merge_into_one_interval():
-    """Window A's off_ts lands exactly on window B's on_ts -- irrigation stays on
-    through the joint, so it must merge into ONE interval (2 edge rows), not emit
-    a spurious (False, True) pair on the identical timestamp."""
+    """Window A's off_ts equals window B's on_ts: one interval of 2 edge rows, no (False, True)
+    pair on the shared timestamp."""
     horizon_start = pd.Timestamp("2026-07-03 07:00", tz=_TZ)
     candidate = (td(600), td(30))  # window A: 08:00 + 10h == window B's 18:00 on_ts
 
@@ -405,8 +393,7 @@ def test_irrigation_frame_touching_windows_merge_into_one_interval():
 
 
 def test_irrigation_frame_overlapping_windows_merge_into_one_interval():
-    """Window A's interval extends past window B's on_ts (a true overlap, not
-    just a touch) -- same merge behavior as the touching case."""
+    """Window A's interval extends past window B's on_ts."""
     horizon_start = pd.Timestamp("2026-07-03 07:00", tz=_TZ)
     candidate = (td(11 * 60), td(30))  # window A: 08:00 + 11h = 19:00, past 18:00
 
@@ -422,9 +409,7 @@ def test_irrigation_frame_overlapping_windows_merge_into_one_interval():
 
 
 def test_irrigation_frame_short_horizon_drops_degenerate_window_but_keeps_others():
-    """A horizon that ends at or before a later window's resolved on_ts gives
-    on_ts >= off_ts for it: that window contributes zero rows, while an earlier,
-    still-valid window's edges survive untouched."""
+    """A horizon ending at or before a window's on_ts gives on_ts >= off_ts: that window adds no rows."""
     horizon_start = pd.Timestamp("2026-07-03 07:00", tz=_TZ)
     horizon_end = pd.Timestamp("2026-07-03 12:00", tz=_TZ)  # cuts off window B (18:00)
 

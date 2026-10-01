@@ -3,9 +3,8 @@
 tests.test_fieldsim_plots
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Progress-image renderers of the ``fieldsim`` skeleton as pure functions
-from data to PNG bytes, plus the pure strike counter: no FiPy, no Gmsh, no
-lories channel/component state.
+Progress-image renderers as pure functions from data to PNG bytes, plus the strike counter.
+No FiPy, no Gmsh, no lories channel or component state.
 """
 
 import datetime as dt

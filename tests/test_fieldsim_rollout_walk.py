@@ -3,10 +3,8 @@
 tests.test_fieldsim_rollout_walk
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``RolloutEngine.roll_segment``'s walk loop over a stub PDE: the
-``sample_on_zero_dt`` parameterization and the interval observers that fire
-once per WALKED interval. Also pins that the module's flux helpers are the
-shared ``core.pde`` functions, not copies.
+``RolloutEngine.roll_segment``'s walk loop over a stub PDE: ``sample_on_zero_dt`` and the
+interval observers, which fire once per walked interval.
 """
 
 from types import SimpleNamespace
@@ -106,8 +104,6 @@ def test_sample_on_zero_dt_false_skips_and_observers_fire_per_walked_interval():
 
 
 def test_module_flux_functions_are_pde_functions():
-    """The keyed flux helpers live in ``core.pde`` (shared with the sim's flux
-    rates); the rollout module keeps them as import-aliases of the SAME function
-    objects, so a copy-instead-of-move would fail here."""
+    """The rollout module aliases the ``core.pde`` flux helpers instead of copying them."""
     assert _rollout._segment_flux_dicts is _pde.segment_flux_dicts
     assert _rollout._rain_flux is _pde.rain_flux

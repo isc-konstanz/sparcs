@@ -3,11 +3,8 @@
 tests.test_fieldsim_ticker
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``Ticker``: the lories scheduler it wraps and what it hands the runner --
-a UTC clock, the scheduler's consecutive-failure count before each tick and
-the scheduler's interrupt as the cancel signal. Failures are counted and
-logged once by ``TickScheduler._run_slot``, which the tests drive directly;
-no thread is started.
+``Ticker`` hands the runner a UTC clock, the scheduler's consecutive-failure count and its
+interrupt as cancel signal. Tests drive ``TickScheduler._run_slot`` directly; no thread starts.
 """
 
 import datetime as dt

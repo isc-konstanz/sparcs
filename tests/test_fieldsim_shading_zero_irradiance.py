@@ -3,13 +3,8 @@
 tests.test_fieldsim_shading_zero_irradiance
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Regression pins for the zero-irradiance NaN stall (copperhead 2026-07-23): the
-Perez transposition is undefined at DHI=0, so a sun-up twilight row with
-dni=dhi=0 makes every ground surface's qinc NaN and one such row poisoned the
-whole chunk's per-segment GHI mean (NaN is rejected at VALID state in lories
-and killed the tick). Lightless rows never reach pvfactors, a stray non-finite
-qinc never poisons the segment means, and an all-non-finite segment still
-yields a finite value.
+Perez transposition is undefined at DHI=0, so a sun-up row with dni=dhi=0 gives NaN qinc and
+lories rejects NaN at VALID state. Lightless rows skip pvfactors; segment GHI means stay finite.
 """
 
 import pytest
@@ -46,7 +41,7 @@ def test_build_input_drops_lightless_rows():
         [
             ("2026-07-22 12:00:00+00:00", 30.0, 180.0, 600.0, 120.0),
             # Sun geometrically up (zenith < 89) but the feed reports zero
-            # radiation -- the incident twilight shape.
+            # radiation: the twilight shape.
             ("2026-07-22 19:30:00+00:00", 88.8, 300.0, 0.0, 0.0),
         ]
     )

@@ -3,7 +3,7 @@
 tests.test_fieldsim_planner
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``IrrigationPlanner`` over the live roll-out and forecast-table builders.
+``IrrigationPlanner`` over the roll-out and forecast-table builders.
 Heavy (Gmsh + FiPy): marked slow.
 """
 

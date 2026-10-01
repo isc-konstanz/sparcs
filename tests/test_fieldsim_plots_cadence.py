@@ -3,9 +3,8 @@
 tests.test_fieldsim_plots_cadence
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``render_due`` is the one plot-cadence gate. Driven once per (minute-
-resolution) forcing row it must collapse to one frame per ``[plot] interval``;
-the first frame always fires and a ``None`` config renders nothing.
+``render_due`` collapses per-minute forcing rows to one frame per ``[plot] interval``.
+The first frame always fires; a ``None`` config renders nothing.
 """
 
 import pandas as pd
@@ -67,7 +66,7 @@ def test_no_render_when_plotting_disabled():
 
 
 def test_sub_interval_value_allows_finer_cadence():
-    """A smaller interval renders more often -- the knob actually moves."""
+    """A smaller interval renders more often."""
     config = PlotConfig.from_dict({"interval": "5min"})
 
     assert _rendered(_minutely("2026-07-12 10:00", 11), config) == [

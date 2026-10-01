@@ -3,13 +3,7 @@
 tests.test_fieldsim_rollout_ladder
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-PDE-backed guard for the prefix-shared caterpillar (``rollout_ladder``): every
-candidate rolled through the shared prefix must match an independent roll of
-the same candidate from the same IC (``rollout_independent``), within solver
-tolerance -- including when a watering branch ponds, when the windows carry
-different maxima, when a middle window is zero-only, and when two window starts
-collapse onto one forecast timestamp.
-
+``rollout_ladder`` matches ``rollout_independent`` from the same IC within solver tolerance.
 Heavy (builds a real Gmsh mesh and runs FiPy): marked slow.
 """
 
@@ -30,8 +24,7 @@ from sparcs.components.agriculture.simulation.core.pde import FluxRates  # noqa:
 
 WATERING = "WateringTopSegment"
 
-# ~2000 mm/h over the 0.5 m strip -- far beyond intake; must pond, matching
-# test_soil_strip_ponding.py's EXTREME_FLOW scale.
+# ~2000 mm/h over the 0.5 m strip, far beyond intake, so the strip ponds.
 _EXTREME_FLOW = 2000.0e-3 / 3600.0 * 0.5
 
 _TZ = "Europe/Berlin"
@@ -63,7 +56,7 @@ def test_prefix_shared_rollout_matches_independent_rollout_with_ponding(
 ):
     horizon_start = pd.Timestamp("2026-07-03 08:00", tz=_TZ)
     # horizon_end lands exactly at window 2's off-edge (8:20 + 5min), so the roll
-    # ends right after the second pulse -- before the pond has time to drain.
+    # ends right after the second pulse, before the pond has time to drain.
     idx = _index(horizon_start, (0, 10, 20, 25))
     horizon_end = idx[-1]
     et_data = pd.DataFrame(index=idx)
@@ -264,10 +257,8 @@ def test_full_grid_mode_rolls_every_candidate_independently(
 def test_collapsed_segment_bounds_fall_back_to_independent_rolls(
     pde_core_factory, strip_probe_factory, rollout_engine_factory
 ):
-    """When two window starts floor to the SAME forecast timestamp, the
-    caterpillar's segment save/restore would silently drop the earlier window's
-    water. The strictly-increasing-bounds guard must fall back to independent
-    per-candidate rolls instead."""
+    """Two window starts flooring to one forecast timestamp would make the segment save/restore
+    drop the earlier window's water, so the strictly-increasing-bounds guard rolls independently."""
     horizon_start = pd.Timestamp("2026-07-03 08:00", tz=_TZ)
     # Grid points at 0/10/20/23 min. Windows at 8:12 and 8:18 BOTH floor to 8:10.
     idx = _index(horizon_start, (0, 10, 20, 23))
@@ -315,10 +306,8 @@ def test_collapsed_segment_bounds_fall_back_to_independent_rolls(
 def test_zero_only_middle_window_still_advances_the_prefix(
     pde_core_factory, strip_probe_factory, rollout_engine_factory
 ):
-    """A middle window whose durations are only ``0min`` contributes no ladder
-    rungs, so the caterpillar's max-branch save never runs for it: the shared
-    prefix must still advance through that window's segment instead of stalling
-    and dropping the skipped segment's weather and timestamps."""
+    """A ``0min``-only middle window adds no rungs and no max-branch save; the prefix must still
+    advance through its segment and keep that segment's weather and timestamps."""
     horizon_start = pd.Timestamp("2026-07-03 08:00", tz=_TZ)
     idx = _index(horizon_start, (0, 10, 20, 30, 35))
     horizon_end = idx[-1]

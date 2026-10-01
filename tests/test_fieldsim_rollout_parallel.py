@@ -3,10 +3,8 @@
 tests.test_fieldsim_rollout_parallel
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The parallel independent-roll executor: ``IrrigationPlanner.rollout``'s routing
-and graceful degrade, ``_worker_init``'s one-core pin, ``rollout_parallel``'s
-fan-out/gather/worker sizing and env scoping, the pickle-safe column coercion,
-and the headline ``parallel == caterpillar`` invariant (slow).
+The parallel independent-roll executor: routing and degrade, worker pinning and sizing,
+env scoping, pickle-safe columns, and ``parallel == caterpillar`` (slow).
 """
 
 import datetime
@@ -137,8 +135,7 @@ def test_worker_init_pins_one_core_before_building_pde(monkeypatch):
 
 
 def test_worker_init_stashes_rollout_engine_with_six_fields(monkeypatch):
-    """The spawn worker's independent roll reads a ``RolloutEngine`` carrying
-    exactly the six loose rollout fields -- not a component."""
+    """The spawn worker gets a ``RolloutEngine`` with the six rollout fields, not a component."""
 
     class _FakePDE:
         def __init__(self, mesh_config, ode_config, *, rel_sat_name):
@@ -261,10 +258,8 @@ def test_rollout_parallel_worker_count_capped_to_ladder(monkeypatch, max_workers
 
 
 def test_rollout_parallel_restores_env_on_success_and_on_raise(monkeypatch):
-    """The OMP/KMP pin set before pool creation must be scoped to this call: the
-    parent's prior env must be back in place once the pool block exits, whether
-    it returns normally or raises -- a degrade to the caterpillar must not
-    inherit a leaked pin."""
+    """The OMP/KMP pin set before pool creation is undone when the pool block exits,
+    so a degrade to the sequential roll does not inherit it."""
     engine = _parallel_engine([(pd.Timedelta(0),)], max_workers=1)
 
     monkeypatch.setenv("OMP_NUM_THREADS", "5")
@@ -311,17 +306,15 @@ def test_config_parses_parallel_and_max_workers():
 
 
 def test_stringify_columns_makes_constant_labels_pickle_safe():
-    """Real chain-replay ``et_data`` carries lories ``Constant`` column labels,
-    which do NOT survive pickling to a spawn worker -- ``Constant.__new__`` takes
-    ``(type, key, ...)``, so pickle's str-subclass reconstruction passes the value
-    as ``type`` with ``key=None`` and raises."""
+    """Lories ``Constant`` column labels do not unpickle in a spawn worker: ``Constant.__new__``
+    takes ``(type, key, ...)`` and pickle's str-subclass rebuild passes ``key=None``."""
     idx = pd.DatetimeIndex([pd.Timestamp("2026-07-06 12:00", tz=_TZ)], name="timestamp")
     frame = pd.DataFrame({Weather.PRECIPITATION: [0.5]}, index=idx)
 
     raised = False
     try:
         pickle.loads(pickle.dumps(frame))
-    except Exception:  # noqa: BLE001 -- documenting that the raw frame is unpicklable
+    except Exception:  # noqa: BLE001  # documents that the raw frame is unpicklable
         raised = True
     assert raised, "a raw lories Constant column label should not round-trip through pickle"
 
@@ -335,15 +328,14 @@ def test_stringify_columns_makes_constant_labels_pickle_safe():
 # --- Headline invariant: parallel == caterpillar within solver tolerance ------
 
 WATERING = "WateringTopSegment"
-# ~2000 mm/h over the 0.5 m strip -- far beyond intake, so the strip ponds.
+# ~2000 mm/h over the 0.5 m strip, far beyond intake, so the strip ponds.
 _EXTREME_FLOW = 2000.0e-3 / 3600.0 * 0.5
 
 
 @pytest.mark.slow
 def test_parallel_equals_caterpillar_solver_backed(pde_core_factory, strip_probe_factory):
-    """For a small fill_order ladder, the parallel executor's
-    ``{candidate: trajectory}`` map equals the sequential caterpillar's within
-    solver tolerance: a wall-time win, not a change to what is stored."""
+    """For a small fill_order ladder, the parallel ``{candidate: trajectory}`` map equals the
+    sequential caterpillar's within solver tolerance."""
     horizon_start = pd.Timestamp("2026-07-03 08:00", tz=_TZ)
     idx = pd.DatetimeIndex(
         [horizon_start + pd.Timedelta(minutes=m) for m in (0, 10, 20, 25)],

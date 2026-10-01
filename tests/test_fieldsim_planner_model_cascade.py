@@ -3,13 +3,8 @@
 tests.test_fieldsim_planner_model_cascade
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The retention parameters the planner rolls on are the live sim's: both read one
-``SoilEngine``, built from ``[soil_simulation]``'s model block after the
-field-level ``[model]`` cascade (``Component._build_defaults(includes=["model"])``,
-the merge ``FieldSimulation.configure`` performs). A key-level
-``[soil_simulation.model]`` override therefore wins while unstated keys still
-fall back to the field block -- a tuned ``k_s`` can never diverge between the
-forecast and the sim. Pure config parsing; the mesh and the FiPy core are stubbed.
+Planner and sim read one ``SoilEngine``: a key in ``[soil_simulation.model]`` wins, unstated keys
+fall back to the field-level ``[model]``. Pure config parsing; mesh and FiPy core are stubbed.
 """
 
 from types import SimpleNamespace
@@ -101,11 +96,8 @@ def test_no_model_blocks_falls_back_to_pde_config_defaults(tmp_path, monkeypatch
 
 
 def test_soil_member_refetch_is_the_same_stored_object(tmp_path):
-    """The cascade rests on a lories guarantee: ``get_member(defaults=)`` mutates
-    the stored member in place and returns the SAME object, so an earlier
-    defaults-merging fetch stays visible to every later one. A lories-side change
-    must fail loudly here instead of silently splitting the sim's and planner's
-    view of ``[model]``."""
+    """The cascade relies on lories ``get_member(defaults=)`` merging into the stored member in place,
+    so an earlier defaults-merging fetch stays visible to every later one."""
     configs = load_configs(tmp_path, model={"k_s": 1.0e-4, "alpha": 0.08}, soil_simulation={"model": {"k_s": 5.0e-5}})
     stored = configs.get_member("soil_simulation", defaults={"cascade_marker": 1})
 

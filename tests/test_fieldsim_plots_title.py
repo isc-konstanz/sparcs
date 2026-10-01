@@ -3,9 +3,8 @@
 tests.test_fieldsim_plots_title
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The progress-plot title renders the timestamp in the site timezone with a
-colon-form offset (``+HH:MM``) when a ``tz`` is given, assuming UTC for naive
-timestamps, and carries no ``mode`` suffix.
+The progress-plot title shows the timestamp in the site timezone with a ``+HH:MM`` offset
+when a ``tz`` is given, assumes UTC for naive timestamps, and has no ``mode`` suffix.
 """
 
 import pandas as pd
