@@ -3,11 +3,8 @@
 sparcs.components.agriculture.simulation.core.candidates
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Pure candidate-grid/schedule/scoring functions the planner rolls on, named
-after the glossary -- ``context/sparcs.md`` reserves "ladder" for the strictly
-front-loaded ``fill_order`` subset, not the full candidate space, so the
-grid-building/selection functions live here as ``build_candidate_grid`` /
-``select_candidate`` etc.
+Pure candidate-grid, flow-schedule and scoring functions for the planner. In the glossary "ladder" means only
+the front-loaded ``fill_order`` subset, so these functions say "candidate".
 """
 
 from __future__ import annotations
@@ -39,22 +36,13 @@ __all__ = [
 
 @dataclass(frozen=True)
 class WateringWindow:
-    """One configured watering window: a site-local clock time the emitters start at.
-
-    The candidate duration for a given ladder rung is passed alongside, not stored
-    here, so the same window definition is reused across every candidate.
-    """
+    """One configured watering window: a site-local clock time the emitters start at."""
 
     start: datetime.time
 
 
 def current_boundary(now: pd.Timestamp, tz, interval_min: int, offset_min: int) -> pd.Timestamp:
-    """Most-recent run boundary at or before ``now``, site-local. Mirrors the
-    interval/offset pattern of lories ``WeatherForecast`` (forecast.py).
-
-    Thin wrapper over ``_schedule.slot_floor`` -- see that module's
-    docstring for why the slot math has one home.
-    """
+    """Most recent run boundary at or before ``now``, site-local."""
     return slot_floor(now, tz, interval_min, offset_min)
 
 
@@ -63,14 +51,7 @@ def derive_flow_m3s(
     nozzle_flow_lph: float,
     total_drip_line_length_m: float,
 ) -> float:
-    """Fixed design flow from the drip layout: nozzle output x count, normalized
-    per out-of-plane metre of row.
-
-    The l/min core is the shared ``design_flow_lpm`` (also fed to the live sim
-    when its physical meter is unavailable); here it is DERIVED from the layout
-    instead of read from the meter, then normalized to m³/s per metre of row via
-    the shared ``flow_m3s_per_m`` (also fed by ``SoilSimulation._compute_flux_rates``).
-    """
+    """Design flow from the drip layout (nozzle output x count) in m³/s per out-of-plane metre of row."""
     return flow_m3s_per_m(design_flow_lpm(nozzle_count, nozzle_flow_lph), total_drip_line_length_m)
 
 
@@ -81,15 +62,8 @@ def build_flow_schedule(
     horizon_start: pd.Timestamp,
     horizon_end: pd.Timestamp,
 ) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
-    """Build one candidate's "on" intervals from its per-window durations.
-
-    ``windows`` and ``durations`` are parallel sequences (one chosen duration per
-    window, this candidate's rung). Each window's ``start`` clock time is resolved
-    onto ``horizon_start``'s date (site-local, tz-aware); a zero duration
-    contributes no interval. ``off_ts`` clamps to ``horizon_end``. The derived
-    ``flow_m3s`` is not stored per interval -- callers apply it uniformly during
-    every returned interval and zero elsewhere.
-    """
+    """One candidate's on intervals from its per-window durations; zero durations add none, ends clamp to horizon_end.
+    ``flow_m3s`` is not stored; callers apply it during every returned interval and zero elsewhere."""
     intervals: list[tuple[pd.Timestamp, pd.Timestamp]] = []
     for window, duration in zip(windows, durations):
         if duration <= pd.Timedelta(0):
@@ -106,15 +80,8 @@ def split_interval(
     ts_next: pd.Timestamp,
     flow_m3s: float,
 ) -> list[tuple[float, float]]:
-    """Split ``[ts_prev, ts_next]`` at every on/off edge that falls strictly inside it.
-
-    Returns ``[(sub_window_s, flow_m3s), ...]``, contiguous, summing to
-    ``(ts_next - ts_prev).total_seconds()``; flow is ``flow_m3s`` where the
-    sub-window lies inside an on-interval, else ``0.0``. Empty ``on_intervals``
-    (the all-``0min`` schedule) returns a single segment covering the whole
-    interval at zero flow, so the zero-flow roll integrates identically whether
-    it runs through this split path or a bare ``walk_window``.
-    """
+    """Split ``[ts_prev, ts_next]`` at every on/off edge strictly inside it into ``(sub_window_s, flow)`` pairs.
+    Flow is ``flow_m3s`` inside an on-interval, else 0.0; empty ``on_intervals`` give one zero-flow segment."""
     elapsed_s = (ts_next - ts_prev).total_seconds()
     if not on_intervals:
         return [(elapsed_s, 0.0)]
@@ -145,22 +112,8 @@ def build_candidate_grid(
     window_durations: list[list[pd.Timedelta]],
     grid_mode: str,
 ) -> list[tuple[pd.Timedelta, ...]]:
-    """Build the candidate set: the fill-order ladder (default) or the full grid.
-
-    ``window_durations`` is one ascending, zero-inclusive duration list per window,
-    windows already ordered by ``start``. Each candidate is a tuple of one duration
-    per window.
-
-    ``fill_order`` (front-load dominance; see the PRD): window 0 contributes ALL of
-    its durations (``(d0, 0, ..., 0)``, including the all-zero candidate); each later
-    window i contributes only its NON-ZERO durations, meshed onto the max of every
-    earlier window (``(max0, ..., max_{i-1}, d_i, 0, ..., 0)``). This excludes the
-    duplicate ``(..., max_{i-1}, 0, ...)`` candidate that window i-1 already
-    contributed and drops every back-loaded candidate. Count =
-    ``|D0| + sum_{i>=1}(|D_i| - 1)``; total-water is strictly increasing.
-
-    ``full``: the Cartesian product of every window's duration list.
-    """
+    """Candidates (one duration per window) as the ``fill_order`` ladder or the ``full`` Cartesian product.
+    ``fill_order``: window 0 gives all its durations, each later window its non-zero ones after every earlier max."""
     if not window_durations:
         return [()]
 
@@ -192,9 +145,7 @@ def check_candidate_cap(
     combo_cap: int,
     log_name: str = "",
 ) -> None:
-    """Fail fast at ``configure()`` if the (static) ladder length exceeds ``combo_cap``,
-    instead of silently skipping candidates at runtime.
-    """
+    """Raise ``ValueError`` when the ladder has more than ``combo_cap`` candidates."""
     if len(ladder) > combo_cap:
         raise ValueError(
             f"{log_name}: ladder has {len(ladder)} candidates, exceeding "
@@ -204,14 +155,8 @@ def check_candidate_cap(
 
 
 def resolve_window_start(start: datetime.time, horizon_start: pd.Timestamp) -> pd.Timestamp:
-    """Resolve a window's clock time onto ``horizon_start``'s date, rolling
-    forward a **calendar** day if that time already elapsed before
-    ``horizon_start``. The roll-forward re-resolves the wall-clock fields on the
-    next calendar day rather than adding a fixed ``Timedelta(days=1)``, so the
-    result stays at the intended local clock time across a DST transition (a
-    fixed 24h add would land an hour off on the spring-forward / fall-back night).
-    The single canonical resolver; ``build_flow_schedule`` calls it too.
-    """
+    """Resolve a window's clock time onto ``horizon_start``'s date, or the next calendar day if already elapsed.
+    The next day's wall-clock fields are set again rather than adding 24h, so the local time holds across DST."""
     on_ts = horizon_start.replace(
         hour=start.hour,
         minute=start.minute,
@@ -233,36 +178,15 @@ def score_candidate(
     decision_probes: list[str],
     threshold_hpa: float,
 ) -> float:
-    """RMS distance of a candidate's water tension from the setpoint
-    ``threshold_hpa``, over the whole horizon, pooled across the decision
-    probes. Lower is better; ``select_candidate`` takes the argmin.
-
-    The trajectory values are water tension (hPa), converted from the solver's
-    native Se at the roll->publish boundary in ``predict()`` (see
-    ``_trajectories_to_tension``). ``threshold_hpa`` is read here as a TARGET
-    tension (setpoint), not a ceiling: tension above OR below it adds to the
-    score, so the recommended candidate is the one that tracks the setpoint
-    most closely.
-
-    Probes not present in ``decision_probes`` are ignored. Returns ``+inf`` if
-    ``decision_probes`` selects no probe present in the trajectory, so a
-    misconfigured probe subset scores as WORST (fail safe) and can never be the
-    argmin. ``configure()`` additionally hard-fails when the configured
-    ``decision_probes`` resolve to zero known ids.
-
-    This is the single scoring seam: swap the formula here -- for example to a
-    one-sided ceiling ``max(0, tension - threshold)`` -- without touching the
-    selector or the publish path.
-    """
+    """RMS distance of the decision probes' tension from the ``threshold_hpa`` setpoint; lower is better.
+    The setpoint is a target, not a ceiling; returns ``+inf`` when no decision probe is in the trajectory."""
     _timestamps, probe_series = trajectory
     deviations: list[np.ndarray] = []
     for channel_id in decision_probes:
         tension_values = probe_series.get(channel_id)
         if not tension_values:
             continue
-        # Trajectories are signed matric potential (negative hPa); compare their
-        # suction MAGNITUDE against the positive ``threshold_hpa`` setpoint, so
-        # the setpoint stays a plain positive dryness target.
+        # Trajectories are signed negative hPa; compare their magnitude against the positive setpoint.
         deviations.append(np.abs(np.asarray(tension_values, dtype=float)) - threshold_hpa)
     if not deviations:
         return float("inf")
@@ -277,21 +201,8 @@ def select_candidate(
     threshold_hpa: float,
     grid_mode: str,
 ) -> tuple[pd.Timedelta, ...]:
-    """Select the recommended candidate: the rung whose water-tension
-    trajectory tracks the ``threshold_hpa`` setpoint most closely, scored by
-    ``score_candidate`` (RMS-to-setpoint, lower is better).
-
-    Both grid modes reduce to the same rule -- score every candidate and take
-    the argmin, breaking ties by least total watering (``total_minutes``) for a
-    deterministic pick. There is no feasibility test and no status: the ceiling
-    and the monotone-feasibility walk are gone.
-
-    ``fill_order`` is an APPROXIMATE search: it scores only the front-loaded
-    ladder subset, not the full Cartesian grid, so the argmin is
-    best-on-the-ladder, not a proven global optimum (the RMS-to-setpoint score
-    is not monotone in total water, so the true optimum can be interior). Use
-    ``grid_mode = "full"`` when the recommendation must be exact.
-    """
+    """Lowest ``score_candidate``, ties to the fewest ``total_minutes``; raises ``ValueError`` on an empty ladder.
+    ``fill_order`` searches only the ladder and may miss the optimum; ``grid_mode = "full"`` is exact."""
     if not ladder:
         raise ValueError("_select requires a non-empty ladder.")
     if grid_mode not in ("fill_order", "full"):
