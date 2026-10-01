@@ -35,9 +35,8 @@ def encode_state_blob(se: np.ndarray, se_old: np.ndarray, surface_h: Mapping[str
 
 
 def decode_state_blob(blob: bytes) -> tuple[np.ndarray, np.ndarray, dict[str, float]]:
-    """Inverse of ``encode_state_blob``; a legacy blob carrying only ``rel_sat`` decodes with
-    ``rel_sat_old = rel_sat`` and no ponds. Raises ``ValueError`` for any blob that does not
-    decode: truncated, not an npz, without ``rel_sat``, or needing pickle."""
+    """Inverse of ``encode_state_blob``; a ``rel_sat``-only legacy blob gets ``rel_sat_old = rel_sat`` and no ponds.
+    Raises ``ValueError`` for a blob that is truncated, not an npz, lacks ``rel_sat`` or needs pickle."""
     try:
         arrays = np.load(io.BytesIO(blob), allow_pickle=False)
         if not isinstance(arrays, np.lib.npyio.NpzFile):
@@ -96,9 +95,8 @@ class Forcing:
 
 @dataclass(frozen=True)
 class ChainResult:
-    """Outputs of one ``WeatherChain.forcing_series`` call, plus what the shading
-    progress image is drawn from: the last sun-up ground pieces, the PV rows,
-    ``(solar_zenith, solar_azimuth, axis_azimuth)`` and the static plot envelope."""
+    """Outputs of one ``WeatherChain.forcing_series`` call plus the shading progress image inputs: last sun-up
+    ground pieces, PV rows, ``(solar_zenith, solar_azimuth, axis_azimuth)`` and the static plot envelope."""
 
     shading: pd.DataFrame
     evapotranspiration: pd.DataFrame

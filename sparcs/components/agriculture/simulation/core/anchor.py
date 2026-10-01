@@ -3,21 +3,8 @@
 sparcs.components.agriculture.simulation.core.anchor
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Pure-numpy constant-gain analysis update for anchoring the soil saturation
-field.
-
-The simulation runs Richards forward from weather and irrigation alone, so it
-drifts from the real bay over a season. This nudges the simulated
-effective-saturation (Se) field toward tensiometer readings near each sensor: a
-constant-gain (alpha) analysis step -- a simplified Kalman update with a fixed
-steady-state gain -- localized to an anisotropic ellipse around each sensor and
-combined across sensors by a precision-weighted mean.
-
-This module is deliberately free of FiPy and the retention model: it operates on
-plain numpy arrays in Se space. The pF->Se measurement conversion and the
-per-sensor variance live in the caller (the observation adapter), so this core is
-unit-testable on a synthetic cell grid with no mesh and no soil model. See the
-``[anchor]`` design in ``.scratch/soil-sensor-anchoring/PRD.md``.
+Constant-gain (alpha) analysis update that nudges the simulated Se field toward tensiometer readings.
+Each sensor reaches an anisotropic ellipse and sensors combine by a precision-weighted mean; no FiPy here.
 """
 
 from __future__ import annotations
@@ -28,10 +15,8 @@ from typing import Any, Iterable
 
 import numpy as np
 
-# Sharpness of the Gaussian localization taper, in units of normalised distance
-# (d = 1 at the ellipse edge). The taper is a Gaussian of this std, shifted to
-# vanish continuously at d = 1 so the next solve is not handed a saturation step.
-# Gaspari-Cohn is the noted upgrade if strict compact support is later wanted.
+# Std of the Gaussian localization taper in normalised distance (d = 1 at the ellipse edge);
+# the taper is shifted to vanish continuously at d = 1 so the next solve gets no saturation step.
 _TAPER_STD = 0.5
 
 # 1 hPa of pressure equals this many metres of water column (4 degC).
@@ -39,32 +24,18 @@ _HPA_TO_M_WATER = 0.0101972
 
 _LN10 = math.log(10.0)
 
-# Floor on the measurement variance in Se^2 units. Near saturation the pF->Se
-# Jacobian collapses -- the flat retention curve maps a fixed pF error to a
-# vanishing Se error -- which would hand a near-saturated sensor near-infinite
-# trust and let it overwrite the field. The floor keeps the gain finite. This is
-# the PRD's recorded watch-point (.scratch/soil-sensor-anchoring/PRD.md).
+# Floor on the measurement variance in Se^2 units: near saturation the pF->Se Jacobian collapses
+# and would give a near-saturated sensor near-infinite trust.
 _MIN_VARIANCE = 1.0e-6
 
-# dh_dse is singular at the saturation bounds (Se = 0 or 1); evaluate the slope a
-# hair inside them. At the bounds head_m is extreme or zero anyway, so the floor
-# governs the variance regardless of the exact clipped slope.
+# dh_dse is singular at Se = 0 or 1, so the slope is evaluated a hair inside them.
 _SE_EPS = 1.0e-9
 
 
 @dataclass(frozen=True)
 class AnchorObservation:
-    """One tensiometer reading mapped into Se space at a mesh location.
-
-    ``x_m``, ``y_m``: sensor location in mesh coordinates (metres; ``y`` negative
-    downward), matching ``mesh.cellCenters``. ``se_meas``: measured effective
-    saturation (from tension via the retention model's ``se_from_psi``).
-    ``variance``: measurement variance R in Se^2 units (must be > 0), formed by
-    the caller from the per-sensor pF std. ``r_h``, ``r_v``: this sensor's
-    localization radii in metres (default 0 = no reach), attached by
-    :func:`anchor_update` from the per-sensor ``[anchor]`` settings so each
-    tensiometer carries its own reach into the shared :func:`anchor_field`.
-    """
+    """One tensiometer reading in Se space at a mesh location (metres, ``y`` negative downward).
+    ``variance`` is R in Se^2 units (> 0); ``r_h``/``r_v`` are localization radii in metres, 0 = no reach."""
 
     x_m: float
     y_m: float
@@ -75,14 +46,8 @@ class AnchorObservation:
 
 
 def sensor_xy_m(x_offset_cm: float, depth_cm: float, width_m: float) -> tuple[float, float]:
-    """Sensor mesh position in metres, mirroring the probe resolver's convention.
-
-    Bay-centered ``x_offset`` (cm, left negative) maps to absolute mesh x
-    ``x_offset * 0.01 + width / 2``; positive-downward ``depth`` (cm) maps to mesh
-    ``y = -depth * 0.01`` (the mesh uses negative y for depth). Same mapping as
-    ``_soil._nearest_cell_m``, but kept continuous so the localization ellipse
-    centres on the sensor rather than its snapped cell.
-    """
+    """Sensor mesh position in metres from bay-centred ``x_offset`` (cm, left negative) and ``depth`` (cm, down).
+    Kept continuous so the localization ellipse centres on the sensor rather than its snapped cell."""
     return x_offset_cm * 0.01 + width_m / 2.0, -(depth_cm * 0.01)
 
 
@@ -94,22 +59,8 @@ def observation_from_tension(
     model: Any,
     sigma_meas_pf: float,
 ) -> AnchorObservation:
-    """Map a tensiometer reading (hPa) at a sensor into an ``AnchorObservation``.
-
-    The shared observation adapter both backends feed: the live channel value in
-    ``advance()`` and the loaded-history lookup in the soil_tuning worker. The
-    measured tension converts to effective saturation through the retention model
-    (``se_from_psi``); the measurement std, specified in pF, converts to an Se
-    variance at the measured state via the curve slope::
-
-        sigma_se = sigma_meas_pf * |dSe/dpF| = sigma_meas_pf * head_m * ln10 / dh_dse
-
-    where ``head_m`` is the measured head in metres of water and ``dh_dse`` is the
-    model's |d head / dSe| in metres. The variance is floored (``_MIN_VARIANCE``)
-    so a near-saturated sensor cannot acquire near-infinite trust. ``model`` is
-    duck-typed (any retention model exposing ``se_from_psi`` and ``dh_dse``), so
-    this stays free of any FiPy import.
-    """
+    """Map a tension reading (hPa) to an ``AnchorObservation``, its pF std to an Se variance via the curve slope.
+    The variance is floored at ``_MIN_VARIANCE``; ``model`` is any retention model with ``se_from_psi``/``dh_dse``."""
     se_meas = float(model.se_from_psi(tension_hpa))
     head_m = abs(tension_hpa) * _HPA_TO_M_WATER
     se_eval = min(max(se_meas, _SE_EPS), 1.0 - _SE_EPS)
@@ -121,12 +72,7 @@ def observation_from_tension(
 
 
 def _localization_weights(cell_centers: np.ndarray, x_m: float, y_m: float, r_h: float, r_v: float) -> np.ndarray:
-    """Anisotropic Gaussian ellipse taper: 1 at the sensor, smoothly 0 at d >= 1.
-
-    Normalised squared distance ``d^2 = (dx / r_h)^2 + (dy / r_v)^2``; the
-    Gaussian is shifted and rescaled so the weight is exactly 1 at the sensor and
-    falls continuously to 0 at the ellipse edge, then held at 0 beyond it.
-    """
+    """Anisotropic Gaussian ellipse taper: 1 at the sensor, falling continuously to 0 at normalised distance d >= 1."""
     dx = cell_centers[0] - x_m
     dy = cell_centers[1] - y_m
     d2 = (dx / r_h) ** 2 + (dy / r_v) ** 2
@@ -144,28 +90,8 @@ def anchor_field(
     se_min: float,
     se_max: float,
 ) -> np.ndarray:
-    """Pull the Se field toward the observations and return the corrected field.
-
-    For each cell touched by one or more fresh sensors, blend the model state and
-    the sensor-implied state by a precision-weighted mean::
-
-        Se_new(c) = ( Se(c)/sigma_sys^2 + sum_s w_s(c) Se_meas,s / R_s )
-                    / ( 1/sigma_sys^2     + sum_s w_s(c) / R_s )
-
-    where ``w_s(c)`` is the localization weight over sensor ``s``'s own reach
-    ``(obs.r_h, obs.r_v)``. Order-independent, cannot overshoot either reading,
-    and reduces to ``Se + k (Se_meas - Se)`` with
-    ``k = sigma_sys^2 / (R + sigma_sys^2)`` for a single sensor at its own cell.
-    Cells out of every sensor's reach are returned unchanged. The result is
-    clipped to ``[se_min, se_max]``.
-
-    ``se``: (N,) effective-saturation field. ``cell_centers``: (2, N) mesh cell
-    centres in metres (row 0 x, row 1 y, y < 0 down). ``sigma_sys``: model std in
-    Se units; each observation carries its own localization radii. ``se_min``,
-    ``se_max``: physical clip bounds (live callers pass ``_soil.SE_MIN`` /
-    ``SE_MAX``). A non-positive ``sigma_sys`` makes the update a no-op, as does a
-    non-positive radius on an individual observation (that sensor is skipped).
-    """
+    """Pull the Se field toward the observations by a precision-weighted mean of model and sensor Se.
+    Out-of-reach cells stay unchanged, the result is clipped to [se_min, se_max]; ``sigma_sys <= 0`` is a no-op."""
     se = np.asarray(se, dtype=float)
     cell_centers = np.asarray(cell_centers, dtype=float)
     observations = list(observations)
@@ -187,23 +113,14 @@ def anchor_field(
     return np.clip(numerator / denominator, se_min, se_max)
 
 
-# --- Orchestration layer: the freshness gate + shared update entry point. -------
-# Both backends (live advance() and the soil_tuning replay) call anchor_update;
-# they differ only in the read_tension closure they pass. Timestamps/durations are
-# duck-typed (Any) so this module pulls in no pandas/lories/FiPy.
+# Freshness gate and the update entry point. Timestamps and durations are duck-typed (Any)
+# so this module pulls in no pandas, lories or FiPy.
 
 
 @dataclass(frozen=True)
 class SensorOverrides:
-    """Per-sensor ``[anchor.sensors.<key>]`` overrides; each field ``None`` inherits.
-
-    A sensor may carry its own trust (``sigma_meas_pf``), freshness tolerance
-    (``staleness``), and reach (``r_horizontal``/``r_vertical``); any field left
-    ``None`` falls back to the corresponding ``[anchor]`` global. ``sigma_sys``
-    stays global -- it is the model/cell prior precision shared by every sensor
-    reaching a cell, and per-sensor pull strength is already fully expressed
-    through ``sigma_meas_pf`` (a larger measurement std pulls that cell less).
-    """
+    """Per-sensor ``[anchor.sensors.<key>]`` overrides; a ``None`` field inherits the ``[anchor]`` global.
+    ``sigma_sys`` stays global: it is the model prior precision shared by every sensor reaching a cell."""
 
     sigma_meas_pf: float | None = None
     staleness: Any = None
@@ -213,13 +130,8 @@ class SensorOverrides:
 
 @dataclass(frozen=True)
 class AnchorConfig:
-    """Resolved ``[anchor]`` settings (parsing lives at the call site in soil.py).
-
-    ``sensors`` is the allowlist: sensor key -> its :class:`SensorOverrides` (or
-    ``None`` for an all-inherit entry). ``sigma_sys`` is the model std in Se units,
-    ``sigma_meas_pf``/``r_horizontal``/``r_vertical``/``staleness`` are the global
-    defaults each sensor inherits unless it overrides them.
-    """
+    """Resolved ``[anchor]`` settings; ``sensors`` is the allowlist, key to overrides (``None`` inherits all).
+    ``sigma_sys`` is the model std in Se units; the other scalars are the globals a sensor inherits."""
 
     enabled: bool
     sigma_sys: float
@@ -264,13 +176,8 @@ class AnchorSensor:
 
 @dataclass(frozen=True)
 class AnchorResult:
-    """Outcome of one anchor update.
-
-    ``se_new`` is the corrected field; ``anchored_at`` maps each sensor that
-    contributed to the reading timestamp it consumed (merge into the caller's
-    persistent ``last_anchored`` only after the field is committed); ``innovations``
-    maps each to ``se_meas - se_model`` at its nearest cell, for diagnostics.
-    """
+    """Outcome of one anchor update; ``innovations`` is ``se_meas - se_model`` at each sensor's nearest cell.
+    Merge ``anchored_at`` into the caller's ``last_anchored`` only after the field is committed."""
 
     se_new: np.ndarray
     anchored_at: dict[str, Any]
@@ -278,16 +185,8 @@ class AnchorResult:
 
 
 def latest_reading_at(series: Any, now: Any) -> tuple[Any, float]:
-    """The tension reading contemporaneous with ``now``: the latest ``(timestamp,
-    value)`` in ``series`` at or before ``now``, or ``(None, nan)`` when the series
-    is empty, has nothing at/before ``now``, or that value is non-finite.
-
-    The single lookup both anchor backends share -- the live tick and the offline
-    soil_tuning worker each range-read a per-sensor tension ``series`` and call this
-    per step, so a reading is assimilated at its own time, not wherever the frontier
-    happens to be. ``series`` is a pandas Series indexed by timestamp; kept
-    duck-typed so this core stays free of a pandas import.
-    """
+    """Latest ``(timestamp, value)`` in ``series`` at or before ``now``; ``(None, nan)`` if none or non-finite.
+    ``series`` is a pandas Series indexed by timestamp, duck-typed to keep pandas out of this module."""
     if series is None or len(series) == 0:
         return None, float("nan")
     prior = series.loc[:now]
@@ -318,23 +217,8 @@ def anchor_update(
     se_min: float,
     se_max: float,
 ) -> AnchorResult | None:
-    """Gather fresh sensor readings and return the corrected field, or ``None``.
-
-    For each sensor, ``read_tension(sensor)`` yields ``(timestamp, tension_hpa)`` --
-    the reading contemporaneous with ``now``, i.e. the latest at or before it, from
-    both backends' per-tick ranged read. A reading anchors only if it is present and
-    finite, strictly newer than ``last_anchored[key]``, and within that sensor's
-    staleness tolerance of ``now`` -- the event-driven cadence that stops a stale or
-    frozen reading from dragging the field. Because the reading is looked up at/before
-    ``now`` it is assimilated at its own timestamp, never back-dated onto a different
-    step. Each
-    qualifying
-    reading carries its own localization radii into the blend. If no sensor
-    qualifies the step is a no-op (``None``); otherwise the readings are blended in one
-    precision-weighted :func:`anchor_field` call. ``sensors`` is the set to use,
-    already filtered to the run's allowlist (the live path passes ``cfg.sensors``;
-    soil_tuning passes its per-run set so a sensor can be held out).
-    """
+    """Blend fresh readings into the Se field in one :func:`anchor_field` call; ``None`` when none qualify.
+    A reading qualifies if finite, newer than ``last_anchored[key]`` and within its sensor's staleness of ``now``."""
     se = np.asarray(se, dtype=float)
     fresh: list[AnchorObservation] = []
     anchored_at: dict[str, Any] = {}

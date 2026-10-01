@@ -3,9 +3,7 @@
 sparcs.components.agriculture.simulation.core.assimilator
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Tensiometer assimilation ("anchoring") with its own state. The math lives in
-``.anchor`` (fipy-free); this class holds the per-sensor history and the
-last-anchored stamp and decides when to blend.
+Tensiometer assimilation ("anchoring") with its own state; the FiPy-free math lives in ``.anchor``.
 """
 
 from __future__ import annotations
@@ -30,21 +28,8 @@ def _opt_float(spec: Any, key: str) -> Optional[float]:
 
 
 def parse_anchor_config(configs: Any) -> AnchorConfig:
-    """Parse an ``[anchor]`` block into the FiPy-free ``AnchorConfig``.
-
-    Off by default, so existing configs and calibration runs are unaffected.
-    ``configs`` is a lories ``Configurations``-like object (``has_member`` /
-    ``get`` / ``get_bool`` / ``get_member``), or a falsy value (``None`` or
-    ``{}``) for "no ``[anchor]`` block at all", which parses to a disabled
-    config with no sensors. Two mutually exclusive ways to name the
-    allowlist: a bare ``sensors`` value (list of keys, or a comma string) --
-    every sensor inherits the ``[anchor]`` globals; or per-sensor
-    ``[anchor.sensors.<key>]`` sub-blocks (mirroring the
-    ``[probes.points.<name>]`` precedent), each optionally overriding
-    ``sigma_meas_pf``/``staleness``/``r_horizontal``/``r_vertical``; any
-    omitted key inherits the global. ``sigma_sys`` stays global (see
-    ``SensorOverrides``).
-    """
+    """Parse an ``[anchor]`` block, off by default; a falsy ``configs`` gives a disabled config with no sensors.
+    The allowlist is ``[anchor.sensors.<key>]`` override sub-blocks or, without them, a ``sensors`` list or string."""
     if not configs:
         return AnchorConfig(
             enabled=False,
@@ -84,18 +69,15 @@ def parse_anchor_config(configs: Any) -> AnchorConfig:
 
 
 class Assimilator:
-    """Owns the sensor list, the per-sensor tension history and the
-    last-anchored stamp; ``update`` blends fresh tensiometer readings into a
-    ``SoilState`` exactly as the live ``AnchorRuntime.apply`` would."""
+    """Owns the sensors, the per-sensor tension history and the last-anchored stamps;
+    ``update`` blends fresh tensiometer readings into a ``SoilState``."""
 
     def __init__(self, config: Optional[Any], engine: Any) -> None:
         self.config: AnchorConfig = config if isinstance(config, AnchorConfig) else parse_anchor_config(config)
         self.engine = engine
         self.sensors: list[AnchorSensor] = []
         self.history: dict[str, pd.Series] = {}
-        # Per-sensor key -> the timestamp of the reading last assimilated for
-        # that sensor (mirrors the live SoilSimulation._last_anchored dict;
-        # anchor_update gates each sensor on its OWN previous timestamp).
+        # Sensor key -> timestamp of the reading last assimilated; anchor_update gates each sensor on its own.
         self.last_anchored: dict[str, Any] = {}
         self.last_result: Optional[AnchorResult] = None
         self._stale_warned: set[str] = set()
@@ -109,10 +91,7 @@ class Assimilator:
         self.sensors = list(sensors)
 
     def ingest(self, history: Mapping[str, pd.Series]) -> None:
-        """Store the tick's ranged sensor reads (today ``AnchorRuntime.load_history``).
-
-        An empty series for a key means the read produced nothing this tick;
-        the previous series (if any) is kept and a warning is logged once,
+        """Store the tick's ranged sensor reads. An empty series keeps the previous one and warns once,
         latched until a non-empty read for that key arrives."""
         for key, series in history.items():
             if series is None or series.empty:
@@ -127,10 +106,8 @@ class Assimilator:
             self._stale_warned.discard(key)
 
     def update(self, state: SoilState, now: dt.datetime) -> SoilState:
-        """Blend fresh observations into ``state`` and return the anchored
-        state (today ``AnchorRuntime.apply`` -> ``anchor_update`` ->
-        ``anchor_field``). Returns ``state`` unchanged when nothing is fresh,
-        including when the assimilator is disabled or has no sensors."""
+        """Blend fresh observations into ``state``; returns ``state`` unchanged when nothing is fresh,
+        the assimilator is disabled or it has no sensors."""
         if not self.enabled:
             return state
         sensors = [sensor for sensor in self.sensors if sensor.key in self.config.sensors]
