@@ -3,10 +3,8 @@
 tests.test_fieldsim_anchor_history
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``latest_reading_at`` is the lookup every assimilation backend calls per step:
-given a per-sensor tension series (range-read once per tick), return the
-reading at or before the step time, so it anchors at its own timestamp instead
-of smearing the latest value onto a different step.
+``latest_reading_at`` returns the tension reading at or before the step time,
+so each reading anchors at its own timestamp rather than the latest value landing on every step.
 """
 
 import math

@@ -17,9 +17,8 @@ from sparcs.components.agriculture.simulation.core.candidates import build_candi
 
 
 def test_fill_order_two_windows_sweep_then_mesh_longest():
-    """Two windows, durations [0,30,60] each: sweep window 0 with window 1 off,
-    then mesh window 0's max with window 1's non-zero sweep. Order matters: the
-    ladder is generated fill-earlier-first, so this asserts the exact sequence."""
+    """Sweep window 0 with window 1 off, then mesh window 0's max with window 1's non-zero sweep.
+    The ladder is generated fill-earlier-first, so the exact order is asserted."""
     window_durations = [
         [td(0), td(30), td(60)],
         [td(0), td(30), td(60)],
@@ -49,7 +48,7 @@ def test_fill_order_total_water_strictly_increasing():
 
 
 def test_fill_order_drops_back_loaded_candidate():
-    """(0min morning, 60min evening) is never generated -- front-load dominance."""
+    """(0min morning, 60min evening) is never generated: the ladder front-loads water."""
     window_durations = [
         [td(0), td(30), td(60)],
         [td(0), td(30), td(60)],
@@ -69,9 +68,8 @@ def test_fill_order_three_windows():
 
     ladder = build_candidate_grid(window_durations, grid_mode="fill_order")
 
-    # window 0 contributes ALL durations: (0,0,0), (30,0,0)
-    # window 1 contributes non-zero only, meshed onto max0=30: (30,20,0)
-    # window 2 contributes non-zero only, meshed onto max0=30,max1=20: (30,20,10), (30,20,40)
+    # window 0 contributes all durations; each later window only its non-zero ones,
+    # meshed onto the earlier windows' maxima.
     assert ladder == [
         (td(0), td(0), td(0)),
         (td(30), td(0), td(0)),

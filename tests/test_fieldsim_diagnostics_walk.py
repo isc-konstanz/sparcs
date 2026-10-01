@@ -3,11 +3,8 @@
 tests.test_fieldsim_diagnostics_walk
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The adaptive walk's own numbers reach the diagnostics every step, not just the
-log: ``skipped_s`` (seconds held at ``dt_min``) escalates to ERROR and is
-reported as 0.0 when nothing was skipped, ``retries`` (substep rollbacks) is
-reported without escalation -- a column that only appears on failure cannot be
-dashboarded.
+The adaptive walk's ``skipped_s`` (seconds held at ``dt_min``) and ``retries`` (substep rollbacks) reach the
+diagnostics every step, 0.0 when nothing happened; only a non-zero ``skipped_s`` logs an ERROR.
 """
 
 import datetime as dt

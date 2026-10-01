@@ -3,13 +3,8 @@
 tests.test_fieldsim_anchor_discovery
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Anchor sensor discovery at activation: it may rely only on the siblings'
-configure-time state (lories activates the field simulation before the
-SoilMoisture sensors), and with ``[anchor]`` enabled a discovery failure, a
-sensor whose geometry cannot be read, or zero tension-measured sensors refuses
-startup. ``discover_sensor_probes`` alone keeps log-and-continue. The pure
-anchor math module must stay FiPy-free, which is why the runtime lives beside
-it rather than inside it.
+Anchor sensor discovery uses only configure-time state: lories activates the field simulation before the sensors.
+With ``[anchor]`` enabled any discovery failure refuses startup; ``discover_sensor_probes`` alone logs and continues.
 """
 
 import ast
@@ -40,8 +35,7 @@ class _SensorData:
 
 
 def _moisture(key: str, depth: float = 30.0, x_offset: float = 0.0, connected: bool = True) -> SoilMoisture:
-    """A real-class SoilMoisture carrying ONLY configure-time state (geometry
-    plus the channel/connector flag) -- deliberately never activated."""
+    """A real-class SoilMoisture carrying only configure-time state (geometry and connector flag); never activated."""
     comp = object.__new__(SoilMoisture)
     comp._key = key
     comp.depth = depth
@@ -143,9 +137,8 @@ def test_validate_raises_when_discovery_itself_fails():
 
 
 def test_discovery_only_mode_never_raises(caplog):
-    """discover_sensor_probes=True with [anchor] disabled is not a fail-fast
-    opt-in: a broken sensor and even a discovery crash are logged, not raised,
-    and the sim keeps whatever sensors were successfully derived."""
+    """discover_sensor_probes=True with [anchor] disabled logs a broken sensor or a discovery crash
+    and keeps the sensors that were derived."""
     field = _field(_moisture("bay1_30cm"), _moisture_without_geometry("bay9_broken"))
 
     with caplog.at_level(logging.ERROR):
@@ -184,9 +177,7 @@ def test_anchoring_is_off_unless_explicitly_enabled():
 
 
 def test_anchor_module_stays_fipy_free():
-    """The pure math module must not pull FiPy: the lifecycle lives in
-    ``assimilator`` for exactly this reason. Parsed statically, because the
-    package has already imported the FiPy stack by the time this runs."""
+    """Parsed statically, because the package has already imported the FiPy stack by the time this runs."""
     tree = ast.parse(pathlib.Path(_anchor.__file__).read_text(encoding="utf-8"))
     imported: set = set()
     for node in ast.walk(tree):

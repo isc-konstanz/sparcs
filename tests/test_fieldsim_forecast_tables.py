@@ -3,14 +3,8 @@
 tests.test_fieldsim_forecast_tables
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``ForecastTablePublisher``: the four persisted forecast tables' channel
-registrations, the probe-identity resolution they carry, the image frame
-builder, and the shared direct-write path with its skip/degrade branches and
-write-failure counters.
-
-The publisher is a per-call view over a ``SoilPredictor``; the tests drive it
-through a bare ``object.__new__`` instance whose ``data``/``connectors`` class
-properties are monkeypatched, so no Component bootstrap is needed.
+``ForecastTablePublisher``: channel registration for the four forecast tables, probe identities and the write path.
+Driven through a bare ``object.__new__`` ``SoilPredictor`` with ``data``/``connectors`` monkeypatched.
 """
 
 import types
@@ -83,7 +77,7 @@ def test_register_header_channels_binds_header_table(monkeypatch):
         assert kwargs["logger"]["enabled"] is True
 
     # forecast_id is the header's PK partner; window min/start are plain data
-    # columns (NOT primary -- nullable, no -1 sentinel).
+    # columns (not primary, nullable, no -1 sentinel).
     by_id = dict(data.added)
     assert by_id[SoilPredictor._HEADER_FORECAST_ID_KEY]["logger"]["primary"] is True
     assert by_id[SoilPredictor._HEADER_FORECAST_ID_KEY]["logger"]["nullable"] is False
@@ -91,10 +85,8 @@ def test_register_header_channels_binds_header_table(monkeypatch):
 
 
 def test_register_detail_channels_binds_detail_table_with_shared_water_tension_column(monkeypatch):
-    """The detail table's probe channels share ONE 'water_tension' DB column
-    (per-probe distinction via soil_id); each probe's OWN timestamp_creation/
-    forecast_id TWINS are its PK partners, because a single shared pair cannot
-    carry N different probes' soil_ids at once."""
+    """Probe channels share one 'water_tension' column, told apart by soil_id; each probe has its own
+    timestamp_creation/forecast_id PK partners, since one shared pair cannot carry N probes' soil_ids."""
     predictor, data = _registering(monkeypatch, _logger_id="mariadb")
     identities = {"root_20": {"soil_id": 20, "field_id": 2}, "root_40": {"soil_id": 40, "field_id": 2}}
 
@@ -128,10 +120,8 @@ def test_register_detail_channels_binds_detail_table_with_shared_water_tension_c
 
 
 def test_register_detail_channels_every_channel_carries_matching_soil_id_and_field_id(monkeypatch):
-    """The SQL connector's per-attribute-set write grouping raises for any
-    resource on a keyed table missing a declared surrogate attribute, so every
-    one of a probe's THREE channels must carry the IDENTICAL soil_id/field_id
-    pair, and different probes must carry DIFFERENT soil_ids (same field_id)."""
+    """The SQL connector's write grouping raises for a keyed-table resource missing a surrogate attribute,
+    so all three channels of a probe carry the same soil_id/field_id pair."""
     predictor, data = _registering(monkeypatch, _logger_id="mariadb")
     identities = {"root_20": {"soil_id": 20, "field_id": 2}, "root_40": {"soil_id": 40, "field_id": 2}}
 
@@ -151,9 +141,7 @@ def test_register_detail_channels_every_channel_carries_matching_soil_id_and_fie
 
 
 def test_register_irrigation_channels_binds_irrigation_table(monkeypatch):
-    """Both channels route to the irrigation table with logger.enabled=True;
-    irrigation_state is a plain data column (not primary, no column key at all),
-    and timestamp_creation is the primary/non-nullable PK partner."""
+    """irrigation_state is a plain data column with no column key; timestamp_creation is the non-nullable PK partner."""
     predictor, data = _registering(monkeypatch, _logger_id="mariadb")
 
     predictor.tables().register_irrigation_channels()
@@ -213,9 +201,8 @@ class _FakeLeafConfig:
 
 
 class _FakeChannelsConfig:
-    """``[soil_simulation.data.channels]`` stand-in: ``.get("field_id")`` for the
-    component-wide default, ``.get_member(<probe_key>)`` for the per-probe
-    ``soil_id`` block."""
+    """``[soil_simulation.data.channels]`` stand-in: ``.get("field_id")`` for the component-wide default,
+    ``.get_member(<probe_key>)`` for the per-probe ``soil_id`` block."""
 
     def __init__(self, field_id=None, per_probe_soil_ids: dict = None):
         self._field_id = field_id
@@ -258,8 +245,7 @@ def test_resolve_probe_identities_reads_soil_id_and_field_id():
 
 
 def test_resolve_probe_identities_missing_soil_id_only_warns(caplog):
-    """A probe with no configured soil_id only warns and simply gets no soil_id
-    kwarg -- its channels then fail loudly at connector connect time instead."""
+    """A probe with no configured soil_id gets no soil_id kwarg; its channels fail at connector connect time."""
     predictor = _bare()
     soil_block = _FakeSoilBlock(_FakeChannelsConfig(field_id=2, per_probe_soil_ids={}))
 
@@ -333,7 +319,7 @@ class _FakeSetChannel:
 
     @property
     def logger(self):
-        # No pre-bound registrator -- forces the id-based fallback ladder.
+        # No pre-bound registrator, which forces the id-based fallback ladder.
         class _NullLogger:
             @staticmethod
             def _get_registrator():
@@ -394,8 +380,7 @@ def test_write_header_table_skips_when_logger_not_configured():
 
 
 def test_write_header_table_empty_frame_is_a_noop():
-    """The empty guard fires BEFORE any connector resolution -- deliberately no
-    connectors patch here, so this would error if the guard were removed."""
+    """The empty guard fires before connector resolution; connectors are not patched, so a missing guard errors."""
     predictor = _bare(_logger_id="db")
 
     predictor.tables().write_header_table(pd.DataFrame())
@@ -460,9 +445,7 @@ def test_write_detail_table_uses_a_root_level_connector(monkeypatch):
 
 
 def test_header_and_detail_writes_rename_to_ids_and_never_call_set(monkeypatch):
-    """Exercises the REAL write path (build -> write -> lazy id map -> rename ->
-    connector.write): the connector receives columns keyed by RESOLVED channel
-    ids, and no schema-declaring channel is ever ``.set()``."""
+    """Runs the real write path: the connector receives columns keyed by resolved channel ids."""
     predictor = _bare(
         _logger_id="db",
         _header_window_min_keys=["w0_min"],
@@ -532,7 +515,7 @@ class _CountingData(dict):
 
 
 class _RaisingData:
-    """Every channel access raises -- the counter bump must swallow this."""
+    """Every channel access raises; the counter bump must swallow this."""
 
     def __getitem__(self, key):
         raise KeyError(key)

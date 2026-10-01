@@ -3,10 +3,8 @@
 tests.test_fieldsim_anchor_walk
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``_walk_components`` feeds sensor-probe discovery: a container shape it does
-not recognise falls back to plain iteration, a genuinely raising ``.values()``
-propagates, and an unwalkable subtree is dropped with ONE named WARNING
-instead of vanishing silently. Exercises ``soil_tuning``'s own copy.
+``soil_tuning._walk_components``: an unknown container shape falls back to plain iteration, a raising ``.values()``
+propagates, and an unwalkable subtree is dropped with one named WARNING.
 """
 
 import logging
@@ -30,9 +28,7 @@ class _BrokenChildren:
 
 
 class _ExplodingValues:
-    """.values() itself raises OUTSIDE (AttributeError, TypeError): the
-    narrowed first catch must let it propagate, never mask it as a
-    shape-mismatch and fall back."""
+    """.values() raises something other than AttributeError or TypeError, so the first catch must let it propagate."""
 
     def values(self):
         raise RuntimeError("corrupt registry")
@@ -67,8 +63,7 @@ def test_dict_shaped_children_walk_normally_no_log(walk, caplog):
 
 @pytest.mark.parametrize("walk", WALKERS)
 def test_valuesless_children_fall_back_to_plain_iteration(walk):
-    """A list-shaped container has no .values() (AttributeError, first catch
-    narrowed) -- the fallback still walks the children."""
+    """A list-shaped container has no .values() (AttributeError, first catch); the fallback walks the children."""
     leaf = SimpleNamespace(key="leaf", components=None)
     root = SimpleNamespace(key="root", components=[leaf])
 
@@ -79,9 +74,8 @@ def test_valuesless_children_fall_back_to_plain_iteration(walk):
 
 @pytest.mark.parametrize("walk", WALKERS)
 def test_genuinely_raising_values_propagates(walk):
-    """A .values() raising outside (AttributeError, TypeError) is a real failure,
-    not a container shape mismatch: it must propagate, never be downgraded to
-    the fallback. A broad `except Exception` here fails this test."""
+    """A .values() raising outside (AttributeError, TypeError) is a real failure, not a shape mismatch.
+    A broad `except Exception` in the walker fails this test."""
     root = SimpleNamespace(key="root", components=_ExplodingValues())
 
     with pytest.raises(RuntimeError, match="corrupt registry"):
@@ -90,8 +84,7 @@ def test_genuinely_raising_values_propagates(walk):
 
 @pytest.mark.parametrize("walk", WALKERS)
 def test_non_callable_values_falls_back_to_plain_iteration(walk):
-    """The TypeError arm of the first catch: `.values` exists but is not
-    callable -- a shape mismatch, so the fallback iteration still walks."""
+    """The TypeError arm of the first catch: `.values` exists but is not callable, so the fallback still walks."""
     leaf = SimpleNamespace(key="leaf", components=None)
     root = SimpleNamespace(key="root", components=_ValuesNotCallable([leaf]))
 

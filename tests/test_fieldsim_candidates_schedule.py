@@ -3,9 +3,8 @@
 tests.test_fieldsim_candidates_schedule
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The pure candidate-schedule building blocks: drip-flow derivation, the
-window-schedule builder (including its DST-correct window-start resolver)
-and the ``split_interval`` edge splitter.
+Candidate-schedule building blocks: drip-flow derivation, the window-schedule builder,
+its DST-correct window-start resolver and the ``split_interval`` edge splitter.
 """
 
 import datetime
@@ -40,7 +39,7 @@ def test_drip_flow_derivation_matches_hand_computation_kob_layout():
 
 
 def test_drip_flow_derivation_no_live_sim_dependency():
-    """Pure function: only takes the three layout numbers, nothing from a live sim."""
+    """Pure function of the three layout numbers."""
     flow_m3s = derive_flow_m3s(nozzle_count=10, nozzle_flow_lph=2.0, total_drip_line_length_m=5.0)
     flow_lpm = 10 * 2.0 / 60.0
     assert flow_m3s == pytest.approx(flow_lpm / (60_000.0 * 5.0))
@@ -115,9 +114,8 @@ def test_schedule_builder_all_zero_durations_yields_empty_schedule():
 
 
 def test_resolve_window_start_is_dst_correct_on_spring_forward():
-    """A window rolled onto the next calendar day must keep its local clock time
-    across the spring-forward night, not shift by the fixed 24h that a
-    Timedelta(days=1) add would apply."""
+    """A window rolled onto the next day keeps its local clock time across the spring-forward night,
+    where a fixed Timedelta(days=1) add would shift it by an hour."""
     # 2026-03-29 is the German spring-forward day (02:00 -> 03:00, +01:00 -> +02:00).
     horizon_start = pd.Timestamp("2026-03-28 20:00", tz=_TZ)  # evening before, +01:00
     start = datetime.time(18, 0)  # 18:00 has already passed -> rolls to the next day

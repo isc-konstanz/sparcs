@@ -91,9 +91,8 @@ def test_free_field_shading_factor_is_one():
 
 
 def test_bay_mean_factor_is_length_weighted_over_the_middle_bay_and_sun_up_rows():
-    """Seven rows 3.4 m apart put the middle row at x=10.2 and the bay at [8.5, 11.9]:
-    the 0.85 m and 2.55 m pieces inside it weight to 650 W/m^2 (a plain mean of the
-    two would give 500), the ground outside the bay and the night row do not count."""
+    """Seven rows 3.4 m apart put the bay at [8.5, 11.9]; the two pieces inside it weight to 650 W/m^2
+    (a plain mean gives 500), and the ground outside the bay and the night row do not count."""
     model = ShadingModel(ShadingConfig.from_dict({"mode": "as_is"}).derive(bay_width=3.4))
     ground_day = [
         ((0.0, 0.0), (8.5, 0.0), {"qinc": 1000.0}),

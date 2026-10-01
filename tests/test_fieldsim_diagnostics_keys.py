@@ -3,10 +3,8 @@
 tests.test_fieldsim_diagnostics_keys
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The water-balance diagnostic Constants keep their short keys under
-``context="water"``: the bare key is the channel key and the
-``agri_field_simulation`` SQL column, the registry id stays ``water_*``-unique.
-``SoilEngine`` computes the same literal keys.
+Water-balance diagnostic Constants keep short keys under ``context="water"``: the bare key is the channel key
+and the ``agri_field_simulation`` SQL column, the registry id stays ``water_*``. ``SoilEngine`` uses the same keys.
 """
 
 import types

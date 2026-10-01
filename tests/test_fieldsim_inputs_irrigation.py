@@ -3,13 +3,8 @@
 tests.test_fieldsim_inputs_irrigation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Irrigation enters the soil PDE as a time series read from its connector, not
-as a latch: ``ChannelInputs`` reads the raw metered flow (reaching back before
-the chunk, never reading the weather), falls back to the on/off state times
-the drip-derived design flow, and never fabricates a forcing; ``FieldRunner``
-aligns the samples onto the weather timesteps (backward fill, NULL = not
-watering). The flow arithmetic both the live sim and the planner share is
-pinned alongside.
+``ChannelInputs`` reads metered flow, falling back to on/off state times the drip design flow, and never fabricates one.
+``FieldRunner`` aligns the samples onto the weather timesteps (backward fill, NULL = not watering).
 """
 
 import datetime as dt
@@ -263,9 +258,8 @@ def test_flow_lpm_uses_state_when_flow_channel_unwired():
 
 
 def test_flow_lpm_does_not_synthesize_from_state_without_explicit_drip():
-    """A flow-primary field that also has a state channel but NO explicit
-    [soil_simulation.drip] must NOT leak the placeholder design flow on a meter
-    gap -- it reads 0 (not watering), never a fabricated forcing."""
+    """Without an explicit [soil_simulation.drip] a meter gap reads 0, not the placeholder design flow
+    from the state channel."""
     index = _index()
     inputs = _inputs(
         flow=pd.DataFrame(),  # wired but silent (broken meter)

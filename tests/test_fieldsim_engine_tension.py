@@ -3,10 +3,8 @@
 tests.test_fieldsim_engine_tension
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The probe publish boundary is water tension, not relative saturation:
-``SoilEngine.tension_at`` converts the sampled Se with the retention model and
-returns a plain signed-negative ``float`` in hPa, and the probe channel is
-registered in ``hPa`` on ``agri_soil_simulation.water_tension``.
+Probes publish water tension: ``SoilEngine.tension_at`` returns a plain signed-negative ``float`` in hPa,
+and the probe channel is registered in ``hPa`` on ``agri_soil_simulation.water_tension``.
 """
 
 import types
@@ -50,8 +48,7 @@ def test_tension_at_returns_matric_potential_not_se():
 
 
 def test_drier_probe_yields_larger_tension():
-    """A drier probe (lower Se) must give a MORE NEGATIVE matric potential
-    (larger tension magnitude) -- the sign contract."""
+    """A drier probe (lower Se) gives a more negative matric potential (larger tension magnitude)."""
     engine = _engine({"soil_30cm": 0.3, "soil_60cm": 0.8})
     state = _state()
 
@@ -62,8 +59,7 @@ def test_drier_probe_yields_larger_tension():
 
 
 def test_tension_at_returns_a_plain_float():
-    # np.float64 subclasses float, so also exclude np.floating: the seam's
-    # promise is a PLAIN float on the publish path.
+    # np.float64 subclasses float, so also exclude np.floating: the publish path wants a plain float.
     model = types.SimpleNamespace(psi_from_se=lambda se: np.float64(-500.0))
     engine = _engine({"soil_30cm": 0.5}, model=model)
 
@@ -74,9 +70,8 @@ def test_tension_at_returns_a_plain_float():
 
 
 def test_register_probe_uses_hpa_unit_and_the_soil_simulation_column(monkeypatch):
-    """Without the table/column override the probe channel inherits the
-    component's default table (keyed by field_id only) and N probes
-    upsert-clobber one shared column."""
+    """Without the table/column override the probe channel inherits the component's default table
+    (keyed by field_id only) and N probes upsert-clobber one shared column."""
     added: list[tuple] = []
     data = types.SimpleNamespace(add=lambda channel_id, **kwargs: added.append((channel_id, kwargs)))
     monkeypatch.setattr(SoilSimulation, "data", property(lambda self: data))

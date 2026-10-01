@@ -3,8 +3,7 @@
 tests.test_fieldsim_candidates_selector
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Candidate scoring and selection: ``score_candidate`` (RMS-to-setpoint),
-``select_candidate`` (argmin, least-water tie-break) for both grid modes,
+``score_candidate`` (RMS to setpoint), ``select_candidate`` (argmin, least-water tie-break) for both grid modes,
 and the planner's Se -> signed water tension conversion.
 """
 
@@ -34,8 +33,7 @@ def _trajectory(probe_values: dict) -> tuple:
 
 
 def test_psi_from_se_dry_se_yields_negative_matric_potential():
-    """A dry Se (0.2) must yield a NEGATIVE signed matric potential -- psi_from_se
-    returns the physical psi (drier -> more negative), not its magnitude."""
+    """psi_from_se returns the signed physical psi (drier is more negative), not its magnitude."""
     model = Genuchten(theta_r=0.05, theta_s=0.43, alpha=0.08, n=1.6, k_s=1.0e-4)
 
     psi = model.psi_from_se(0.2)
@@ -118,8 +116,7 @@ def test_select_picks_candidate_closest_to_setpoint(grid_mode):
 
 
 def test_select_returns_zero_rung_when_it_tracks_setpoint_best():
-    """When doing nothing already sits closest to the setpoint, the all-0min rung
-    is chosen -- watering would only overshoot wet."""
+    """When doing nothing already sits closest to the setpoint, the all-0min rung is chosen."""
     ladder = [(td(0),), (td(30),), (td(60),)]
     trajectories = _single_value_trajectories({ladder[0]: 300.0, ladder[1]: 220.0, ladder[2]: 120.0})
 

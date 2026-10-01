@@ -3,11 +3,8 @@
 tests.test_fieldsim_activate_wiring
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-What the field wires up before the ticker starts: the field-level ``[plot]``
-block cascades into every child as its default, a configured irrigation with
-no usable input raises, and a ``SIMULATION_STATE`` channel that cannot
-round-trip warns about the warm start it will not do. Bare ``object.__new__``
-instances exercise the guards; they touch only their arguments and ``self``.
+Field wiring before the ticker starts: ``[plot]`` cascade, irrigation input guard, state-channel warm start.
+Bare ``object.__new__`` instances exercise the guards; they touch only their arguments and ``self``.
 """
 
 from types import SimpleNamespace

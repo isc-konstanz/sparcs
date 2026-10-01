@@ -3,10 +3,8 @@
 tests.test_fieldsim_inputs_weather
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``ChannelInputs``' weather span: the read goes through the connector (never a
-logger) with columns named by channel key, the frame is trimmed to
-``(start, end]``, and a chunk missing a required column is dropped with the
-column named at WARNING.
+``ChannelInputs`` reads weather through the connector, never a logger, with columns named by channel key,
+trimmed to ``(start, end]``; a chunk missing a required column is dropped with a WARNING naming it.
 """
 
 import datetime as dt

@@ -3,13 +3,8 @@
 tests.test_fieldsim_et_terms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Physics guards for the Penman-Monteith term helpers.
-
-The cloud correction must boost downward longwave with CLOUDINESS
-(clear-sky index 1 = clear sky): a clear night radiates away more heat than an
-overcast one. The pre-fix formula scaled the boost with *clearness* and
-inverted that. Calm wind must yield a finite aerodynamic resistance (FAO-56
-floor) instead of silently zeroing the aerodynamic term via ra = inf.
+Penman-Monteith term helpers: the cloud correction boosts downward longwave with cloudiness (clear-sky index 1 = clear),
+and calm wind keeps a finite aerodynamic resistance (FAO-56 floor) instead of ra = inf.
 """
 
 import numpy as np

@@ -3,13 +3,8 @@
 tests.test_fieldsim_components
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The lories layer of the fieldsim skeleton: ``Simulation.build`` assembling
-engine/chain/assimilator/planner from a configured ``FieldSetup`` (against
-the tmp-mesh recipe shared with ``test_fieldsim_planner.py``), and
-``ChannelInputs``/``ChannelOutputs`` as adapters over fakes, and the offline
-``FieldSimulation.simulate`` session -- no lories Component is configured
-here, only the plain config/value objects and hand-built fakes that stand in
-for one.
+``Simulation.build``, ``ChannelInputs``/``ChannelOutputs`` and the offline ``FieldSimulation.simulate`` session.
+No lories Component is configured here; plain config objects and hand-built fakes stand in for one.
 """
 
 import datetime as dt
@@ -144,9 +139,8 @@ class _FakeChannel:
 
 
 class _FakeData:
-    """Stands in for ``Component.data``: routes ``.read(channels, ...)`` by
-    identity (the weather channels list) or by contained channel objects, one
-    column per bound, non-empty channel named by its id."""
+    """Stands in for ``Component.data``: ``.read`` matches the weather channels list by identity,
+    otherwise returns one column per bound, non-empty channel, named by its id."""
 
     def __init__(self, weather_channels=None, weather_frame=None):
         self.weather_channels = weather_channels if weather_channels is not None else []
@@ -327,9 +321,8 @@ def _rows(channel) -> list:
 
 
 class _RecordingData(dict):
-    """A dict of pre-registered ``_RecordingChannel``s; an unregistered key
-    raises ``KeyError``, mirroring a channel that was never added (e.g. a
-    sensor-derived probe with no logged channel)."""
+    """A dict of pre-registered ``_RecordingChannel``s; an unregistered key raises ``KeyError``
+    like a channel that was never added."""
 
 
 class _NS:
@@ -497,9 +490,8 @@ def test_channel_outputs_chain_writes_one_series_per_channel_and_the_last_segmen
 
 
 class _FakePredictorData(dict):
-    """Channel lookups by key, auto-creating a recording channel whose ``id``
-    is the key (so the publisher's key -> id rename is the identity) and whose
-    ``logger`` is None (so the connector hop falls back to the id lookups)."""
+    """Auto-creates a recording channel per key with ``id`` equal to the key (the key -> id rename is the identity)
+    and ``logger`` None (the connector hop falls back to the id lookups)."""
 
     def __missing__(self, key):
         channel = _RecordingChannel()
@@ -558,7 +550,7 @@ def test_channel_outputs_plan_writes_four_tables_best_effort():
 
     outputs.plan(plan)  # must not raise even though the irrigation write raises
 
-    assert len(connector.written) == 3  # header, detail, image -- irrigation raised and was skipped
+    assert len(connector.written) == 3  # header, detail, image; irrigation raised and was skipped
     written_columns = [set(f.columns) for f in connector.written]
     assert {"forecast_id"} in written_columns
     assert {"traj_strip"} in written_columns

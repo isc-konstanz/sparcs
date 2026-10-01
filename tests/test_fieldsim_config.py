@@ -3,8 +3,8 @@
 tests.test_fieldsim_config
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Config sections of the ``fieldsim`` skeleton: resolution, strict keys, typed
-sub-sections, schema, live-aligned defaults and a conf loaded from disk.
+Config sections of the field simulation: resolution, strict keys, typed
+sub-sections, schema, defaults and a conf loaded from disk.
 """
 
 import pytest
@@ -264,7 +264,7 @@ def test_section_group_declares_no_children_of_its_own():
     assert SoilConfig.__config_parameters__["mesh"].children == {}
 
 
-# --------------------------------------------------------------------------- live-aligned defaults
+# --------------------------------------------------------------------------- defaults
 
 
 def test_defaults_match_the_live_components():

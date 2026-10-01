@@ -3,7 +3,7 @@
 tests.test_fieldsim_engine
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``SoilEngine`` over the live ``SoilPDECore``. Heavy (Gmsh + FiPy): marked slow.
+``SoilEngine`` over a real ``SoilPDECore``. Heavy (Gmsh + FiPy): marked slow.
 """
 
 import datetime as dt

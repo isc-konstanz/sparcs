@@ -3,11 +3,8 @@
 tests.test_fieldsim_assimilator
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``Assimilator`` over a synthetic two-cell field: ``parse_anchor_config``
-parity with the live parser, ``ingest``/``update`` blending fresh tensiometer
-readings into a ``SoilState``, staleness and disabled/no-sensor no-ops, and
-equivalence with the live ``simulation._anchor.anchor_update`` on the same
-inputs. Pure numpy; no FiPy, no Gmsh.
+``Assimilator`` and ``parse_anchor_config`` over a synthetic two-cell field, checked against ``anchor_update``.
+Pure numpy; no FiPy, no Gmsh.
 """
 
 import datetime as dt
@@ -26,8 +23,7 @@ T0 = dt.datetime(2026, 9, 25, 12, 0, tzinfo=UTC)
 
 
 class _Cfg:
-    """Stub Configurations exposing get / get_bool and the sub-section accessors,
-    mirroring ``tests/test_anchor_config_parse.py``'s live-parser fixture."""
+    """Stub Configurations exposing get / get_bool and the sub-section accessors."""
 
     def __init__(self, d, members=None):
         self.d = d
@@ -224,7 +220,7 @@ def test_ingest_empty_series_warns_once_and_keeps_previous(caplog):
     assert len([r for r in caplog.records if r.levelname == "WARNING" and "s1" in r.getMessage()]) == 2
 
 
-# --------------------------------------------------------------------------- equivalence with the live module
+# --------------------------------------------------------------------------- equivalence with anchor_update
 
 
 def test_matches_live_anchor_update():

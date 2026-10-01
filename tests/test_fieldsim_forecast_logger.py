@@ -3,9 +3,8 @@
 tests.test_fieldsim_forecast_logger
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``SoilPredictor.activate`` refuses a ``logger`` id that resolves to nothing or to a
-connector without ``write()``; unset stays a no-op. A bare id resolves up the
-predictor's id path, so a root-level connector serves a nested predictor.
+``SoilPredictor.activate`` refuses a ``logger`` id that resolves to nothing or to a connector without ``write()``.
+Unset is a no-op; a bare id resolves up the predictor's id path, so a root-level connector serves a nested one.
 """
 
 from types import SimpleNamespace
