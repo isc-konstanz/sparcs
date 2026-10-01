@@ -96,7 +96,7 @@ class WeatherChain:
 
     def horizon_inputs(self, forecast: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
         """The prepared forecast frame and the per-segment ET frames the planner rolls
-        over; the shading model keeps the live tick's frame inputs."""
+        over; the shading model keeps the current tick's frame inputs."""
         df = self._prepare_weather(forecast)
         shading = self.shading.evaluate(df, remember=False)
         segments = self._segments(df, shading)

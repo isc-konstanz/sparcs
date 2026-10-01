@@ -3,10 +3,8 @@
 sparcs.components.agriculture.simulation.runtime.scenario
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Offline driver: the production ``FieldRunner`` over ``FrameInputs`` and a
-``Recorder``, with a synthetic clock stepping ``run_tick`` from ``start`` to
-``end``. The entry point for parameter sweeps, model-vs-tensiometer benches
-and dt-sensitivity runs.
+Offline driver: the production ``FieldRunner`` over ``FrameInputs`` and a ``Recorder``,
+with a synthetic clock stepping ``run_tick`` from ``start`` to ``end``.
 """
 
 from __future__ import annotations
@@ -34,9 +32,8 @@ class ScenarioRunner:
         step: Optional[dt.timedelta] = None,
         initial_state: Optional[SoilState] = None,
     ) -> Recorder:
-        """Tick from ``start`` to ``end`` every ``step`` (default: the configured
-        interval) and return everything the runner wrote. ``frames`` holds the
-        ``FrameInputs`` keywords: ``weather``, ``irrigation``, ``tension``, ``forecast``."""
+        """Tick from ``start`` to ``end`` every ``step`` (default: the field interval); returns all the runner wrote.
+        ``frames`` holds the ``FrameInputs`` keywords: ``weather``, ``irrigation``, ``tension``, ``forecast``."""
         inputs = FrameInputs(**frames, state=initial_state)
         recorder = Recorder()
         runner = FieldRunner(self.setup, self.simulation, inputs, recorder)

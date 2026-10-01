@@ -3,7 +3,7 @@
 sparcs.components.agriculture.simulation.core.engine
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The one soil engine over a single live ``SoilPDECore``: state in, state out.
+The one soil engine over a single ``SoilPDECore`` instance: state in, state out.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ class SoilEngine:
         *,
         rel_sat_name: str = "relative saturation",
     ) -> "SoilEngine":
-        """Create the mesh (if missing) and the live ``SoilPDECore``."""
+        """Create the mesh (if missing) and the ``SoilPDECore``."""
         if soil.mesh.width is None:
             raise ValueError("soil.mesh.width is not set; call SoilConfig.mesh.derive(bay_width=...) first")
         ensure_mesh(soil.mesh)
@@ -64,7 +64,7 @@ class SoilEngine:
 
     @property
     def mesh(self) -> Any:
-        """The live FiPy mesh the state arrays are laid out on."""
+        """The FiPy mesh the state arrays are laid out on."""
         return self.pde.mesh
 
     @property
@@ -89,7 +89,7 @@ class SoilEngine:
         return {name: self.pde.segment_face_len.get(name, 0.0) for name in self.pde.top_segment_names}
 
     def initial_state(self, at: dt.datetime) -> SoilState:
-        """Hydrostatic or uniform initial condition; does not touch the live core."""
+        """Hydrostatic or uniform initial condition; does not touch the PDE core."""
         water_table_depth = self.ode.ic_water_table_depth
         if water_table_depth is not None:
             se = self.pde._hydrostatic_ic_array(water_table_depth)
@@ -146,7 +146,7 @@ class SoilEngine:
         return float(self.model.psi_from_se(se))
 
     def invalidate(self) -> None:
-        """Drop the identity cache after the live core was mutated outside ``advance``."""
+        """Drop the identity cache after the PDE core was mutated outside ``advance``."""
         self._current = None
 
     def diagnostics(self, state: SoilState) -> Mapping[str, float]:
@@ -164,7 +164,7 @@ class SoilEngine:
         return resolve_sensor_probe(sensor.key, sensor.x_offset_cm, sensor.depth_cm, self.pde.mesh, self.mesh_config)
 
     def load(self, state: SoilState) -> None:
-        """Put ``state`` into the live core; ``ValueError`` when its cell count does not fit the mesh."""
+        """Put ``state`` into the PDE core; ``ValueError`` when its cell count does not fit the mesh."""
         self.pde.load_state_blob(state.to_blob())
         self._current = state
 

@@ -3,11 +3,8 @@
 sparcs.components.agriculture.simulation.runtime.scheduler
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The tick thread, delegated to lories. ``Ticker`` wraps
-``lories.scheduler.TickScheduler``, which counts consecutive failures, logs
-a failed or overrunning slot and raises the interrupt ``stop`` sets; the
-ticker hands the runner a UTC clock, that failure count and the interrupt
-as its cancel signal.
+``Ticker`` wraps ``lories.scheduler.TickScheduler``, which counts consecutive failures and logs failed or late slots.
+The runner gets a UTC clock, that failure count and the interrupt ``stop`` sets as its cancel signal.
 """
 
 from __future__ import annotations
@@ -25,11 +22,7 @@ from .runner import FieldRunner
 
 class Ticker:
     """Run ``FieldRunner.run_tick`` on the field's aligned cadence.
-
-    lories aligns slots on epoch seconds, which lands on the same instant as
-    a floor in the site timezone for every interval
-    that divides 60 minutes; a longer, non-dividing interval would drift
-    against the site's wall clock.
+    lories aligns slots on epoch seconds; an interval that does not divide 60 minutes drifts against site wall clock.
     """
 
     def __init__(

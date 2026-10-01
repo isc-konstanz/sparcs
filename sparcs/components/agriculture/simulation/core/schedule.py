@@ -3,10 +3,8 @@
 sparcs.components.agriculture.simulation.core.schedule
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Wall-clock slot alignment: ``interval`` (minutes) is the cadence a schedule
-is aligned to, and ``offset`` (minutes, ``0 <= offset < interval``) shifts
-that alignment within the interval. Alignment is absolute (``floor_date`` on
-``tz`` plus the offset), so restarts never shift a schedule.
+Wall-clock slot alignment to an ``interval`` (minutes), shifted by ``offset`` (minutes, ``0 <= offset < interval``).
+Alignment is absolute (``floor_date`` on ``tz`` plus the offset), so restarts never shift a schedule.
 """
 
 from __future__ import annotations

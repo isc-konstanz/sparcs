@@ -3,10 +3,8 @@
 sparcs.components.agriculture.simulation.runtime.runner
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Live tick policy: frontier and intake delay, midnight-aligned catch-up
-chunks, reads through ``Inputs``, one write per output per chunk through
-``Outputs``, the planner gate on the ``[soil_predictor]`` interval/offset.
-The per-row sequence lives in ``core.simulation``.
+Tick policy: frontier and intake delay, midnight-aligned catch-up chunks, the ``[soil_predictor]`` planner gate.
+Reads through ``Inputs``, one write per output per chunk through ``Outputs``; per-row steps are in ``core.simulation``.
 """
 
 from __future__ import annotations

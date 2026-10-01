@@ -3,12 +3,8 @@
 sparcs.components.agriculture.simulation.core.plots
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Progress images as pure functions from data to PNG bytes: create the
-figure, draw, save to bytes, close it -- no channel, component, or
-figure-reuse state (the relative-saturation cross-section and the shading
-pattern frame); the strike counter
-and the ``plot_strikes``/image channel writes stay in the IO layer.
-``PlotConfig`` itself is declared in ``config`` with the other sections.
+Progress images (relative-saturation cross-section, shading pattern frame) as pure functions from data to PNG bytes.
+Each call creates and closes its own figure; strike state and image channel writes stay in the IO layer.
 """
 
 from __future__ import annotations
@@ -122,7 +118,7 @@ def _offset_suffix(ts: pd.Timestamp) -> str:
 
 
 def _format_progress_title(label: str, ts: pd.Timestamp, *, tz: Any = None) -> str:
-    """``"<label> -- YYYY-MM-DD HH:MM[ +HH:MM]"`` -- the shared title format."""
+    """Shared title format: the label, an em dash, ``YYYY-MM-DD HH:MM`` and `` +HH:MM`` when tz-aware."""
     ts = _localize_timestamp(ts, tz)
     return f"{label} — {ts.strftime(_TIMESTAMP_FORMAT)}{_offset_suffix(ts)}"
 
@@ -158,9 +154,8 @@ def render_due(last: Optional[pd.Timestamp], now: pd.Timestamp, config: Optional
 
 
 def count_render_failure(logger: logging.Logger, what: str, strikes: int, disable_after: int) -> tuple[int, bool]:
-    """Count one render failure and log it with the active traceback (call from the
-    except block). Returns ``(strikes, disable)``; the caller owns the disable and
-    the reset on the next successful render."""
+    """Count one render failure and log it with the active traceback; call from the except block.
+    Returns ``(strikes, disable)``; the caller owns the disable and the reset on the next successful render."""
     strikes += 1
     if strikes >= disable_after:
         logger.exception(
@@ -178,9 +173,8 @@ def count_render_failure(logger: logging.Logger, what: str, strikes: int, disabl
 
 @dataclass(frozen=True)
 class ShadingEnvelope:
-    """Static plot extent, computed once so PNG size stays stable (port of
-    ``GroundShading._compute_plot_envelope``). ``center_x`` is the middle
-    row's x in pvfactors coordinates; the frame is drawn relative to it."""
+    """Static plot extent, computed once so the PNG size stays stable.
+    ``center_x`` is the middle row's x in pvfactors coordinates; the frame is drawn relative to it."""
 
     x_half: float
     y_min: float
@@ -198,11 +192,8 @@ def shading_envelope(
     mesh_height: float,
     center_x: float = 0.0,
 ) -> ShadingEnvelope:
-    """3 bays around the middle row, worst-case panel height above, soil
-    bottom below (exact port of ``GroundShading._compute_plot_envelope``
-    over the same inputs it reads from ``self``). ``pv_setups`` items need
-    only ``.distance``, ``.height``, ``.width``; ``tracker`` needs only
-    ``.max_angle``."""
+    """3 bays around the middle row, worst-case panel height above, soil bottom below.
+    ``pv_setups`` items need only ``.distance``, ``.height``, ``.width``; ``tracker`` needs only ``.max_angle``."""
     if pv_setups:
         distance = pv_setups[0].distance
         x_half = distance * 1.5
@@ -234,11 +225,8 @@ def render_shading_png(
     title: str = "Ground shading",
     tz: Any = None,
 ) -> bytes:
-    """Shading pattern frame with x = 0 on the middle row: ground coloured by
-    qinc, PV rows in black, shadow projection lines (port of
-    ``GroundShading._render_progress`` minus the soil cross-section
-    rectangles, which need geometry this pure function isn't given). Figure
-    is created and closed per call."""
+    """Shading pattern frame with x = 0 on the middle row: ground coloured by qinc, PV rows in black,
+    shadow projection lines. Figure is created and closed per call."""
     _ensure_safe_backend()
     x_extent = 2.0 * envelope.x_half
     y_extent = envelope.y_max - envelope.y_min

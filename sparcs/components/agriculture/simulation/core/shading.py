@@ -3,8 +3,7 @@
 sparcs.components.agriculture.simulation.core.shading
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Ground shading under the PV rows as a pure model: geometry in, per-segment
-shade factors out, over the live ``ground_shading`` geometry primitives.
+Ground shading under the PV rows as a pure model: geometry in, per-segment shade factors out.
 """
 
 from __future__ import annotations
@@ -47,12 +46,8 @@ _NIGHT_SUN_STATE: tuple[float, float, Optional[float]] = (90.0, 0.0, None)
 
 
 class ShadingConfig(Config):
-    """``[ground_shading]`` plus the PV geometry it is evaluated against.
-
-    ``axis_tilt``/``max_angle``/``backtrack`` are read only in trackable mode and
-    ``surface_tilt``/``mirrored`` only in as_is mode, but all keys live flat at
-    the top of the table. ``bay_width``, ``pv_rows`` and ``segment_ranges`` are
-    derived by the adapter, not config keys.
+    """``[ground_shading]`` plus the PV geometry; ``axis_tilt``/``max_angle``/``backtrack`` apply only when trackable.
+    ``surface_tilt``/``mirrored`` only in as_is mode; ``bay_width``/``pv_rows``/``segment_ranges`` come from ``derive``.
     """
 
     _CONFIGS_RESERVED_KEYS = Config._CONFIGS_RESERVED_KEYS | {"plot"}
@@ -123,13 +118,8 @@ class ShadingModel:
             self._build_setups()
 
     def evaluate(self, weather: pd.DataFrame, *, remember: bool = True) -> pd.DataFrame:
-        """One row per weather row: the bulk ``shading_factor`` (length-weighted over
-        the bay centred on the middle PV row), a shade factor in [0, 1] per soil top
-        segment, ``open_sky_ghi`` and a ``ghi_<segment>`` column each.
-
-        Free-field mode and any pvfactors exception fall back to the open-sky result.
-        With ``remember`` the last row's ground, PV rows and sun position are kept for
-        the progress image; the planner's horizon roll passes ``False``.
+        """Bay-mean ``shading_factor``, ``open_sky_ghi`` and a [0, 1] factor plus ``ghi_<segment>`` per top segment.
+        Free-field or a pvfactors error gives the open-sky result; ``remember`` keeps the last row for the plot.
         """
         if weather.empty:
             return pd.DataFrame(index=weather.index)

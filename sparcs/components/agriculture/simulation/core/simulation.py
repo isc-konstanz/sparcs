@@ -134,7 +134,7 @@ class Simulation:
 
     def add_sensors(self, sensors: Sequence[AnchorSensor]) -> None:
         """Hand discovered tensiometers to the assimilator; sample each as a probe
-        when sensor probes are on or anchoring is live."""
+        when sensor probes are on or anchoring is enabled."""
         self.assimilator.set_sensors(sensors)
         if self.setup.soil.discover_sensor_probes or self.assimilator.enabled:
             self.probes += [self.engine.probe_from_sensor(sensor) for sensor in sensors]
@@ -154,10 +154,8 @@ class Simulation:
         *,
         extra_diagnostics: Optional[Mapping[str, float]] = None,
     ) -> tuple[Sequence[StepResult], ChainResult]:
-        """Advance over one weather chunk: chain once, then per row advance,
-        assimilate, sample probes. Stops early on cancel; committed rows stay
-        committed. Without a state yet, the first row is the cold start.
-        ``extra_diagnostics`` is merged into every ``StepResult.diagnostics``.
+        """Chain once, then advance, assimilate and sample probes per row; ``extra_diagnostics`` merges into each row.
+        Stops early on cancel, keeping committed rows; without a state yet the first row is the cold start.
         """
         frontier = self.state.at if self.state is not None else None
         first_dt_s = self.engine.cold_start_s if self.state is None else 0.0
@@ -197,7 +195,7 @@ class Simulation:
         self, state: SoilState, step: Forcing, extra: Mapping[str, float], cancel: Cancel
     ) -> Optional[StepResult]:
         """One committed row from ``state``; ``None`` when the walk was cancelled. With
-        anchoring live, ``anchor`` carries the summed innovations of this row's update."""
+        anchoring enabled, ``anchor`` carries the summed innovations of this row's update."""
         result = self.engine.advance(state, step, cancel=cancel)
         if result.cancelled:
             return None

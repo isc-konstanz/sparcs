@@ -3,9 +3,7 @@
 sparcs.components.agriculture.simulation.core.planner
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Irrigation planning over a forecast horizon, on the shared engine and a state
-snapshot. Candidate enumeration, scoring and roll-out are the live functions;
-the frame builders keep the live forecast-table column vocabulary.
+Irrigation planning over a forecast horizon, on the shared engine and a state snapshot.
 """
 
 from __future__ import annotations
@@ -237,9 +235,7 @@ class IrrigationPlanner:
         weather_creation: Optional[pd.Timestamp] = None,
     ) -> Plan:
         """Roll the candidates, select one against ``threshold_hpa`` and build the frames.
-
-        Without configured windows the zero-flow roll is the plan (``chosen=None``).
-        The engine's identity cache is always invalidated on the way out.
+        Without windows the zero-flow roll is the plan (``chosen=None``); always invalidates the engine identity cache.
         """
         try:
             ic_se = np.asarray(state.se, dtype=float)

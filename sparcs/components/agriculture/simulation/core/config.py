@@ -3,8 +3,7 @@
 sparcs.components.agriculture.simulation.core.config
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Configuration sections for the ``field_simulation.conf`` +
-``field_simulation.d/`` layout, declared as lories ``Configurator`` classes.
+Lories ``Configurator`` sections for the ``field_simulation.conf`` + ``field_simulation.d/`` layout.
 Unknown keys are a hard error; ``FieldSetup`` bundles the configured sections.
 """
 
@@ -124,9 +123,7 @@ class Config(Configurator):
 
 def section(key: str, *, required: bool = False, desc: Optional[str] = None) -> ParameterGroup:
     """Declare a nested table whose keys belong to the ``_SECTIONS`` class for it.
-
-    Childless on purpose: the group only enforces presence, while ``_SECTIONS``
-    carries the class to the strict key check, the schema and ``_at_configure``.
+    The group is childless and only enforces presence; ``_SECTIONS`` drives key checks, schema and configure.
     """
     return ParameterGroup(key=key, desc=desc, required=required)
 

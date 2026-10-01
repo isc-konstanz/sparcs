@@ -3,10 +3,8 @@
 sparcs.components.agriculture.simulation.runtime.ports
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The two protocols between the runner and the outside world: ``Inputs`` is
-four ranged reads plus the persisted state, ``Outputs`` one method per result
-type; ``chain``, ``steps`` and ``save_state`` are called once per weather
-chunk, ``plan`` once per planner slot.
+Protocols between the runner and the outside world: ``Inputs`` is four ranged reads plus the persisted state.
+``Outputs`` ``chain``, ``steps`` and ``save_state`` are called once per weather chunk, ``plan`` once per planner slot.
 """
 
 from __future__ import annotations
@@ -29,9 +27,8 @@ class Inputs(Protocol):
         ...
 
     def irrigation(self, start: dt.datetime, end: dt.datetime) -> pd.Series:
-        """Raw flow samples [l/min] in ``(start - IRRIGATION_LOOKBACK, end]``, not aligned
-        to the weather: the metered flow, else the valve state times the design flow,
-        else an empty series (not watering)."""
+        """Raw flow samples [l/min] in ``(start - IRRIGATION_LOOKBACK, end]``, not aligned to the weather.
+        Metered flow, else valve state times design flow, else an empty series (not watering)."""
         ...
 
     def tension(self, start: dt.datetime, end: dt.datetime) -> pd.DataFrame:

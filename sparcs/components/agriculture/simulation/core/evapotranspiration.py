@@ -3,10 +3,7 @@
 sparcs.components.agriculture.simulation.core.evapotranspiration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Penman-Monteith evapotranspiration per soil segment, as a pure model. This is
-today's ``evapotranspiration.py`` without the Component base and the channel
-registration; the per-term helpers keep their names so the move is a cut.
-``evaluate`` is the ``publish=False`` branch of the live ``evaluate`` verbatim:
+Penman-Monteith evapotranspiration per soil segment, as a pure model:
 no channel writes, no ``self.data``/``self.context`` reads.
 """
 
@@ -23,9 +20,7 @@ from lories.components.weather import Weather
 @dataclass(frozen=True)
 class SegmentProperties:
     """Per-segment vegetation + radiation state for one ET evaluation.
-
-    ``shade_factor`` in [0, 1] scales bulk GHI to local incoming shortwave.
-    ``face_length`` [m] weights bulk means across segments.
+    ``shade_factor`` in [0, 1] scales bulk GHI to local shortwave; ``face_length`` [m] weights the bulk means.
     """
 
     name: str
@@ -56,9 +51,7 @@ class ETModel:
         Weather.CLEAR_SKY_INDEX,
     )
 
-    # Bulk-frame column names, matching the live Constant.key values exactly
-    # (Constant is a str subclass, so these are the same strings today's
-    # ``df[Evapotranspiration.NET_IRR]`` etc. resolve to).
+    # Bulk-frame column names.
     SVP = "sat_vapor_pressure"
     GVP = "ground_vapor_pressure"
     VAP_HEAT = "vaporization_heat"
@@ -74,14 +67,8 @@ class ETModel:
     def evaluate(
         self, weather: pd.DataFrame, segments: Sequence[SegmentProperties]
     ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
-        """Compute Penman-Monteith ET per segment.
-
-        Returns ``(bulk, seg_et)``: ``bulk`` is ``weather`` augmented with the
-        weather-only terms (``SVP``/``GVP``/``VAP_HEAT``/``SVP_SLOPE``) and the
-        face-length-weighted mean of every per-segment term (``NET_IRR`` ...
-        ``EVAPOTRANSPIRATION``, the last in kg/(m^2*h)); ``seg_et`` maps
-        segment name to a frame with columns ``("et", "evap", "transp")`` in
-        kg/(m^2*s).
+        """Compute Penman-Monteith ET; ``seg_et`` maps segment name to ``et``/``evap``/``transp`` in kg/(m^2*s).
+        ``bulk`` is ``weather`` plus weather-only terms and face-length-weighted segment terms, ET in kg/(m^2*h).
         """
         seg_list = list(segments)
         if not seg_list:
@@ -97,9 +84,7 @@ class ETModel:
         vh = self._vaporization_heat(temperature=weather[Weather.TEMP_AIR])
         svp_slope = self._slope_sat_vapor_pressure(temperature=weather[Weather.TEMP_AIR], svp=svp, vh=vh)
 
-        # Per-segment Penman-Monteith. Vegetation properties and the local
-        # radiation scaling come from the segment; everything weather-only
-        # is reused as-is.
+        # Per-segment Penman-Monteith; vegetation and local radiation scaling come from the segment.
         seg_et: dict[str, pd.DataFrame] = {}
         seg_terms: dict[str, dict[str, pd.Series]] = {}
         ones = pd.Series(1.0, index=weather.index)

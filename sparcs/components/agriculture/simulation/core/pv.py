@@ -19,9 +19,8 @@ import numpy as np
 import pandas as pd
 
 
-# pvfactors builds rho_mat from a mix of scalar and array reflectivities;
-# numpy>=2 rejects the inhomogeneous list. Broadcast scalars to n_states
-# so the radiosity matrix stays rectangular. Patched once at import time.
+# pvfactors builds rho_mat from mixed scalar and array reflectivities, which numpy>=2 rejects as inhomogeneous;
+# broadcast scalars to n_states so the radiosity matrix stays rectangular. Patched once at import time.
 def _patch_pvfactors_numpy2_compat() -> None:
     from pvfactors.irradiance.models import SKY_REFLECTIVITY_DUMMY, HybridPerezOrdered
 
@@ -116,10 +115,7 @@ def _qinc_in_range(ground: list[tuple], x_start: float, x_end: float) -> float:
 
 def _combine_grounds(grounds_per_setup: list[list[tuple]]) -> list[tuple]:
     """Merge per-setup ground segments at one timestep into a unified ground.
-
-    Direct components multiply across setups (independent shading);
-    isotropic and reflection components average.
-    Combined qinc = direct_frac·direct_max + ⟨reflection⟩ + ⟨isotropic⟩.
+    Direct components multiply across setups (independent shading); isotropic and reflection components average.
     """
     if not grounds_per_setup:
         return []
@@ -188,12 +184,8 @@ class _TrackerConfig:
 
 
 def _pvfactors_is_pointing_right(surface_azimuth: float, axis_azimuth: float) -> bool:
-    """pvfactors' tilt-sign convention, mirroring
-    ``pvfactors.geometry.base._get_rotation_from_tilt_azimuth``: it derives a
-    signed ``rotation = tilt if is_pointing_right else -tilt`` and the row
-    geometry follows ``rotation``'s sign. So the *same* signed surface_tilt
-    leans the row opposite ways depending on this flag — which is why the
-    A-frame sign pairing must key off it instead of being hard-coded.
+    """pvfactors' tilt-sign convention (``pvfactors.geometry.base._get_rotation_from_tilt_azimuth``): the same signed
+    surface_tilt leans the row opposite ways depending on this flag, so the A-frame sign pairing must key off it.
     """
     return (surface_azimuth - axis_azimuth) % 360.0 > 180.0
 
@@ -233,9 +225,8 @@ class _PVSetup:
         self._engine = PVEngine(self._pv_array)
 
     def run(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Run the engine on ``df``; return a DataFrame with columns
-        ``ground`` (segment tuples with qinc/reflection/isotropic) and
-        ``pv_rows`` (row endpoint tuples with qinc_front/qinc_back).
+        """Run the engine on ``df``; columns ``ground`` (segment tuples with qinc/reflection/isotropic)
+        and ``pv_rows`` (row endpoint tuples with qinc_front/qinc_back).
         """
         self._engine.fit(
             df.index,
