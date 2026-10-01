@@ -137,6 +137,8 @@ def sql_connector(tmp_path, monkeypatch):
     _build_project(tmp_path)
     monkeypatch.chdir(tmp_path)
 
+    # A SqlDatabase cannot be built outside a RegistratorContext, so load a headless project.
+    # A connector without channels never connects on its own; it is connected by hand below.
     try:
         app = lories.load("sparcs_traj_roundtrip_test")
     except Exception as e:  # noqa: BLE001
@@ -170,7 +172,8 @@ def test_duplicate_timestamp_distinct_forecast_id_survive_as_distinct_rows(sql_c
 
     connector.write(frame)
 
-    # connector.read() rejects a non-unique DatetimeIndex, so the rows are read back with direct SQL.
+    # connector.read() rejects a non-unique DatetimeIndex and an unbounded read returns only the latest row,
+    # so the rows are read back with direct SQL.
     from sqlalchemy import text
 
     with connector.engine.connect() as connection:

@@ -4,7 +4,7 @@ sparcs.components.agriculture.simulation.runtime.ports
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Protocols between the runner and the outside world: ``Inputs`` is four ranged reads plus the persisted state.
-``Outputs`` ``chain``, ``steps`` and ``save_state`` are called once per weather chunk, ``plan`` once per planner slot.
+``Outputs`` has one method per result: ``chain``, ``steps`` and ``save_state`` per weather chunk, ``plan`` per slot.
 """
 
 from __future__ import annotations

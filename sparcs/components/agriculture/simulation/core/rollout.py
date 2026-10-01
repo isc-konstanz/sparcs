@@ -70,7 +70,7 @@ class RolloutEngine:
         sample_on_zero_dt: bool = True,
     ) -> tuple[list[pd.Timestamp], dict[str, list[float]]]:
         """Walk the PDE from its current state across ``idx``; returns Se per probe, ``idx[0]`` sampled as-is.
-        ``snapshot_sink`` sees ``self.pde`` at each recorded timestamp; observers skip zero-dt intervals."""
+        ``snapshot_sink`` sees each recorded state; zero-dt intervals are recorded but skip the observers."""
         timestamps: list[pd.Timestamp] = [idx[0]]
         trajectories: dict[str, list[float]] = {p.channel_id: [self.pde.sample(p)] for p in self.probes}
         if snapshot_sink is not None:

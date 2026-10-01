@@ -141,7 +141,7 @@ class ForecastTablePublisher:
         probes: list[ProbeSpec],
     ) -> dict[str, dict[str, Any]]:
         """Per-probe soil_id/field_id kwargs from ``[soil_simulation.data.channels]``.
-        A probe without soil_id is logged; two probes sharing a soil_id raise ConfigurationError."""
+        A missing soil_id warns, then the whole detail write fails; a shared soil_id raises ConfigurationError."""
         p = self._predictor
         channels_cfg = soil_block.get_member("data", defaults={}).get_member("channels", defaults={})
         field_id = channels_cfg.get("field_id", default=None)
@@ -262,7 +262,7 @@ class ForecastTablePublisher:
         id_by_key_fn: Callable[[], dict[str, str]],
         table_label: str,
     ) -> None:
-        """Rename key columns to channel ids and write once; never raises, a failure is logged and counted.
+        """Rename key columns to channel ids and write once; a failed write is logged and counted, not raised.
         ``id_by_key_fn`` runs only after the connector resolved with a write(), so a skip never touches ``data``."""
         p = self._predictor
         if p._logger_id is None:

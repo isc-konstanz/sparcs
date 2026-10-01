@@ -715,7 +715,7 @@ class FieldSimulation(Component):
         prior: Optional[pd.DataFrame] = None,
         **kwargs: Any,
     ) -> pd.DataFrame:
-        """Offline run over a weather frame on its own session, never the current one; with ``prior`` it continues it.
+        """Offline run on its own session, never the current one; with ``prior`` it continues the previous offline run.
         Without ``prior`` the run starts cold. Returns diagnostics that have a ``soil_simulation`` channel, by id."""
         weather = self._get_range(weather, start, end)
         if weather.empty:
