@@ -2,60 +2,8 @@
 """sparcs.tests.test_soil_predictor_trajectory_roundtrip
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-BOX-PENDING: the direct-write spike -- a
-duplicate-timestamp composite-PK round-trip through the real lories SQL
-connector (``lories.connectors.sql.database.SqlDatabase``) against MariaDB or
-MySQL.
-
-Two same-timestamp rows that differ only in ``forecast_id`` must survive
-``connector.write(frame)`` -> ``connector.read(resources)`` as two DISTINCT
-rows keyed on the full composite PK ``(timestamp, timestamp_creation,
-forecast_id, ...)``, not collapsed -- this is the exact behavior
-``_write_detail_table`` (the ``agri_soil_forecast`` detail table) depends on
-(``Table.write`` upserts on the full composite PK via
-``ON DUPLICATE KEY UPDATE``; two rows sharing ``timestamp`` but differing in
-``forecast_id`` are different PK tuples, hence different rows).
-
-NOTE: production ``_register_detail_channels`` now gives EACH probe its OWN
-``timestamp_creation``/``forecast_id`` TWIN channels (not one pair shared by
-every probe), each carrying that probe's own ``soil_id``/``field_id``
-surrogate attributes -- required because the SQL connector's per-attribute-set
-write grouping (``table.py``'s ``_groupby``) raises ``ResourceError`` for any
-resource on a keyed table missing a declared surrogate attribute, and a
-single shared pair cannot carry N different probes' soil_ids at once. This
-spike's simplified single-probe/no-surrogate schema below still proves the
-core duplicate-timestamp composite-PK mechanism (the part genuinely gated on
-a real DB); the multi-probe surrogate-attribute grouping itself is unit-tested
-without a DB in ``test_fieldsim_forecast_tables.py``.
-
-There is NO local MariaDB/MySQL server available in this environment (see
-project memory: no local DB server), and the lories SQL connector's own
-``configure()`` explicitly rejects ``sqlite`` (``ConfigurationError:
-Unsupported database type``), so the upsert-on-duplicate-composite-PK
-behavior under test cannot be faked against an in-memory backend without
-misrepresenting what is actually being proven. This test is gated on real
-connection parameters via environment variables and SKIPS (does not fail)
-when they are absent or the connection cannot be established.
-
-A real ``SqlDatabase`` connector cannot be constructed standalone: its base
-``Registrator.__init__`` asserts a real ``RegistratorContext``
-(``lories/core/register/registrator.py``), which only a full ``Application``
-provides via the framework's own config-driven load path -- there is no
-lighter, still-real construction available (confirmed against
-``lories/application/main.py``/``settings.py``; the same friction the
-ai-inference prototype ran into, see ``.scratch/_archive/ai-inference-
-prototype/PRD.md``). This test therefore bootstraps a minimal headless
-project (``settings.conf`` + ``system.conf`` declaring one ``[connectors.sql]``
-block and no bound channels) via ``lories.load(...)``, mirroring that
-prototype's verified recipe, then fetches the configured (not yet connected --
-a channel-less connector never auto-connects) connector and connects it
-manually against the test's own ad-hoc ``Resources``.
-
-Run on the box against a real MariaDB/MySQL instance to close this out, with:
-
-    SPARCS_TEST_SQL_HOST, SPARCS_TEST_SQL_PORT, SPARCS_TEST_SQL_USER,
-    SPARCS_TEST_SQL_PASSWORD, SPARCS_TEST_SQL_DATABASE
-    (SPARCS_TEST_SQL_DIALECT, default "mariadb")
+Two same-timestamp rows differing only in ``forecast_id`` survive a real SQL write as two distinct composite-PK rows.
+Skips unless SPARCS_TEST_SQL_HOST/PORT/USER/PASSWORD/DATABASE reach MariaDB or MySQL (the connector rejects sqlite).
 """
 
 import os
@@ -67,9 +15,7 @@ import pandas as pd
 pytestmark = pytest.mark.slow
 
 lories = pytest.importorskip("lories")
-# NOTE: lories.typing.Resource/Resources are TypeVars, not constructable classes;
-# the concrete dataclasses live in lories.core. Importing the TypeVars here is what
-# made this box-pending test error at _build_resources() before it could connect.
+# lories.typing.Resource/Resources are TypeVars, not constructable classes; the dataclasses are in lories.core.
 _resource_mod = pytest.importorskip("lories.core.resource")
 _resources_mod = pytest.importorskip("lories.core.resources")
 
@@ -164,9 +110,7 @@ def _build_resources() -> "Resources":
 
 
 def _build_two_combo_frame() -> pd.DataFrame:
-    """Two rows sharing the SAME `timestamp` index value, differing only in
-    `forecast_id` -- the exact duplicate-timestamp composite-PK scenario the
-    detail table depends on (two candidates' rows for the same future step)."""
+    """Two rows sharing the same `timestamp`, differing only in `forecast_id` (two candidates, same future step)."""
     ts = pd.Timestamp("2026-07-03 08:00", tz="UTC")
     creation = pd.Timestamp("2026-07-03 01:00", tz="UTC")
     index = pd.DatetimeIndex([ts, ts], name="timestamp")
@@ -226,13 +170,7 @@ def test_duplicate_timestamp_distinct_forecast_id_survive_as_distinct_rows(sql_c
 
     connector.write(frame)
 
-    # The detail table cannot be read back through connector.read(): its whole
-    # point is multiple rows per timestamp (one per candidate), but lories' read
-    # path rejects a non-unique DatetimeIndex (validate_index in
-    # lories/data/validation.py raises "Invalid series with non unique index"), and
-    # an unbounded read additionally applies .limit(1). Offline analysis therefore
-    # reads this table with direct SQL -- which is what proves the composite-PK
-    # persistence here: both rows physically survive as DISTINCT PK tuples.
+    # connector.read() rejects a non-unique DatetimeIndex, so the rows are read back with direct SQL.
     from sqlalchemy import text
 
     with connector.engine.connect() as connection:

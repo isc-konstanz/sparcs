@@ -1,14 +1,7 @@
 # -*- coding: utf-8 -*-
 """Unit tests for the sensor/probe coordinate resolver.
 
-Pins the cm->m convention and the bay-center / depth-sign mapping that the
-``A Sensor is-a Probe`` vocabulary relies on (see context/sparcs.md and
-docs/adr/0001-soil-coordinate-units-cm.md). These exercise the pure mapping
-helpers with a synthetic cell grid, so no Gmsh mesh or FiPy solve is built.
-
-The SoilMoisture-side attributes (`x_offset` default, `has_measured_tension`)
-are covered by the box integration suite, which can construct a full
-component tree.
+Pins the cm->m convention and the bay-center / depth-sign mapping on a synthetic cell grid, with no Gmsh mesh.
 """
 
 from types import SimpleNamespace

@@ -1,11 +1,7 @@
 # -*- coding: utf-8 -*-
 """Unit tests for the anchor orchestration layer (the freshness gate + update).
 
-Exercises ``anchor_update`` -- the shared entry both backends call -- with a real
-retention model, a synthetic two-cell grid, and a stub ``read_tension`` closure,
-so no FiPy mesh or component tree is built. Covers the event-driven cadence the
-PRD pins (.scratch/soil-sensor-anchoring/PRD.md): fresh-only, strictly-newer,
-within staleness.
+Exercises ``anchor_update`` with a real retention model, a two-cell grid and a stub ``read_tension``; no FiPy mesh.
 """
 
 import numpy as np
@@ -131,9 +127,7 @@ def test_per_sensor_radii_override_changes_reach():
 
 
 def test_zero_tension_reading_anchors():
-    """A 0 hPa reading (e.g. saturated soil, or historically a disconnected
-    tensiometer) is a valid finite observation; there is no floor rejecting it, so
-    it assimilates like any other reading."""
+    """A 0 hPa reading is a valid finite observation; no floor rejects it, so it assimilates like any other."""
     assert _run({"s30": (NOW, 0.0)}).anchored_at["s30"] == NOW
     assert _run({"s30": (NOW, -0.3)}).anchored_at["s30"] == NOW  # signed, still ~0
     assert _run({"s30": (NOW, 300.0)}) is not None

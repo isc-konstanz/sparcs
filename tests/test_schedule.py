@@ -2,9 +2,7 @@
 """sparcs.tests.test_schedule
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Unit tests for ``simulation.core.schedule.slot_floor``, the absolute wall-clock
-slot alignment used by ``simulation.core.candidates`` and the field runner.
-Pure function, exercised directly with pinned exact-timestamp cases.
+Unit tests for ``simulation.core.schedule.slot_floor``, the absolute wall-clock slot alignment.
 """
 
 import pytest

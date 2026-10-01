@@ -1,17 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Watering-strip ponding + implicit irrigation intake (SoilPDECore).
+"""Watering-strip ponding + implicit irrigation intake (SoilPDECore); real Gmsh mesh and FiPy, so marked slow.
 
-Background: the drip emitter is a concentrated source on one narrow surface
-strip. The old path injected the flow explicitly and clipped it against the
-per-step saturation headroom, booking the clipped water as permanently lost
-``top_rejected`` "runoff" — at physically correct fluxes the loss reached
-57–100 % and depended on dt (smaller dt lost more). These tests pin the
-hardened behaviour: irrigation water is offered through a linearized implicit
-source (the solver throttles intake near saturation), un-infiltrated water
-ponds on the strip and re-offers on later substeps, the pond bookkeeping is
-exact, and rollbacks / skipped substeps never mutate the ponds.
-
-Heavy (builds a real Gmsh mesh and runs FiPy): marked slow.
+Un-infiltrated irrigation ponds and re-offers on later substeps; rollbacks and skipped substeps never touch the ponds.
 """
 
 import io
@@ -78,9 +68,9 @@ def _pond_mass(core: SoilPDECore) -> float:
     return core.surface_h[WATERING] * core.segment_face_len[WATERING] * RHO_W
 
 
-# ~20 mm/h over the 0.5 m strip — drip-scale, well under default k_s (360 mm/h).
+# ~20 mm/h over the 0.5 m strip: drip-scale, well under default k_s (360 mm/h).
 MODERATE_FLOW = 20.0e-3 / 3600.0 * 0.5
-# ~2000 mm/h over the strip — far beyond intake; must pond and overflow, not vanish.
+# ~2000 mm/h over the strip: far beyond intake; must pond and overflow, not vanish.
 EXTREME_FLOW = 2000.0e-3 / 3600.0 * 0.5
 
 
@@ -97,8 +87,7 @@ def test_moderate_irrigation_fully_infiltrates(tmp_path):
 
 
 def test_irrigation_mass_reaches_the_soil(tmp_path):
-    """Soil storage gain vs a zero-flow control run equals the water that left
-    the pond system — irrigation is not silently created or destroyed."""
+    """Soil storage gain vs a zero-flow control run equals the water that left the pond system."""
     control = _build_core(tmp_path)
     control.walk_window(rates=_irrigation(0.0), window_s=1800.0)
     dw_control = control.total_water()
@@ -108,9 +97,7 @@ def test_irrigation_mass_reaches_the_soil(tmp_path):
     injected = MODERATE_FLOW * RHO_W * 1800.0
     delivered = injected - _pond_mass(core) - result.clip.ponding_overflow
 
-    # The tolerance absorbs the pre-existing background drift of the solver
-    # (per-step SE_MIN/SE_MAX safety clips create/destroy small amounts of
-    # water); the old inject-then-clip path lost tens of percent here.
+    # The tolerance absorbs solver drift: per-step SE_MIN/SE_MAX safety clips create or destroy a little water.
     assert core.total_water() - dw_control == pytest.approx(delivered, rel=0.12)
 
 
@@ -142,8 +129,7 @@ def test_ponded_water_reapplies_after_pulse_ends(tmp_path):
 
 
 def test_cumulative_infiltration_is_dt_stable(tmp_path):
-    """Soil + pond storage after the same irrigation window agrees across dt
-    (the old inject-then-clip path diverged by tens of percent)."""
+    """Soil + pond storage after the same irrigation window agrees across dt."""
     gained = {}
     for dt in (10.0, 120.0):
         core = _build_core(tmp_path, dt=f"{dt:g}s")
@@ -171,9 +157,7 @@ def test_rollback_and_skip_never_mutate_the_ponds(tmp_path, monkeypatch):
     rates = FluxRates(seg_evap={}, seg_transp={}, flow_m3s=MODERATE_FLOW, rain_flux=0.01)
     result = core.walk_window(rates=rates, window_s=120.0, accept_at_dt_min=True)
 
-    # Every substep was skipped: no forcing entered the system, so the ponds
-    # must be untouched (the old code accumulated rain into the buckets even
-    # for rolled-back and skipped substeps).
+    # Every substep was skipped: no forcing entered the system, so the ponds must be untouched.
     assert result.skipped_s == pytest.approx(120.0)
     assert core.surface_h == ponds_before
 
@@ -198,9 +182,7 @@ def test_ponding_config_base_merge_watering_follows_base_not_new_h_max(tmp_path)
     merged = PondingConfig(_configs(str(tmp_path), h_max_mm=20.0), base=base)
 
     assert merged.h_max_mm == 20.0
-    # base is fully resolved -- the base=None dynamic default (watering_h_max_mm
-    # follows the just-parsed h_max_mm) does NOT apply once a base is supplied;
-    # watering_h_max_mm inherits base's resolved value instead.
+    # With a base, watering_h_max_mm inherits base's resolved value instead of following the new h_max_mm.
     assert merged.watering_h_max_mm == 50.0
 
 
@@ -223,11 +205,8 @@ def test_state_blob_roundtrip_and_pre_pond_compat(tmp_path):
 
 
 def test_load_state_blob_legacy_rel_sat_only_blob_falls_back(tmp_path):
-    """Blobs written by the pre-B3 ``_encode_state`` (``np.savez(buf,
-    rel_sat=rel_sat)`` only -- no ``rel_sat_old``, no surface fields at all)
-    must still load: ``load_state_blob`` falls back to ``rel_sat`` for the
-    absent ``rel_sat_old`` instead of raising ``KeyError``. Additive: does not
-    change the missing-``surface_h``-key case pinned above."""
+    """A blob holding only ``rel_sat`` (no ``rel_sat_old``, no surface fields) still loads;
+    ``load_state_blob`` falls back to ``rel_sat`` for ``rel_sat_old``."""
     core = _build_core(tmp_path)
     rel_sat = np.asarray(core.rel_sat.value).copy()
 

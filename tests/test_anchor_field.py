@@ -1,10 +1,7 @@
 # -*- coding: utf-8 -*-
 """Unit tests for the pure constant-gain anchor analysis update.
 
-Exercises ``anchor_field`` and its localization taper on a synthetic cell grid,
-in Se space, with no FiPy mesh and no retention model -- the seam the PRD pins as
-the primary one (``.scratch/soil-sensor-anchoring/PRD.md`` Testing Decisions).
-Asserts external behaviour (the corrected field), not the internal call sequence.
+Exercises ``anchor_field`` and its taper on a synthetic cell grid in Se space, with no FiPy mesh or retention model.
 """
 
 import numpy as np

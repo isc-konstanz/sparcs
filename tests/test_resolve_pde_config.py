@@ -2,10 +2,8 @@
 """sparcs.tests.test_resolve_pde_config
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Unit tests for ``resolve_pde_config`` -- the helper that collapses the
-construct-``PDEConfig``-then-``apply_surface_forcing`` sequence into one
-canonical resolution (``engine.py`` builds the soil PDE config through it).
-Exercised directly -- pure config parsing, no mesh.
+Unit tests for ``resolve_pde_config``, which builds ``PDEConfig`` and then applies ``apply_surface_forcing``.
+Pure config parsing, no mesh.
 """
 
 import pytest
@@ -23,9 +21,8 @@ def _configs(tmp_path, name="t.conf", **values) -> Configurations:
 
 
 def test_fresh_parse_no_inherit_uses_own_forcing_blocks(tmp_path):
-    """No ``inherit_forcing_from`` -> forcing comes from the component's own
-    sibling ``[ponding]``/``[feddes]`` blocks; an absent block leaves the
-    hardcoded ``PDEConfig`` defaults untouched."""
+    """Forcing comes from the component's own ``[ponding]``/``[feddes]`` blocks;
+    an absent block leaves the hardcoded ``PDEConfig`` defaults untouched."""
     model_block = _configs(tmp_path, name="model.conf")
     component_block = _configs(
         tmp_path,
@@ -44,9 +41,8 @@ def test_fresh_parse_no_inherit_uses_own_forcing_blocks(tmp_path):
 
 
 def test_inherit_branch_no_local_forcing_is_identity(tmp_path):
-    """``inherit_forcing_from`` given, component states neither ``[ponding]``
-    nor ``[feddes]`` -> ``cfg.ponding``/``.feddes`` ARE the inherited objects
-    (``is`` identity) -- the seed-before-apply ordering this helper exists for."""
+    """With neither ``[ponding]`` nor ``[feddes]`` stated, ``cfg.ponding``/``.feddes`` are the inherited objects
+    (``is`` identity), which needs the seed before ``apply_surface_forcing``."""
     model_block = _configs(tmp_path, name="model.conf")
     sim_block = _configs(
         tmp_path,
@@ -69,10 +65,8 @@ def test_inherit_branch_no_local_forcing_is_identity(tmp_path):
 
 
 def test_inherit_branch_local_partial_ponding_merges_against_inherited_base(tmp_path):
-    """``inherit_forcing_from`` given, component states a PARTIAL ``[ponding]``
-    -> the explicit key wins, unset keys follow ``inherit_forcing_from``'s
-    resolved ponding (the ``ponding_base=`` key-level merge), and the
-    inherited object itself is left untouched (no in-place mutation)."""
+    """In a partial ``[ponding]`` the explicit key wins and unset keys follow the inherited resolved ponding;
+    the inherited object is not mutated."""
     model_block = _configs(tmp_path, name="model.conf")
     sim_block = _configs(
         tmp_path,

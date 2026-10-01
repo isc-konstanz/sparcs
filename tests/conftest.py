@@ -3,13 +3,8 @@
 tests.conftest
 ~~~~~~~~~~~~~~
 
-Shared helpers and fixtures for the fieldsim tests: the standard test mesh
-kwargs, a minute ``Timedelta``, a ``Configurations`` loader, the standard
-small-mesh ``SoilPDECore`` recipe, a watering-strip probe, and the bare
-``RolloutEngine`` factory the ladder/zero-window roll-out pins share.
-
-Heavy imports (FiPy via ``core.pde``) happen inside the fixtures, not at
-module level, so collecting or running the fast tests stays light.
+Shared helpers and fixtures for the fieldsim tests.
+FiPy (via ``core.pde``) is imported inside the fixtures so collecting the fast tests stays light.
 """
 
 import pytest
@@ -40,11 +35,7 @@ def load_configs(tmp_path, name="t.conf", **values) -> Configurations:
 def pde_core_factory(tmp_path_factory):
     """Factory for the standard small-mesh test core.
 
-    Each call builds a FRESH ``SoilPDECore`` in its own tmp dir (callers
-    such as the caterpillar-vs-independent parity tests need two isolated
-    cores rolled from the same IC), running ``ensure_mesh`` per call.
-    ``dt`` stays parameterizable -- ``test_soil_core_integration.py`` keeps
-    its own dt='50s' fixture.
+    Each call builds a fresh ``SoilPDECore`` in its own tmp dir, so two cores never share state.
     """
     from sparcs.components.agriculture.simulation.core.pde import (
         MeshConfig,

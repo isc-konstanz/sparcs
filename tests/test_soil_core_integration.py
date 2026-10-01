@@ -1,14 +1,6 @@
 # -*- coding: utf-8 -*-
-"""Regression tests for the hardened SoilPDECore solve / walk_window path.
-
-Background: the soil-tuning parameter sweep (sparcs/soil_tuning.py) showed
-that high-rain forcing produces near-singular linear systems that crashed
-the previous direct-LU solve (uncatchable C-abort) and could push NaN /
-out-of-band Se into the committed state. These tests pin the hardened
-behaviour: GMRES never hard-crashes, non-finite states are never committed,
-and Se stays in [SE_MIN, SE_MAX].
-
-Heavy (builds a real Gmsh mesh and runs FiPy): marked slow.
+"""Under near-singular high-rain systems GMRES must not crash, non-finite states are never committed,
+and Se stays in [SE_MIN, SE_MAX]. Builds a real Gmsh mesh and runs FiPy, so marked slow.
 """
 
 import pytest

@@ -1,12 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Unit tests for the rain-shadow passthrough fraction (imperfect PV cover).
+"""Unit tests for the rain-shadow passthrough fraction (imperfect PV cover), with no FiPy mesh.
 
-Exercises ``SoilPDECore._compute_rain_open_fractions`` on a synthetic MeshConfig
-with no FiPy mesh: passthrough 0 fully blocks the shaded plant segments (the
-existing behaviour), passthrough f admits fraction f of the rain there, and
-open-sky segments outside the shadow are untouched. The bench sweeps this
-parameter to let rain reach the bay-center probe column without the unphysical
-k_s the fully-blocked shadow otherwise forces.
+Passthrough f admits fraction f of the rain on the shaded plant segments; open-sky segments are untouched.
 """
 
 import types
@@ -27,9 +22,8 @@ def _configs(tmp_dir: str, **values) -> Configurations:
 
 
 def _fractions(tmp_dir: str, passthrough: float) -> dict:
-    # width 3.0 / plant 1.0 / watering 0.5 / dx 0.5 -> plant top segments span
-    # (1.0, 1.25) and (1.75, 2.0); a shadow of width 1.0 centered at 1.5 -> [1.0, 2.0]
-    # covers both plant segments fully. No mesh is built.
+    # Plant top segments span (1.0, 1.25) and (1.75, 2.0);
+    # a shadow of width 1.0 centered at 1.5 covers both fully.
     mc = MeshConfig(_configs(tmp_dir, width=3.0, plant_width=1.0, watering_width=0.5, d_x=0.5, dl=0.2))
     oc = PDEConfig(_configs(tmp_dir, rain_shadow_width=1.0, rain_shadow_passthrough=passthrough))
     stub = types.SimpleNamespace(mesh_config=mc, ode_config=oc)
