@@ -3,15 +3,8 @@
 sparcs.components.agriculture.simulation.components
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The lories layer: ``FieldSimulation``, its four ``ChannelNamespace``
-children, and ``ChannelInputs``/``ChannelOutputs``, the runtime ports over
-lories channels.
-
-``FieldSimulation`` validates its own section and each child's ``.d`` file
-against a ``Config`` class, bundles them into a frozen ``FieldSetup`` and
-builds the ``Simulation`` at configure; the runner and the ``Ticker`` start at
-activate. ``AgriculturalField`` builds it from its ``field_simulation``
-member.
+The lories layer: ``FieldSimulation``, its ``ChannelNamespace`` children and the channel ports.
+``FieldSimulation`` builds the ``Simulation`` at configure; the runner and the ``Ticker`` start at activate.
 """
 
 from __future__ import annotations
@@ -57,7 +50,6 @@ _C = TypeVar("_C", bound="ChannelNamespace")
 # Weather keys the chain fills with a default instead of requiring a feed.
 _OPTIONAL_WEATHER_KEYS: frozenset = frozenset({Weather.CLEAR_SKY_INDEX, Weather.HUMIDITY_REL})
 
-# The live components register these by bare key, so they have no live Constant.
 PLOT_STRIKES = Constant(float, "plot_strikes", "Plot Strikes", context="fieldsim")
 
 # Keyed by the table label ForecastTablePublisher passes to _bump_write_failure.
@@ -81,12 +73,8 @@ _SHADING_IMAGE: Mapping[str, Any] = {"aggregate": "last", "logger": {"enabled": 
 
 
 class ChannelNamespace(Component):
-    """A Component that exists to own channels under its id. ``FieldSimulation``
-    validates its ``.d`` file against ``CONFIG`` and sets ``config``. No logic.
-
-    ``plot_config`` is the child's own ``[plot]`` block (the field-level block
-    cascades into it as defaults), ``None`` when disabled or once the render
-    failure policy switched plotting off for the rest of the process."""
+    """A Component that owns channels under its id; ``FieldSimulation`` validates its ``.d`` file against ``CONFIG``.
+    ``plot_config`` is its own ``[plot]`` block over the field-level defaults, None once disabled for the process."""
 
     CHANNELS: ClassVar[Sequence[Constant]] = ()
     # Registered only when the child's own [plot] block is enabled.
@@ -241,8 +229,7 @@ class SoilSimulation(ChannelNamespace):
 
 
 class SoilPredictor(ChannelNamespace):
-    """The forecast tables' schema and write path live in
-    ``ForecastTablePublisher``; this class supplies what it reads."""
+    """Planner channels; ``ForecastTablePublisher`` holds the forecast tables' schema and write path."""
 
     TYPE: str = "soil_predictor"
     CONFIG = PlannerConfig
@@ -321,7 +308,7 @@ class SoilPredictor(ChannelNamespace):
 
 
 class ChannelInputs:
-    """``Inputs`` over lories connector reads; no decisions live here."""
+    """``Inputs`` over lories connector reads; it makes no decisions."""
 
     def __init__(self, field: "FieldSimulation") -> None:
         self.field = field
@@ -342,7 +329,7 @@ class ChannelInputs:
             return None
         return SoilState.from_blob(blob, at=channel.timestamp)
 
-    # -- WEATHER -----------------------------------------------------------
+    # --- WEATHER ----------------------------------------------------------
 
     def weather(self, start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
         field = self.field
@@ -377,7 +364,7 @@ class ChannelInputs:
         self._last_invalid_weather_columns = []
         return True
 
-    # -- IRRIGATION ----------------------------------------------------------
+    # --- IRRIGATION ---------------------------------------------------------
 
     def irrigation(self, start: dt.datetime, end: dt.datetime) -> pd.Series:
         field = self.field
@@ -407,7 +394,7 @@ class ChannelInputs:
             return pd.Series(dtype=float)
         return frame.iloc[:, 0]
 
-    # -- TENSION ---------------------------------------------------------------
+    # --- TENSION --------------------------------------------------------------
 
     def tension(self, start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
         field = self.field
@@ -429,7 +416,7 @@ class ChannelInputs:
             series_by_key[key] = series[~series.index.duplicated(keep="last")]
         return pd.concat(series_by_key, axis=1)
 
-    # -- FORECAST -----------------------------------------------------------
+    # --- FORECAST ----------------------------------------------------------
 
     def forecast(self, start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
         weather = self.field.weather
@@ -462,10 +449,8 @@ def _set_strikes(child: ChannelNamespace, ts: pd.Timestamp, strikes: int) -> Non
 
 
 class ChannelOutputs:
-    """``Outputs`` over channel sets and logger tables: one ``Series`` per channel
-    per chunk, which the logger writes row by row. The forecast tables go through
-    ``ForecastTablePublisher``. Progress images are rendered here, one ``set`` per
-    frame, so a render failure is counted against the child and never escapes."""
+    """``Outputs`` over channel sets: one ``Series`` per channel per chunk, which the logger writes row by row.
+    Progress images render here, one ``set`` per frame; a render failure is counted and never escapes."""
 
     def __init__(
         self,
@@ -557,11 +542,8 @@ class ChannelOutputs:
         *args: Any,
         **kwargs: Any,
     ) -> None:
-        """``render(*args, tz=<site tz>, **kwargs)`` into ``child``'s image channel
-        when its ``[plot]`` interval is due. A failing render or image write counts
-        a strike on ``PLOT_STRIKES``; after ``disable_after_failures`` in a row the
-        child's plotting is off for the rest of the process, a success resets the
-        count. Nothing raised here leaves this method."""
+        """Render into ``child``'s image channel when its ``[plot]`` interval is due; never raises.
+        Each failure is a strike; ``disable_after_failures`` in a row disable plotting, a success resets the count."""
         config = child.plot_config
         if not plots.render_due(child._last_plot_ts, ts, config):
             return
@@ -733,12 +715,8 @@ class FieldSimulation(Component):
         prior: Optional[pd.DataFrame] = None,
         **kwargs: Any,
     ) -> pd.DataFrame:
-        """Offline run over a weather frame on a session of its own, never the live one.
-
-        A slice chained by ``lories simulate`` (``prior`` set) continues the previous
-        slice's session; without ``prior`` the run starts cold. Returns the per-row
-        diagnostics that have a ``soil_simulation`` channel, under their channel ids.
-        """
+        """Offline run over a weather frame on its own session, never the current one; with ``prior`` it continues it.
+        Without ``prior`` the run starts cold. Returns diagnostics that have a ``soil_simulation`` channel, by id."""
         weather = self._get_range(weather, start, end)
         if weather.empty:
             return pd.DataFrame()
@@ -787,7 +765,7 @@ class FieldSimulation(Component):
                 key,
             )
 
-    # -- warm start ---------------------------------------------------------------
+    # --- warm start --------------------------------------------------------------
 
     def _register_state_listener(self) -> None:
         soil_data = self.soil_simulation.data
@@ -826,7 +804,7 @@ class FieldSimulation(Component):
             return
         self.runner.restore(SoilState.from_blob(data.iloc[0, 0], data.index[0]))
 
-    # -- irrigation input (flow meter, with state x design-flow fallback) --------
+    # --- irrigation input (flow meter, with state x design-flow fallback) -------
 
     def _resolve_irrigation_channel(self, constant: Constant) -> Any:
         if self.irrigation is None:
@@ -851,7 +829,7 @@ class FieldSimulation(Component):
                 "Refusing to start on a silent 0 l/min fallback."
             )
 
-    # -- anchor sensor discovery --------------------------------------------------
+    # --- anchor sensor discovery -------------------------------------------------
 
     def _discover_sensors(self) -> tuple[list[AnchorSensor], dict[str, Any], list[tuple[str, Exception]]]:
         """One ``AnchorSensor`` per enabled, tension-measured ``SoilMoisture``
@@ -875,9 +853,8 @@ class FieldSimulation(Component):
     def _discover_and_validate_sensors(
         self, anchor_enabled: bool, discover_enabled: bool
     ) -> tuple[list[AnchorSensor], dict[str, Any]]:
-        """With ``[anchor]`` enabled, a discovery failure or zero discovered
-        sensors refuses startup; with only ``discover_sensor_probes`` on,
-        failures are logged and the sim runs with whatever was found."""
+        """With ``[anchor]`` enabled, a discovery failure or zero sensors refuses startup.
+        With only ``discover_sensor_probes`` on, failures are logged and the sim runs with what was found."""
         if not discover_enabled:
             return [], {}
         strict = anchor_enabled

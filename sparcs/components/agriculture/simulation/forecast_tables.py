@@ -3,21 +3,8 @@
 sparcs.components.agriculture.simulation.forecast_tables
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Forecast-table persistence for ``SoilPredictor``: the four
-persisted tables' channel registrations, frame builders, and the shared
-direct-write path. ``ForecastTablePublisher`` is a PER-CALL view over the
-predictor instance -- it reads ``predictor.data`` / ``predictor.connectors``
-/ ``predictor._logger_id`` etc. live through the predictor at use time,
-never copying at configure time: the forecast-table tests monkeypatch
-``SoilPredictor.data``/``.connectors`` as class properties, stub
-collaborators as instance attributes, and assert the write-failure
-counters on the predictor. Every cross-method dispatch below therefore
-goes back THROUGH the predictor's bound ``_x`` delegate names (so
-instance-attr overrides keep intercepting), and all mutable state
-(counters, key lists) stays predictor-resident. Table names and channel
-keys stay as ``SoilPredictor`` class constants (test-pinned); this module
-reads them off the instance. Nothing here imports ``components`` at
-runtime (would cycle).
+Forecast-table persistence for ``SoilPredictor``: channel registrations, frame builders and the direct-write path.
+All state stays on the predictor and is read at use time; importing ``components`` at runtime would cycle.
 """
 
 from __future__ import annotations
@@ -40,33 +27,15 @@ logger = logging.getLogger(__name__)
 
 
 def forecast_ids(ladder: list[tuple[pd.Timedelta, ...]]) -> dict[tuple[pd.Timedelta, ...], int]:
-    """Deterministic candidate-id enumeration for one run: a candidate's
-    ``forecast_id`` is its position in ``ladder``. ``ladder`` (``self._ladder``,
-    built once at ``configure()``) has a stable order for a given deployment
-    regardless of grid_mode (``fill_order`` or ``full``) or which candidates a
-    parallel roll-out happens to finish first, and that order does not change
-    run over run -- so the same candidate gets the same id every run. Shared by
-    ``planner.build_header_frame``/``planner.build_detail_frame`` so header and
-    detail rows agree on every candidate's id.
-    """
+    """A candidate's ``forecast_id`` is its position in ``ladder``, stable from run to run."""
     return {candidate: forecast_id for forecast_id, candidate in enumerate(ladder)}
 
 
 def _merge_irrigation_intervals(
     intervals: list[tuple[pd.Timestamp, pd.Timestamp]],
 ) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
-    """Drop degenerate/inverted intervals (``on_ts >= off_ts`` -- a window
-    whose resolved start lands at or after a horizon too short to reach
-    it, or whose clamped ``off_ts`` collapses back onto ``on_ts``), then
-    sort the rest by ``on_ts`` and merge any pair that touches or
-    overlaps (``next_on_ts <= current_off_ts``) into one interval.
-    Nothing upstream forbids two configured windows from abutting or
-    overlapping once resolved onto the horizon, and irrigation staying on
-    continuously across such a joint has no state transition to record
-    there -- emitting independent edges per window would instead place a
-    ``(False, True)`` pair on the identical timestamp, an ambiguous PK
-    write the connector's upsert would resolve nondeterministically.
-    """
+    """Drop intervals with ``on_ts >= off_ts``, then merge touching or overlapping ones.
+    Separate edges at a shared timestamp would write an ambiguous ``(False, True)`` pair on one primary key."""
     valid = sorted((on_ts, off_ts) for on_ts, off_ts in intervals if on_ts < off_ts)
     if not valid:
         return []
@@ -81,15 +50,8 @@ def _merge_irrigation_intervals(
 
 
 class ForecastTablePublisher:
-    """Per-call view over one ``SoilPredictor`` for the four persisted
-    forecast tables. Holds ONLY the predictor reference; every attribute
-    read (``data``, ``connectors``, ``_logger_id``, key lists, class
-    constants) goes through the predictor live, and every call to a moved
-    sibling goes through the predictor's bound delegate (``p._x``), never
-    publisher-internal dispatch -- instance-attr stubs and class-property
-    monkeypatches on the predictor must keep intercepting exactly as they
-    did when these were plain methods.
-    """
+    """Per-call view over one ``SoilPredictor`` for the four persisted forecast tables.
+    Sibling calls go through the predictor's ``_x`` delegates so stubs patched onto the predictor still intercept."""
 
     def __init__(self, predictor: "SoilPredictor") -> None:
         self._predictor = predictor
@@ -108,15 +70,8 @@ class ForecastTablePublisher:
         primary: bool = False,
         identity: "Optional[dict[str, Any]]" = None,
     ) -> None:
-        """Declare one persisted-table channel: bound to the predictor's
-        ``logger`` connector id, ``aggregate="last"`` always, and the logger
-        dict built BY OMISSION -- no ``column`` key when ``column`` is None
-        (hard absence pin: the irrigation state channel must carry no column
-        key at all), ``primary=True``/``nullable=False`` emitted only for PK
-        partners. ``identity`` (soil_id/field_id) passes through as TOP-LEVEL
-        ``data.add`` kwargs, identical across a probe's channels; a probe with
-        a partial identity set stays warn-not-raise upstream
-        (``resolve_probe_identities``)."""
+        """Declare one persisted-table channel on the ``logger`` connector; no ``column`` key when ``column`` is None.
+        ``identity`` (soil_id/field_id) goes in as top-level ``data.add`` kwargs."""
         p = self._predictor
         logger_cfg: dict[str, Any] = {"connector": p._logger_id, "table": table}
         if column is not None:
@@ -137,9 +92,7 @@ class ForecastTablePublisher:
         name: str,
         identity: "Optional[dict[str, Any]]" = None,
     ) -> None:
-        """Declare a ``timestamp_creation`` PK twin: the per-run timestamp
-        value channel every persisted table pairs with its rows (shared
-        ``timestamp_creation`` DB column, ``primary``/``nullable=False``)."""
+        """Declare the per-run ``timestamp_creation`` primary-key channel a table pairs with its rows."""
         self._add_forecast_channel(
             key,
             table=table,
@@ -151,13 +104,8 @@ class ForecastTablePublisher:
         )
 
     def register_header_channels(self) -> tuple[list[str], list[str]]:
-        """`agri_field_forecast`: one row per candidate per run. Bound to the
-        configured `logger` connector; these channels are NEVER `.set()` by the
-        predictor -- the automatic flush (Channels.to_frame(unique=True)) skips
-        any channel whose timestamp is NaT, so leaving them un-set is what keeps
-        the auto path silent for them (see the module docstring). Returns
-        (window_min_keys, window_start_keys), w0 ... w{max_windows-1}, in order.
-        Only called when `predictor._logger_id is not None` (see configure())."""
+        """`agri_field_forecast`: one row per candidate per run; returns the window min and start keys in order.
+        These channels are never `.set()`: the automatic log flush skips a channel whose timestamp is NaT."""
         p = self._predictor
         table = p._HEADER_TABLE_NAME
         self._add_forecast_channel(
@@ -192,31 +140,8 @@ class ForecastTablePublisher:
         soil_block: Configurations,
         probes: list[ProbeSpec],
     ) -> dict[str, dict[str, Any]]:
-        """soil_id/field_id kwargs per probe, for the detail table's per-probe
-        channel triplet (`_register_detail_channels`). Read from the SAME
-        config the live ``SoilSimulation``'s own ``agri_soil_simulation`` probe
-        channel resolves -- ``[soil_simulation.data.channels.<probe_key>].soil_id``
-        (per probe) and ``[soil_simulation.data.channels].field_id``
-        (component-wide) -- reused code-side (mirrors ``soil.py``'s
-        ``_validate_probe_soil_ids``), NOT re-declared under the predictor's own
-        config: every channel sharing one probe's rows must carry an IDENTICAL
-        surrogate pair, because the SQL connector's per-attribute-set write
-        grouping (``table.py``) raises ``ResourceError`` if any resource in a
-        keyed-table write is missing a declared surrogate attribute.
-
-        Two probes sharing one ``soil_id`` raise: their forecast rows would
-        upsert onto the same key and clobber each other.
-
-        A probe with no configured ``soil_id`` is warned (not raised, matching
-        ``soil.py``) and gets no ``soil_id`` kwarg at all -- the detail write
-        then fails at the next ``connector.write()`` for this table (caught by
-        that table's best-effort try in predict(), logged and counted, not
-        raised to the caller), and because the write grouping raises on the
-        FIRST resource missing the attribute, ALL probes' rows for that tick
-        are dropped along with the misconfigured probe's. A residual
-        misconfiguration signal only -- the reference configs carry soil_ids
-        since the config overhaul.
-        """
+        """Per-probe soil_id/field_id kwargs from ``[soil_simulation.data.channels]``.
+        A probe without soil_id is logged; two probes sharing a soil_id raise ConfigurationError."""
         p = self._predictor
         channels_cfg = soil_block.get_member("data", defaults={}).get_member("channels", defaults={})
         field_id = channels_cfg.get("field_id", default=None)
@@ -252,26 +177,8 @@ class ForecastTablePublisher:
         probes: list[ProbeSpec],
         probe_identities: dict[str, dict[str, Any]],
     ) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
-        """`agri_soil_forecast`: ALL candidates' per-probe tension rows. Same
-        never-`.set()` / logger-gated contract as `_register_header_channels`.
-
-        Each probe gets THREE channels: `traj_<probe>` (shared "water_tension"
-        DB column, like today) and its OWN `timestamp_creation`/`forecast_id`
-        TWINS (`traj_<probe>_timestamp_creation` / `traj_<probe>_forecast_id`,
-        sharing the "timestamp_creation"/"forecast_id" DB columns across probes
-        -- exactly the same shared-column pattern as `water_tension`) instead of
-        one shared pair for every probe: the connector's per-attribute-set
-        write grouping requires every channel on this table to carry the SAME
-        surrogate attributes as the group it belongs to, and a single shared
-        pair cannot carry N different probes' soil_ids at once. `probe_identities`
-        (`_resolve_probe_identities`) supplies the soil_id/field_id kwargs,
-        applied IDENTICALLY across a probe's three channels (declarations are
-        otherwise identical across probes too -- the schema's duplicate-column
-        guard is dead code, first-wins, so consistency here is load-bearing).
-
-        Returns (tension_keys, creation_keys, forecast_id_keys), each
-        probe.channel_id -> that probe's channel key. Only called when
-        `predictor._logger_id is not None` (see configure())."""
+        """`agri_soil_forecast`: every candidate's per-probe tension rows, with per-probe creation and id twins.
+        The SQL connector groups writes by attribute set, so a probe's three channels share one soil_id/field_id."""
         p = self._predictor
         table = p._DETAIL_TABLE_NAME
         tension_keys: dict[str, str] = {}
@@ -309,12 +216,7 @@ class ForecastTablePublisher:
         return tension_keys, creation_keys, forecast_id_keys
 
     def register_irrigation_channels(self) -> None:
-        """`agri_field_forecast_irrigation`: the chosen candidate's watering schedule as
-        state-transition edge rows. Same never-`.set()` / logger-gated contract
-        as `_register_header_channels`; only called when `predictor._logger_id is
-        not None` (see configure()). Only one field per predictor component, so
-        a single shared `timestamp_creation` value channel is enough -- no
-        per-probe twins like the detail table needs."""
+        """`agri_field_forecast_irrigation`: the chosen candidate's watering schedule as state-transition edge rows."""
         p = self._predictor
         table = p._IRRIGATION_TABLE_NAME
         self._add_forecast_channel(p._IRRIGATION_STATE_KEY, table=table, type=bool, name="Irrigation plan state")
@@ -322,12 +224,7 @@ class ForecastTablePublisher:
 
     def register_image_channels(self) -> None:
         """`agri_field_forecast_image`: the recommended candidate's field-plot PNGs.
-        Same never-`.set()` / logger-gated / single-`timestamp_creation`-twin
-        contract as `_register_irrigation_channels`; these two channels are DISTINCT
-        from the in-memory `predict_plot` channel (which stays `.set()` for Dash),
-        so the auto-log path never fires for them. Only called when
-        `predictor._logger_id is not None` AND plotting is enabled
-        (`predictor._plot_config is not None`; see configure())."""
+        Separate from the in-memory `predict_plot` channel, which stays `.set()` for Dash."""
         p = self._predictor
         table = p._IMAGE_TABLE_NAME
         self._add_forecast_channel(
@@ -343,14 +240,8 @@ class ForecastTablePublisher:
         plot_values: list[bytes],
         run_timestamp: pd.Timestamp,
     ) -> pd.DataFrame:
-        """Build the ``agri_field_forecast_image`` frame: one PNG-bytes row per
-        recommended-candidate snapshot, indexed at the snapshot's future
-        timestamp, every row stamped with ``run_timestamp`` (the run time, the
-        ``timestamp_creation`` PK partner). ``save_index`` and ``plot_values`` are
-        the aligned pair ``_publish_results`` returned (rendered once, reused
-        here). Pure and unit-testable: no ``Channel``/connector access; column
-        NAMES are the bare channel keys, renamed to ids by ``_write_image_table``.
-        """
+        """One PNG row per snapshot at its future timestamp, each stamped with ``run_timestamp``.
+        Columns are bare channel keys, not channel ids."""
         p = self._predictor
         columns = [p._IMAGE_KEY, p._IMAGE_TIMESTAMP_CREATION_KEY]
         rows: list[dict[str, Any]] = []
@@ -371,18 +262,8 @@ class ForecastTablePublisher:
         id_by_key_fn: Callable[[], dict[str, str]],
         table_label: str,
     ) -> None:
-        """Shared direct-write path for the header/detail/irrigation tables:
-        rename ``frame``'s bare channel-key columns to full channel ids (what
-        ``connector.write`` matches against) and write once. Warns and skips
-        (never raises) if `logger` is not configured or the connector cannot be
-        resolved/is not a writable connector -- a grid persistence failure must
-        never abort the forecast on the main channels.
-
-        ``id_by_key_fn`` is called ONLY once the connector has resolved and is
-        writable -- it touches ``predictor.data`` (one lookup per channel), which
-        a skip must never do (mirrors the old single-table write's behavior: a
-        missing `logger`/connector short-circuits before any channel lookup).
-        """
+        """Rename key columns to channel ids and write once; never raises, a failure is logged and counted.
+        ``id_by_key_fn`` runs only after the connector resolved with a write(), so a skip never touches ``data``."""
         p = self._predictor
         if p._logger_id is None:
             return
@@ -431,9 +312,7 @@ class ForecastTablePublisher:
         )
 
     def _ids_for(self, keys: "Iterable[str]") -> dict[str, str]:
-        """key -> full channel id for ``keys`` (one ``data`` lookup per key).
-        Only ever called through ``_write_direct_frame``'s lazy ``id_by_key_fn``
-        -- the skip paths must never touch ``predictor.data``."""
+        """Key to full channel id for ``keys``, one ``data`` lookup per key."""
         p = self._predictor
         return {key: p.data[key].id for key in keys}
 
@@ -509,14 +388,8 @@ class ForecastTablePublisher:
             )
 
     def resolve_logger_connector(self, logger_id: str) -> "Optional[Any]":
-        """Resolve the connector for the header/detail direct-writes.
-
-        A bare id is tried against every prefix of the predictor's id path,
-        innermost first, then as given, the way a channel resolves its own
-        connector, so a root-level ``[connectors.<id>]`` (the common case for a
-        shared SQL logger) resolves for a nested predictor. The component-scoped
-        attribute and item lookups on ``predictor.connectors`` stay as fallbacks.
-        """
+        """Resolve the direct-write connector; a bare id is tried under each prefix of the predictor's path first.
+        Innermost prefix wins, so a root-level ``[connectors.<id>]`` also resolves for a nested predictor."""
         p = self._predictor
         context = p.connectors.context
         connector_id = logger_id
