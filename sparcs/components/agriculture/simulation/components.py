@@ -65,8 +65,7 @@ _WRITE_FAILURE_CHANNELS: Mapping[str, Constant] = {
 _MEAN_LOGGED: Mapping[str, Any] = {"aggregate": "mean", "logger": {"enabled": True}}
 _MEAN_MEMORY: Mapping[str, Any] = {"aggregate": "mean", "logger": {"enabled": False}}
 _LAST_MEMORY: Mapping[str, Any] = {"aggregate": "last", "logger": {"enabled": False}}
-# A list[float] bundle carries no aggregate at all.
-_BUNDLE_MEMORY: Mapping[str, Any] = {"logger": {"enabled": False}}
+_BUNDLE_MEMORY: Mapping[str, Any] = {"logger": {"enabled": False}, "aggregate": "last"}
 _STATE_BLOB: Mapping[str, Any] = {"aggregate": "last", "logger": {"enabled": True, "column": "state"}}
 _SOIL_IMAGE: Mapping[str, Any] = {"aggregate": "last", "logger": {"enabled": True, "column": "image"}}
 _SHADING_IMAGE: Mapping[str, Any] = {"aggregate": "last", "logger": {"enabled": True}}
@@ -440,6 +439,18 @@ def _set_series(channel: Any, series: pd.Series) -> None:
         channel.set(series.index[0], series)
 
 
+def _segment_ghi(shading: pd.DataFrame, segment_names: Sequence[str]) -> pd.Series:
+    """One list per shading row: the ``ghi_<segment>`` values in ``segment_names`` order, 0.0 for an absent column."""
+    columns = {c[len("ghi_") :] for c in shading.columns if c.startswith("ghi_")}
+    if not columns or not segment_names:
+        return pd.Series(dtype=object)
+    values = [
+        [float(row[f"ghi_{name}"]) if name in columns else 0.0 for name in segment_names]
+        for _, row in shading.iterrows()
+    ]
+    return pd.Series(values, index=shading.index, dtype=object)
+
+
 def _set_strikes(child: ChannelNamespace, ts: pd.Timestamp, strikes: int) -> None:
     """Best effort: the count on ``child`` is the record, the channel only shows it."""
     try:
@@ -486,13 +497,10 @@ class ChannelOutputs:
                 result.envelope,
             )
 
-            ghi_cols = {c[len("ghi_") :]: c for c in shading_df.columns if c.startswith("ghi_")}
-            segment_names = list(self._top_segment_names())
-            if ghi_cols and segment_names:
+            segment_ghi = _segment_ghi(shading_df, list(self._top_segment_names()))
+            if not segment_ghi.empty:
                 ts = shading_df.index[-1]
-                values = [
-                    float(shading_df.loc[ts, ghi_cols[name]]) if name in ghi_cols else 0.0 for name in segment_names
-                ]
+                values = segment_ghi.iloc[-1]
                 self.field.data[FieldSimulation.SEG_GHI].set(ts, values)
 
         if self.et is not None and not et_df.empty:
@@ -716,18 +724,24 @@ class FieldSimulation(Component):
         **kwargs: Any,
     ) -> pd.DataFrame:
         """Offline run on its own session, never the current one; with ``prior`` it continues the previous offline run.
-        Without ``prior`` the run starts cold. Returns diagnostics that have a ``soil_simulation`` channel, by id."""
+        Without ``prior`` the run starts cold. Returns diagnostics that have a ``soil_simulation`` channel, by id,
+        plus the per-segment GHI lists under the ``seg_ghi`` channel id when that channel is registered."""
         weather = self._get_range(weather, start, end)
         if weather.empty:
             return pd.DataFrame()
         if prior is None or self._offline is None:
             self._offline = Simulation.build(self.setup, name=self.name)
-        results, _ = self._offline.run(weather, pd.Series(0.0, index=weather.index))
+        results, chain = self._offline.run(weather, pd.Series(0.0, index=weather.index))
         index = pd.DatetimeIndex([r.state.at for r in results])
         frame = pd.DataFrame([dict(r.diagnostics) for r in results], index=index)
         soil = self.soil_simulation.data
         ids = {key: soil[key].id for key in frame.columns if key in soil}
-        return frame[list(ids)].rename(columns=ids)
+        frame = frame[list(ids)].rename(columns=ids)
+        if FieldSimulation.SEG_GHI in self.data and not chain.shading.empty:
+            segment_ghi = _segment_ghi(chain.shading, self._offline.engine.top_segment_names)
+            if not segment_ghi.empty:
+                frame = frame.join(segment_ghi.rename(self.data[FieldSimulation.SEG_GHI].id), how="outer")
+        return frame
 
     def _child(self, cls: Type[_C], configs: Configurations, defaults: dict[str, Any]) -> Optional[_C]:
         """Build one channel namespace and its configured section from its ``.d`` member, if present."""

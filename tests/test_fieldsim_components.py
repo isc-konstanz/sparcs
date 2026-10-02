@@ -590,6 +590,7 @@ class _OfflineSession:
 
     def __init__(self):
         self.rows = 0
+        self.engine = SimpleNamespace(top_segment_names=["seg1", "seg2"])
 
     def run(self, weather, irrigation_lpm):
         results = []
@@ -597,10 +598,13 @@ class _OfflineSession:
             self.rows += 1
             state = SoilState(se=np.zeros(1), se_old=np.zeros(1), surface_h={}, at=ts.to_pydatetime())
             results.append(StepResult(state=state, diagnostics={"top_in": float(self.rows), "water_total": 9.0}))
-        return results, None
+        shading = pd.DataFrame(
+            {"ghi_seg1": np.arange(len(weather), dtype=float) + 1.0, "ghi_seg2": 10.0}, index=weather.index
+        )
+        return results, ChainResult(shading=shading, evapotranspiration=pd.DataFrame())
 
 
-def _offline_field(monkeypatch):
+def _offline_field(monkeypatch, segments=False):
     builds: list = []
 
     def build(setup, **kwargs):
@@ -613,6 +617,8 @@ def _offline_field(monkeypatch):
     field.setup = object()
     field.simulation = SimpleNamespace(run=lambda *a, **k: pytest.fail("simulate must not run the live session"))
     field.soil_simulation = SimpleNamespace(data={"top_in": SimpleNamespace(id="agri.field_1.soil.top_in")})
+    data = {"seg_ghi": SimpleNamespace(id="agri.field_1.seg_ghi")} if segments else {}
+    monkeypatch.setattr(components.FieldSimulation, "data", property(lambda self: data))
     return field, builds
 
 
@@ -636,6 +642,46 @@ def test_simulate_continues_its_session_only_for_a_chained_slice(monkeypatch):
     assert chained.iloc[:, 0].tolist() == [3.0, 4.0]
     assert fresh.iloc[:, 0].tolist() == [1.0, 2.0]
     assert len(builds) == 2
+
+
+def test_simulate_adds_the_segment_ghi_lists_aligned_to_the_soil_rows(monkeypatch):
+    field, _ = _offline_field(monkeypatch, segments=True)
+
+    frame = field.simulate(_weather_frame(2))
+
+    assert list(frame.columns) == ["agri.field_1.soil.top_in", "agri.field_1.seg_ghi"]
+    assert frame["agri.field_1.seg_ghi"].tolist() == [[1.0, 10.0], [2.0, 10.0]]
+    assert frame.index.equals(pd.DatetimeIndex(_weather_frame(2).index))
+    assert frame["agri.field_1.soil.top_in"].notna().all()
+
+
+def test_simulate_gives_a_segment_missing_from_the_shading_frame_zero(monkeypatch):
+    field, builds = _offline_field(monkeypatch, segments=True)
+    field.simulate(_weather_frame(1))
+    builds[0].engine.top_segment_names = ["seg1", "seg3", "seg2"]
+
+    frame = field.simulate(_weather_frame(2), prior=pd.DataFrame())
+
+    assert frame["agri.field_1.seg_ghi"].tolist() == [[1.0, 0.0, 10.0], [2.0, 0.0, 10.0]]
+
+
+def test_simulate_without_the_segment_channel_returns_only_the_soil_columns(monkeypatch):
+    field, _ = _offline_field(monkeypatch, segments=False)
+
+    frame = field.simulate(_weather_frame(2))
+
+    assert list(frame.columns) == ["agri.field_1.soil.top_in"]
+
+
+def test_simulate_chained_slice_carries_the_segment_ghi_column(monkeypatch):
+    field, _ = _offline_field(monkeypatch, segments=True)
+    first, second = _weather_frame(2), _weather_frame(4).iloc[2:]
+
+    chained = field.simulate(second, prior=field.simulate(first))
+
+    assert list(chained.columns) == ["agri.field_1.soil.top_in", "agri.field_1.seg_ghi"]
+    assert chained["agri.field_1.seg_ghi"].tolist() == [[1.0, 10.0], [2.0, 10.0]]
+    assert chained.index.equals(pd.DatetimeIndex(second.index))
 
 
 # --------------------------------------------------------------------------- CHANNELS
