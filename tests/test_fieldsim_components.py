@@ -588,9 +588,19 @@ class _OfflineSession:
     """What ``Simulation.build`` returns in the simulate tests: each ``run``
     advances one hour per weather row, counting on from its own last row."""
 
+    resume_error = None
+
     def __init__(self):
         self.rows = 0
-        self.engine = SimpleNamespace(top_segment_names=["seg1", "seg2"])
+        self.state = None
+        self.resumed = []
+        self.engine = SimpleNamespace(top_segment_names=["seg1", "seg2"], mesh="mesh")
+
+    def resume(self, state):
+        if self.resume_error is not None:
+            raise self.resume_error
+        self.resumed.append(state)
+        self.state = state
 
     def run(self, weather, irrigation_lpm):
         results = []
@@ -598,13 +608,15 @@ class _OfflineSession:
             self.rows += 1
             state = SoilState(se=np.zeros(1), se_old=np.zeros(1), surface_h={}, at=ts.to_pydatetime())
             results.append(StepResult(state=state, diagnostics={"top_in": float(self.rows), "water_total": 9.0}))
+        if results:
+            self.state = results[-1].state
         shading = pd.DataFrame(
             {"ghi_seg1": np.arange(len(weather), dtype=float) + 1.0, "ghi_seg2": 10.0}, index=weather.index
         )
         return results, ChainResult(shading=shading, evapotranspiration=pd.DataFrame())
 
 
-def _offline_field(monkeypatch, segments=False):
+def _offline_field(monkeypatch, segments=False, state=False, plot=None):
     builds: list = []
 
     def build(setup, **kwargs):
@@ -614,9 +626,14 @@ def _offline_field(monkeypatch, segments=False):
     monkeypatch.setattr(components.Simulation, "build", staticmethod(build))
     field = object.__new__(components.FieldSimulation)
     field._name = "field_sim"
-    field.setup = object()
     field.simulation = SimpleNamespace(run=lambda *a, **k: pytest.fail("simulate must not run the live session"))
-    field.soil_simulation = SimpleNamespace(data={"top_in": SimpleNamespace(id="agri.field_1.soil.top_in")})
+    soil = {"top_in": SimpleNamespace(id="agri.field_1.soil.top_in")}
+    if state:
+        soil["simulation_state"] = SimpleNamespace(id="agri.field_1.soil.state")
+    if plot is not None:
+        soil["soil_progress_image"] = SimpleNamespace(id="agri.field_1.soil.image")
+    field.soil_simulation = SimpleNamespace(data=soil, plot_config=plot)
+    field.setup = SimpleNamespace(location=None, soil=SimpleNamespace(mesh=SimpleNamespace(width=3.0, height=2.0)))
     data = {"seg_ghi": SimpleNamespace(id="agri.field_1.seg_ghi")} if segments else {}
     monkeypatch.setattr(components.FieldSimulation, "data", property(lambda self: data))
     return field, builds
@@ -682,6 +699,131 @@ def test_simulate_chained_slice_carries_the_segment_ghi_column(monkeypatch):
     assert list(chained.columns) == ["agri.field_1.soil.top_in", "agri.field_1.seg_ghi"]
     assert chained["agri.field_1.seg_ghi"].tolist() == [[1.0, 10.0], [2.0, 10.0]]
     assert chained.index.equals(pd.DatetimeIndex(second.index))
+
+
+STATE_ID = "agri.field_1.soil.state"
+IMAGE_ID = "agri.field_1.soil.image"
+
+
+def _hourly(start: int, rows: int) -> pd.DataFrame:
+    return _weather_frame(start + rows).iloc[start:]
+
+
+def _state_blob(at) -> bytes:
+    return SoilState(se=np.full(1, 0.5), se_old=np.zeros(1), surface_h={}, at=at).to_blob()
+
+
+def _plot(interval="2h", disable_after_failures=3):
+    return SimpleNamespace(interval=pd.Timedelta(interval), disable_after_failures=disable_after_failures)
+
+
+def test_simulate_stores_the_last_state_blob_on_the_last_row_only(monkeypatch):
+    field, builds = _offline_field(monkeypatch, state=True)
+
+    frame = field.simulate(_weather_frame(3))
+
+    assert frame[STATE_ID].iloc[:2].isna().all()
+    assert frame[STATE_ID].iloc[2] == builds[0].state.to_blob()
+
+
+def test_simulate_resumes_a_fresh_field_from_the_state_in_prior(monkeypatch):
+    field, builds = _offline_field(monkeypatch, state=True)
+    at = _weather_frame(2).index[-1]
+    prior = pd.DataFrame({STATE_ID: [_state_blob(at.to_pydatetime())]}, index=pd.DatetimeIndex([at]))
+
+    field.simulate(_hourly(2, 2), prior=prior)
+
+    assert len(builds) == 1
+    assert [pd.Timestamp(s.at) for s in builds[0].resumed] == [at]
+    assert np.allclose(builds[0].resumed[0].se, 0.5)
+
+
+def test_simulate_keeps_the_session_when_prior_state_matches_its_time(monkeypatch):
+    field, builds = _offline_field(monkeypatch, state=True)
+    first = field.simulate(_weather_frame(2))
+
+    field.simulate(_hourly(2, 2), prior=first)
+
+    assert len(builds) == 1
+    assert builds[0].resumed == []
+
+
+def test_simulate_without_prior_state_or_session_starts_cold_with_a_warning(monkeypatch, caplog):
+    field, builds = _offline_field(monkeypatch, state=True)
+    prior = pd.DataFrame({STATE_ID: [np.nan]}, index=pd.DatetimeIndex([_weather_frame(2).index[-1]]))
+
+    with caplog.at_level("WARNING", logger=components.logger.name):
+        field.simulate(_hourly(2, 2), prior=prior)
+
+    assert len(builds) == 1
+    assert builds[0].resumed == []
+    assert "starts cold" in caplog.text
+
+
+def test_simulate_continues_cold_with_a_warning_when_resume_rejects_the_state(monkeypatch, caplog):
+    field, builds = _offline_field(monkeypatch, state=True)
+    at = _weather_frame(2).index[-1]
+    prior = pd.DataFrame({STATE_ID: [_state_blob(at.to_pydatetime())]}, index=pd.DatetimeIndex([at]))
+    monkeypatch.setattr(_OfflineSession, "resume_error", ValueError("mesh mismatch"))
+
+    with caplog.at_level("WARNING", logger=components.logger.name):
+        frame = field.simulate(_hourly(2, 2), prior=prior)
+
+    assert len(frame) == 2
+    assert "cannot be loaded" in caplog.text
+
+
+def test_simulate_renders_the_soil_image_at_the_plot_interval(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        components.plots, "render_rel_sat_png", lambda mesh, se, ts, **kw: calls.append((mesh, ts, kw)) or b"png"
+    )
+    field, _ = _offline_field(monkeypatch, plot=_plot("2h"))
+
+    frame = field.simulate(_weather_frame(4))
+
+    assert frame[IMAGE_ID].notna().tolist() == [True, False, True, False]
+    assert frame[IMAGE_ID].iloc[0] == b"png"
+    assert calls[0][0] == "mesh"
+    assert calls[0][2] == {"width_m": 3.0, "height_m": 2.0, "tz": None}
+
+
+def test_simulate_chained_slice_continues_the_image_cadence(monkeypatch):
+    monkeypatch.setattr(components.plots, "render_rel_sat_png", lambda *a, **k: b"png")
+    field, _ = _offline_field(monkeypatch, plot=_plot("2h"))
+    first = field.simulate(_weather_frame(3))
+
+    second = field.simulate(_hourly(3, 3), prior=first)
+    cold = field.simulate(_weather_frame(3))
+
+    assert first[IMAGE_ID].notna().tolist() == [True, False, True]
+    assert second[IMAGE_ID].notna().tolist() == [False, True, False]
+    assert cold[IMAGE_ID].notna().tolist() == [True, False, True]
+
+
+def test_simulate_without_plot_config_has_no_image_column_and_never_renders(monkeypatch):
+    monkeypatch.setattr(components.plots, "render_rel_sat_png", lambda *a, **k: pytest.fail("must not render"))
+    field, _ = _offline_field(monkeypatch, plot=None)
+
+    frame = field.simulate(_weather_frame(3))
+
+    assert IMAGE_ID not in frame.columns
+
+
+def test_simulate_render_failures_never_raise_and_stop_after_the_limit(monkeypatch):
+    calls = []
+
+    def fail(*args, **kwargs):
+        calls.append(1)
+        raise RuntimeError("render")
+
+    monkeypatch.setattr(components.plots, "render_rel_sat_png", fail)
+    field, _ = _offline_field(monkeypatch, plot=_plot("1h", disable_after_failures=2))
+
+    frame = field.simulate(_weather_frame(5))
+
+    assert len(calls) == 2
+    assert frame[IMAGE_ID].isna().all()
 
 
 # --------------------------------------------------------------------------- CHANNELS

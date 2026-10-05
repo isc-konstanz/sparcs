@@ -623,6 +623,8 @@ class FieldSimulation(Component):
     weather: Any = None
     irrigation: Any = None
     _offline: Optional[Simulation] = None
+    _offline_plot_ts: Optional[pd.Timestamp] = None
+    _offline_plot_strikes: int = 0
 
     def configure(self, configs: Configurations) -> None:
         super().configure(configs)
@@ -729,19 +731,74 @@ class FieldSimulation(Component):
         weather = self._get_range(weather, start, end)
         if weather.empty:
             return pd.DataFrame()
-        if prior is None or self._offline is None:
-            self._offline = Simulation.build(self.setup, name=self.name)
+        soil = self.soil_simulation.data
+        state_id = soil[SoilSimulation.SIMULATION_STATE].id if SoilSimulation.SIMULATION_STATE in soil else None
+        self._offline_session(prior, state_id)
         results, chain = self._offline.run(weather, pd.Series(0.0, index=weather.index))
         index = pd.DatetimeIndex([r.state.at for r in results])
         frame = pd.DataFrame([dict(r.diagnostics) for r in results], index=index)
-        soil = self.soil_simulation.data
         ids = {key: soil[key].id for key in frame.columns if key in soil}
         frame = frame[list(ids)].rename(columns=ids)
+        if state_id is not None and results:
+            frame[state_id] = pd.Series({index[-1]: results[-1].state.to_blob()}, dtype=object).reindex(index)
+        if self.soil_simulation.plot_config is not None and SoilSimulation.SOIL_PROGRESS_IMAGE in soil:
+            frame[soil[SoilSimulation.SOIL_PROGRESS_IMAGE].id] = self._offline_images(results, index)
         if FieldSimulation.SEG_GHI in self.data and not chain.shading.empty:
             segment_ghi = _segment_ghi(chain.shading, self._offline.engine.top_segment_names)
             if not segment_ghi.empty:
                 frame = frame.join(segment_ghi.rename(self.data[FieldSimulation.SEG_GHI].id), how="outer")
         return frame
+
+    def _offline_session(self, prior: Optional[pd.DataFrame], state_id: Optional[str]) -> None:
+        """Pick the offline session: keep the in-memory one when it sits at ``prior``'s state, else resume
+        from the blob in ``prior``, else start cold."""
+        blob, at = None, None
+        if prior is not None and state_id in prior.columns:
+            column = prior[state_id]
+            stored = column[column.map(lambda value: isinstance(value, bytes))]
+            if not stored.empty:
+                blob, at = stored.iloc[-1], pd.Timestamp(stored.index[-1])
+        if prior is not None and self._offline is not None:
+            if blob is None or pd.Timestamp(self._offline.state.at) == at:
+                return
+        if prior is not None and blob is None:
+            logger.warning("%s: no soil state in the prior results; the offline run starts cold.", self.name)
+        self._offline = Simulation.build(self.setup, name=self.name)
+        self._offline_plot_ts, self._offline_plot_strikes = None, 0
+        if blob is not None:
+            try:
+                self._offline.resume(SoilState.from_blob(blob, at=at.to_pydatetime()))
+            except ValueError:
+                logger.warning("%s: the soil state in the prior results cannot be loaded; starting cold.", self.name)
+
+    def _offline_images(self, results: Sequence[StepResult], index: pd.DatetimeIndex) -> pd.Series:
+        """Soil progress PNGs at the ``[plot]`` interval; a failed render is a strike and never raises."""
+        config = self.soil_simulation.plot_config
+        geometry = self.setup.soil.mesh
+        location = self.setup.location
+        images = pd.Series(index=index, dtype=object)
+        for ts, result in zip(index, results):
+            if self._offline_plot_strikes >= config.disable_after_failures:
+                break
+            if not plots.render_due(self._offline_plot_ts, ts, config):
+                continue
+            self._offline_plot_ts = ts
+            try:
+                images[ts] = plots.render_rel_sat_png(
+                    self._offline.engine.mesh,
+                    result.state.se,
+                    ts,
+                    width_m=geometry.width,
+                    height_m=geometry.height,
+                    tz=location.timezone if location is not None else None,
+                )
+            except Exception:  # noqa: BLE001
+                self._offline_plot_strikes, _ = plots.count_render_failure(
+                    logger, "soil progress image", self._offline_plot_strikes, config.disable_after_failures
+                )
+            else:
+                self._offline_plot_strikes = 0
+        return images
 
     def _child(self, cls: Type[_C], configs: Configurations, defaults: dict[str, Any]) -> Optional[_C]:
         """Build one channel namespace and its configured section from its ``.d`` member, if present."""
