@@ -1,12 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Optional pin (issue 16 / unit 1.5): FeddesConfig/PondingConfig.from_configs
-produces the same resolved fields as the __init__ shim, for both classes, with
-and without base=. Guards the from_configs collapse -- fails pre-change with
-AttributeError, since from_configs does not exist before this unit.
+"""FeddesConfig/PondingConfig.from_configs produces the same resolved fields as __init__,
+with and without base=.
 """
 
 from lories import Configurations
-from sparcs.components.agriculture.simulation._soil import FeddesConfig, PondingConfig
+from sparcs.components.agriculture.simulation.core.pde import FeddesConfig, PondingConfig
 
 
 def _configs(tmp_path, name="t.conf", **values) -> Configurations:

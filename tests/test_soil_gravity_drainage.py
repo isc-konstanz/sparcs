@@ -3,9 +3,8 @@
 tests.test_soil_gravity_drainage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Gravity drains a uniformly wet column through the bottom face at ~K(Se) and
-must not feed K(Se_top) back in through the surface (FiPy's divergence sums
-exterior faces; before the fix the two cancelled and wet soil never drained).
+Gravity drains a uniformly wet column through the bottom face at ~K(Se) and must not feed K(Se_top)
+back in through the surface; FiPy's divergence sums exterior faces, so the two would cancel.
 """
 
 import pytest
@@ -14,7 +13,7 @@ import numpy as np
 
 pytestmark = pytest.mark.slow
 
-from sparcs.components.agriculture.simulation._soil import RHO_W, FluxRates  # noqa: E402
+from sparcs.components.agriculture.simulation.core.pde import RHO_W, FluxRates  # noqa: E402
 
 IC_SE = 0.9
 WINDOW_S = 600.0

@@ -22,7 +22,7 @@ from dash import Input, Output, State, callback, dcc, html, no_update
 import pandas as pd
 from lories import Channel, Constant
 from lories.application.view.pages import ComponentPage, PageLayout, register_component_page
-from sparcs.components.agriculture.simulation import (
+from sparcs.components.agriculture.simulation.components import (
     FieldSimulation,
     GroundShading,
     SoilSimulation,

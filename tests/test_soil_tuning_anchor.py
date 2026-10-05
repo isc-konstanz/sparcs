@@ -1,11 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Regression: the soil_tuning offline anchor backend mirrors the live path.
+"""Regression tests for the soil_tuning offline anchor step ``_anchor_replay_step``, with a fake PDE.
 
-Exercises ``_anchor_replay_step`` -- the bench's per-step hook -- with a fake PDE
-(no FiPy solve) and the worker globals monkeypatched, so the freshness/allowlist/
-staleness gates and the set_state write-back are checked without a mesh or logged
-data. ``soil_tuning`` pulls in the Dash stack at import; ``importorskip`` keeps
-this out of environments that lack it (the full bench runs on the box).
+``soil_tuning`` imports the Dash stack, so ``importorskip`` skips this where Dash is missing.
 """
 
 import types
@@ -17,7 +13,7 @@ import pandas as pd
 
 soil_tuning = pytest.importorskip("soil_tuning")
 
-from sparcs.components.agriculture.simulation._anchor import AnchorConfig, AnchorSensor  # noqa: E402
+from sparcs.components.agriculture.simulation.core.anchor import AnchorConfig, AnchorSensor  # noqa: E402
 from sparcs.components.agriculture.soil.models import Genuchten  # noqa: E402
 
 NOW = pd.Timestamp("2026-05-01 12:00")

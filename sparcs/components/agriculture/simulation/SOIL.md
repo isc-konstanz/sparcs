@@ -6,9 +6,10 @@ a reader who has a basic grasp of soil-water flow but is not familiar
 with the codebase.
 
 The implementation lives in
-[`simulation/soil.py`](soil.py) (live driver),
-[`simulation/_soil.py`](_soil.py) (`SoilPDECore`, the shared PDE engine),
-[`simulation/soil_predictor.py`](soil_predictor.py) (forecast roll-outs),
+[`simulation/core/pde.py`](core/pde.py) (`SoilPDECore`, the shared PDE engine, and the mesh build),
+[`simulation/core/engine.py`](core/engine.py) and [`simulation/runtime/runner.py`](runtime/runner.py) (live driver),
+[`simulation/core/planner.py`](core/planner.py) and [`simulation/core/rollout.py`](core/rollout.py) (forecast roll-outs),
+[`simulation/components.py`](components.py) (the lories components),
 and [`agriculture/soil/models.py`](../soil/models.py) (hydraulic
 property models).
 
@@ -619,7 +620,7 @@ The live driver is configured under `[soil_simulation]`; the `[pde]` (with its
 `[feddes]`/`[ponding]` siblings) and `[plot]` blocks documented below nest
 under it, as do `[model]`, `[mesh]`, `[anchor]`, and `[probes]` — those four
 are not documented here; their reference is the parsing code
-(`soil.py` `configure()`, the `_soil.py` `*Config` dataclasses, `_anchor.py`).
+(`components.py` `configure()`, the `core/config.py` sections, `core/anchor.py`).
 The run schedule and the replication knob sit one level up on the parent
 `[field_simulation]` because they govern the whole chain, not just the PDE:
 

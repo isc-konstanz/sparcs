@@ -154,7 +154,7 @@ class Radiance(RadianceObj):
             if self.ground.ReflAvg.shape[0] == 1:  # just 1 entry
                 groundindex = 0
             else:
-                print("Ambiguous albedo entry, Set albedo to single value " "in setGround()")
+                print("Ambiguous albedo entry, Set albedo to single value in setGround()")
                 return None
         except Exception:
             print("usage: make sure to run setGround() before gendaylit()")

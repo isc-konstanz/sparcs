@@ -1,13 +1,11 @@
 # -*- coding: utf-8 -*-
 """Unit tests for the anchor observation adapter (tension hPa -> Se observation).
 
-Exercises ``observation_from_tension`` and ``sensor_xy_m`` against a real
-retention model, with no FiPy mesh -- the shared conversion both the live and the
-soil_tuning backends feed (``.scratch/soil-sensor-anchoring/PRD.md`` step 1).
+Exercises ``observation_from_tension`` and ``sensor_xy_m`` against a real retention model, with no FiPy mesh.
 """
 
 import numpy as np
-from sparcs.components.agriculture.simulation._anchor import (
+from sparcs.components.agriculture.simulation.core.anchor import (
     _MIN_VARIANCE,
     observation_from_tension,
     sensor_xy_m,

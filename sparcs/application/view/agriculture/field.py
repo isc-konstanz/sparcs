@@ -18,7 +18,7 @@ from dash import Input, Output, State, callback, dcc, html, no_update
 import pandas as pd
 from lories.application.view.pages import ComponentGroup, PageLayout, register_component_page
 from sparcs.components.agriculture import AgriculturalField, Irrigation
-from sparcs.components.agriculture.simulation import (
+from sparcs.components.agriculture.simulation.components import (
     Evapotranspiration,
     FieldSimulation,
     GroundShading,

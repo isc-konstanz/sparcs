@@ -3,20 +3,10 @@
 sparcs.components.agriculture.simulation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-
+The soil-simulation chain of an agricultural field in three layers: ``components`` -> ``runtime`` -> ``core``.
+``AgriculturalField`` builds ``components.FieldSimulation`` from its ``field_simulation`` member; no type is registered.
 """
 
-from . import ground_shading  # noqa: F401
-from .ground_shading import GroundShading  # noqa: F401
-
-from . import evapotranspiration  # noqa: F401
-from .evapotranspiration import Evapotranspiration  # noqa: F401
-
-from . import soil  # noqa: F401
-from .soil import SoilSimulation  # noqa: F401
-
-from . import soil_predictor  # noqa: F401
-from .soil_predictor import SoilPredictor  # noqa: F401
-
-from . import base  # noqa: F401
-from .base import FieldSimulation  # noqa: F401
+from . import core  # noqa: F401
+from . import runtime  # noqa: F401
+from . import components  # noqa: F401

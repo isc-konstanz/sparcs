@@ -298,7 +298,7 @@ class SolarArray(Component, pv.pvsystem.Array):
             self.module_parameters["module_efficiency"] /= 100.0
             self._logger.debug(
                 "Module efficiency configured in percent and will be adjusted: "
-                f"{self.module_parameters['module_efficiency']*100.}"
+                f"{self.module_parameters['module_efficiency'] * 100.0}"
             )
 
         if "module_transparency" not in self.module_parameters.keys():
@@ -311,7 +311,7 @@ class SolarArray(Component, pv.pvsystem.Array):
             self.module_parameters["module_transparency"] /= 100.0
             self._logger.debug(
                 "Module transparency configured in percent and will be adjusted: "
-                f"{self.module_parameters['module_transparency']*100.}"
+                f"{self.module_parameters['module_transparency'] * 100.0}"
             )
 
         if "module_bifaciality" not in self.module_parameters.keys():

@@ -722,7 +722,7 @@ class System(lories.System):
         ax_power.xaxis.set_minor_formatter(dates.DateFormatter("%H:%M", tz="Europe/Berlin"))
         ax_power.xaxis.set_major_locator(dates.DayLocator(interval=1))
         ax_power.xaxis.set_major_formatter(dates.DateFormatter("\n%A", tz="Europe/Berlin"))
-        ax_power.xaxis.set_labac_text(f"{data.index[0].strftime('%d. %B')} to " f"{data.index[-1].strftime('%d. %B')}")
+        ax_power.xaxis.set_labac_text(f"{data.index[0].strftime('%d. %B')} to {data.index[-1].strftime('%d. %B')}")
         # ax_power.xaxis.label.set_visible(False)
         ax_power.yaxis.set_labac_text("Power [kW]")
         ax_power.legend(ncol=3, loc="upper left", frameon=False)

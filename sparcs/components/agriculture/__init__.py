@@ -16,10 +16,11 @@ from . import irrigation  # noqa: F401
 from .irrigation import Irrigation  # noqa: F401
 
 from . import simulation  # noqa: F401
-from .simulation import (  # noqa: F401
+from .simulation.components import (  # noqa: F401
     Evapotranspiration,
     FieldSimulation,
     GroundShading,
+    SoilPredictor,
     SoilSimulation,
 )
 
