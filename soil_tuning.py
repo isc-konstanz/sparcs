@@ -654,7 +654,7 @@ def _build_flux_rates(
     if precip_col in et_data.columns and elapsed_s > 0:
         precip = et_data.at[ts, precip_col]
         if pd.notna(precip) and precip > 0:
-            rain_flux = float(precip) / elapsed_s
+            rain_flux = float(precip) / 3600.0  # mm/h -> kg/(m²·s)
 
     return FluxRates(
         seg_evap=seg_evap,
@@ -831,12 +831,9 @@ def _load_history(
     if "precipitation_intensity" in weather_df.columns and (
         Weather.PRECIPITATION not in weather_df.columns or weather_df[Weather.PRECIPITATION].isna().all()
     ):
-        # intensity [mm/h] × step → depth [mm]; the chain divides depth by elapsed s.
-        step_hours = weather_df.index.to_series().diff().dt.total_seconds().div(3600.0).fillna(0.0)
-        weather_df[Weather.PRECIPITATION] = (
-            (weather_df["precipitation_intensity"].astype(float) * step_hours).clip(lower=0.0).fillna(0.0)
-        )
-        log.info("synthesized %s from precipitation_intensity (mm/h × step)", Weather.PRECIPITATION)
+        intensity = weather_df["precipitation_intensity"].astype(float)
+        weather_df[Weather.PRECIPITATION] = intensity.clip(lower=0.0).fillna(0.0)
+        log.info("synthesized %s from precipitation_intensity (mm/h)", Weather.PRECIPITATION)
 
     et_data, seg_et = field_sim.simulation.chain.horizon_inputs(weather_df.copy())
 
