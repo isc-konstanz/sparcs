@@ -313,8 +313,8 @@ Three hardening layers wrap the sweep loop:
 ### 7.3 Adaptive wall-clock walk
 
 The walk is implemented once, in `SoilPDECore.walk_window`, and shared
-by `SoilSimulation._walk` (live), `SoilPredictor._integrate_horizon`
-(forecast), and `soil_tuning._walk_substeps` (parameter sweeps):
+by the live `SoilEngine.advance`, `SoilPredictor._integrate_horizon`
+(forecast), and the `soil_tuning` bench (which advances through the live engine):
 
 - Snapshot the saturation field, apply the source, call `solve(sub_dt)`.
 - **Failure** (non-convergence, raised solver, or non-finite field)
@@ -323,13 +323,15 @@ by `SoilSimulation._walk` (live), `SoilPredictor._integrate_horizon`
   target `dt` (default 50 s).
 - At `sub_dt = dt_min` (default 1 s) the modes diverge
   (`accept_at_dt_min`):
-  - **Accept mode** (live + predictor): an under-converged but *finite*
-    state is accepted with a warning; a non-finite / raised substep is
-    rolled back and **skipped** (state held, seconds accumulated in
-    `WalkResult.skipped_s`).
-  - **Strict mode** (tuning): any failure at `dt_min` aborts the walk
-    with `WalkResult(ok=False, reason=...)` so unstable parameter sets
-    are detected.
+  - **Accept mode** (live, predictor and the tuning bench): an
+    under-converged but *finite* state is accepted with a warning
+    (seconds accumulated in `WalkResult.unconverged_s`); a non-finite /
+    raised substep is rolled back and **skipped** (state held, seconds
+    accumulated in `WalkResult.skipped_s`). `SoilEngine.advance` reports
+    both as `skipped_s` / `unconverged_s` diagnostics; the tuning bench
+    rejects a run on either, so unstable parameter sets are detected.
+  - **Strict mode** (`accept_at_dt_min=False`): any failure at `dt_min`
+    aborts the walk with `WalkResult(ok=False, reason=...)`.
 
 ### 7.4 Initial condition
 

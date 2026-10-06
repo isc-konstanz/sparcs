@@ -1,16 +1,20 @@
 # soil_tuning.py — usage
 
 Standalone Dash app ([`soil_tuning.py`](soil_tuning.py)) for evaluating
-`SoilSimulation` PDE parameter choices against real logged sensor
-measurements. It re-instantiates the FiPy soil core with overridden
-parameters, replays a window of logged weather + ET + irrigation, and
-streams the resulting soil-tension traces into a live graph so you can
-compare parameter sets against the soil-moisture sensors (also shown as
-tension).
+`SoilSimulation` PDE parameter choices against the field's tensiometers.
+It reads the window's weather once and its irrigation per chunk through the
+live simulation's `ChannelInputs`, reads the tension with the field's own
+`data.read` on the sensors' `water_tension` channels, and computes the
+forcing once with the live weather chain, cut at the live tick cutoffs. Each
+run advances that forcing with the live soil engine and its own parameters,
+and streams the probe tension traces into a live graph next to the measured
+tension.
 
 It is intentionally **separate** from the running sparcs app: it never
 touches live state and never calls `Application.main()` — only
-`configure()` + `activate()` run, then it serves its own Dash UI. Kept
+`configure()` + `activate()` run, the field simulation's ticker is stopped
+right after, then it serves its own Dash UI. Runs never anchor, whatever
+`[anchor] enabled` says. Kept
 standalone for offline, iterative tuning of a project that isn't running live.
 
 ## Command
@@ -32,24 +36,22 @@ manual process killing needed).
 | `project` (positional) | — | **Display-only** label. The actual project is selected by `--data-dir`. |
 | `--data-dir <path>` | from `sparcs/conf/settings.conf` | Re-points the loader at the project's data dir and re-reads its `settings.conf`. The config layout — **flat** (member configs in the data-dir root) or **nested** (under `conf/`) — is auto-detected via `[systems] flat` in that `settings.conf`, exactly as a normal lories run resolves it; no `conf/` subdir is assumed. Required whenever `sparcs/conf/settings.conf` doesn't already point at the project you want to tune. |
 | `--start <ISO ts>` | `end − history_window` | Start of the replay window. When given it **takes precedence** over `[testing] history_window`; omit it to keep the "fixed window back from `--end`" behaviour. |
-| `--end <ISO ts>` | `now` (UTC) | End of the replay window. **Use this if the project's logged data doesn't reach the current wall clock** — otherwise the window is empty and startup fails with `no weather logged in [...]`. |
+| `--end <ISO ts>` | `now` (UTC) | End of the replay window. **Use this if the project's data doesn't reach the current wall clock** — otherwise the window is empty and startup fails with `no usable weather in [...]`. |
 | `--port` | `8051` | Dash port. |
 | `--host` | `127.0.0.1` | Bind address (`0.0.0.0` to expose on the LAN). |
 | `-v` / `--verbose` | off | DEBUG logging. |
 
 ### Picking a project + window
 
-Use a project that has logged weather on disk. **`test_agri_sim`** has the
-logged Brightsky CSVs (`weather/brightsky/2016-06.csv` … `2017-05.csv`).
-The sibling `test_agri_sim_logged` shares the configs but its
-`weather/brightsky/` is **empty**, so history loading fails. For
-`test_agri_sim`, also make sure `[connectors.csv] enabled = true` in
-`conf/weather.conf` — otherwise the logger can't read the CSVs back.
+The bench reads each channel through its connector (`data.read`), never
+through its logger, exactly like the live tick. Pick a window the configured
+connectors can serve, with every required weather column present (on
+copperhead: the kob database and Bright Sky).
 
 The replay window is `--start .. --end`. If you omit `--start`, it falls back
 to `(end - history_window) .. end` — with `history_window = "30d"`,
-`--end 2017-06-01` gives `2017-05-02 .. 2017-06-01`. Either way, pick the range
-so it lands inside the logged `2016-06 .. 2017-05` data.
+`--end 2017-06-01` gives `2017-05-02 .. 2017-06-01`. Either way, pick a range
+the configured connectors can serve.
 
 ## Activation gate
 
@@ -72,20 +74,24 @@ startup and faster per-run sweeps.
 
 1. Each row of number inputs is a writable `PDEConfig` knob:
    `theta_r`, `theta_s`, `alpha`, `n`, `k_s`, `dt`, `dt_min`.
-2. **Submit run** spawns a worker process that seeds the core from the
-   state snapshot at the window start, replays the window, and streams its
-   probe **tension** traces into the graph (solid/dashed colored lines).
-   The gray dotted lines are the sensor references to match against — a
-   sensor's measured `water_tension` when it has one, otherwise its
-   `water_content` converted to tension through that probe's own retention
-   curve (labelled `(calc. from θ)`).
+2. **Submit run** hands the run to a worker process. It starts cold, like a
+   fresh live start: the configured initial condition (a run may override
+   `ic_water_table_depth` when the config sets one) plus the live cold-start
+   spin-up on the first row. It then replays the window and streams its probe **tension** traces into the graph
+   (solid/dashed colored lines). The gray dotted lines are the measured
+   `water_tension` of each tensiometer.
 3. The right panel shows the live 2-D saturation (Se) field of the most
    recently started run.
 4. Up to `max_workers` runs go in parallel; submitting more evicts the
    oldest. **Cancel** / **Cancel all** stop runs between substeps.
-5. A tuning run **fails hard** if a parameter set is unstable at `dt_min`
-   (unlike the live solver, which accepts an under-converged step) — the
-   whole point is to surface unstable parameter choices.
+5. A tuning run **fails** after the chunk in which the engine held the
+   state through a slice it could not solve at `dt_min`, or accepted an
+   unconverged step at `dt_min` (the live sim logs that and carries on) —
+   the point is to surface unstable parameter choices.
+
+Chunks follow the live tick grid with all data on hand. On the box, the live
+chunk ends also wait for the hourly DWD records to be published; that only
+changes the within-chunk shade averaging.
 
 Workers use the `spawn` start method, so each child re-imports sparcs +
 FiPy from scratch (~30 s cold start per run) but then runs fully parallel.
@@ -131,7 +137,6 @@ and the supervisor is a separate script you run explicitly.
   `site-packages/h5py/` dir holds only HDF5 DLLs and no Python package, so
   it imports as an empty namespace. Fix: delete that dir and
   `pip install h5py` (the wheel bundles its own HDF5 DLLs).
-- **`no weather logged in [...]`** — the replay window is outside the
-  project's logged data, the weather CSVs are missing, or the CSV connector
-  is disabled. Check `--start`/`--end`, the `weather/brightsky/` contents, and
-  `[connectors.csv] enabled` in `conf/weather.conf`.
+- **`no usable weather in [...]`** — the connectors returned no rows for the
+  window, or a required weather column is missing or all-NaN in it. Check
+  `--start`/`--end` and the weather connectors.

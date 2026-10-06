@@ -6,17 +6,22 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import copy
+import datetime as dt
 import logging
+import math
 import multiprocessing as mp
 import os
+import pickle
+import shutil
 import signal
 import sys
+import tempfile
 import threading
 import uuid
 import warnings
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Optional, Sequence
 
 # spawn is the only safe start method: fork deadlocks the threaded parent (Flask
 # + Dash + consumer thread all hold locks that are never released in the child).
@@ -49,26 +54,19 @@ except ImportError as e:  # pragma: no cover - friendly bail-out
 import soil_tuning_auth
 import sparcs
 from lories.application.settings import Settings
-from lories.components.weather import Weather
 from lories.core.configs.directories import Directories, Directory
+from lories.data import Channels
 from soil_tuning_api import register_api
 from soil_tuning_objective import modeled_tension_series, tension_objective
-from sparcs.components.agriculture import Irrigation, SoilMoisture
 from sparcs.components.agriculture.simulation.components import FieldSimulation, SoilSimulation
 from sparcs.components.agriculture.simulation.core import plots
-from sparcs.components.agriculture.simulation.core.anchor import (
-    AnchorConfig,
-    AnchorSensor,
-    anchor_update,
-    latest_reading_at,
-)
-from sparcs.components.agriculture.simulation.core.pde import (
-    SE_MAX,
-    SE_MIN,
-    FluxRates,
-    PDEConfig,
-    SoilPDECore,
-)
+from sparcs.components.agriculture.simulation.core.assimilator import Assimilator
+from sparcs.components.agriculture.simulation.core.config import FieldSetup
+from sparcs.components.agriculture.simulation.core.engine import SoilEngine
+from sparcs.components.agriculture.simulation.core.pde import PDEConfig, SoilPDECore
+from sparcs.components.agriculture.simulation.core.simulation import Simulation
+from sparcs.components.agriculture.simulation.core.state import Forcing
+from sparcs.components.agriculture.simulation.runtime.runner import FieldRunner
 from sparcs.system import System as SparcsSystem
 
 log = logging.getLogger("sparcs.soil_tuning")
@@ -107,9 +105,94 @@ logging.getLogger("fipy").setLevel(logging.WARNING)
 # PDE knobs exposed in the UI; extend with any writable PDEConfig attribute.
 _PARAMS: tuple[str, ...] = ("theta_r", "theta_s", "alpha", "n", "k_s", "dt", "dt_min")
 
-# GHI[W/m²] ≈ illuminance[klx] × _GHI_PER_KLX, used to synthesize GHI when a
-# station feed lacks it. Daylight approximation; recalibrate against a pyranometer.
-_GHI_PER_KLX = 8.0
+# Every key a job may override; read only by the engine, never by the forcing chain.
+OVERRIDABLE_KEYS: tuple[str, ...] = _PARAMS + (
+    "ic_water_table_depth",
+    "bpar",
+    "rain_shadow_width",
+    "rain_shadow_passthrough",
+    "rain_runoff_fraction",
+)
+
+
+def _apply_overrides(base: PDEConfig, params: dict[str, float]) -> PDEConfig:
+    """A deep copy of ``base`` with ``params`` set; ``ValueError`` names a key outside
+    ``OVERRIDABLE_KEYS``, a value that is not a finite number, or a water table on a base without one."""
+    ode = copy.deepcopy(base)
+    for key, value in params.items():
+        if key not in OVERRIDABLE_KEYS:
+            raise ValueError(f"parameter {key!r} cannot be overridden")
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError(f"parameter {key!r} must be a finite number, got {value!r}")
+        if key == "ic_water_table_depth" and base.ic_water_table_depth is None:
+            raise ValueError(
+                "parameter 'ic_water_table_depth' needs a base config that sets one (the cold start follows it)"
+            )
+        setattr(ode, key, float(value))
+    return ode
+
+
+@dataclass(frozen=True)
+class ReplayChunk:
+    """One live-sized forcing evaluation: the weather and irrigation rows, the instant the
+    previous chunk ended on, and the span the first row covers."""
+
+    weather: pd.DataFrame
+    irrigation: pd.Series
+    frontier: Optional[dt.datetime]
+    first_dt_s: float
+
+
+def _replay_chunks(
+    weather: pd.DataFrame,
+    irrigation_for: Callable[[pd.Timestamp, pd.Timestamp], pd.Series],
+    *,
+    interval: int,
+    offset: int,
+    intake_delay: dt.timedelta,
+    cold_start_s: float,
+) -> list[ReplayChunk]:
+    """Split the window at the cutoffs the live ticker would have run: slot times on the
+    ``interval``/``offset`` grid (minutes, UTC) minus ``intake_delay``, each tick span then
+    broken at midnight. Every weather row lands in exactly one ``(previous end, end]`` chunk; its irrigation
+    is read per span through ``irrigation_for(start, end)``, as the live tick does."""
+    if weather.empty:
+        return []
+    first = weather.index[0].tz_convert("UTC")
+    last = weather.index[-1].tz_convert("UTC")
+    step = pd.Timedelta(minutes=interval)
+    shift = pd.Timedelta(minutes=offset)
+    delay = pd.Timedelta(intake_delay)
+
+    slot = (first + delay - shift).ceil(step) + shift
+    cutoffs: list[pd.Timestamp] = []
+    while slot - delay < last:
+        cutoffs.append(slot - delay)
+        slot += step
+    cutoffs.append(last)
+
+    chunks: list[ReplayChunk] = []
+    frontier: Optional[pd.Timestamp] = None
+    lower: Optional[pd.Timestamp] = None
+    tick_start = first
+    for cutoff in cutoffs:
+        for begin, end in FieldRunner._day_chunks(tick_start, cutoff):
+            mask = weather.index <= end if lower is None else (weather.index > lower) & (weather.index <= end)
+            lower = end
+            if not mask.any():
+                continue
+            rows = weather.loc[mask]
+            chunks.append(
+                ReplayChunk(
+                    weather=rows,
+                    irrigation=FieldRunner._align_flow(irrigation_for(begin, end), rows.index),
+                    frontier=frontier.to_pydatetime() if frontier is not None else None,
+                    first_dt_s=cold_start_s if frontier is None else 0.0,
+                )
+            )
+            frontier = weather.index[mask][-1]
+        tick_start = max(tick_start, cutoff)
+    return chunks
 
 
 @dataclass
@@ -128,66 +211,58 @@ class TuningJob:
 
 
 # Per-worker globals, populated once by _worker_init.
-_W_MESH_CONFIG: Any = None
-_W_BASE_PDE_CONFIG: Any = None
+_W_SETUP: Any = None
+_W_BASE: Any = None  # Simulation: the live chain and the base engine
 _W_PROBES: Any = None
-_W_ET_DATA: Any = None
-_W_SEG_ET: Any = None
-_W_IRRIGATION: Any = None
-_W_INITIAL_BLOB: Any = None
 _W_RENDER_STRIDE: int = 4
 _W_PROGRESS_Q: Any = None  # Manager().Queue()
 _W_PNG_STORE: Any = None  # Manager().dict()  job_id -> (png_bytes, ts)
 _W_CANCEL_DICT: Any = None  # Manager().dict()  job_id -> bool
-_W_ANCHOR_CFG: Any = None  # AnchorConfig (anchoring off unless [anchor] enabled)
-_W_ANCHOR_SENSORS: Any = None  # list[AnchorSensor]
-_W_ANCHOR_HISTORY: Any = None  # dict[sensor key -> measured tension series, hPa]
+_W_FORCING: dict[str, list] = {}
 
 
 def _worker_init(
-    mesh_config,
-    base_pde_config,
+    setup,
     probes,
-    et_data,
-    seg_et,
-    irrigation,
-    initial_blob,
     render_stride,
     progress_q,
     png_store,
     cancel_dict,
-    anchor_cfg,
-    anchor_sensors,
-    anchor_history,
 ) -> None:
     """Populate the per-worker globals once, before any task is dispatched."""
-    global _W_MESH_CONFIG, _W_BASE_PDE_CONFIG, _W_PROBES
-    global _W_ET_DATA, _W_SEG_ET, _W_IRRIGATION, _W_INITIAL_BLOB
+    global _W_SETUP, _W_BASE, _W_PROBES
     global _W_RENDER_STRIDE, _W_PROGRESS_Q, _W_PNG_STORE, _W_CANCEL_DICT
-    global _W_ANCHOR_CFG, _W_ANCHOR_SENSORS, _W_ANCHOR_HISTORY
 
     np.seterr(all="ignore")
     warnings.filterwarnings("ignore", category=RuntimeWarning)
 
-    _W_MESH_CONFIG = mesh_config
-    _W_BASE_PDE_CONFIG = base_pde_config
+    _W_SETUP = setup
+    _W_BASE = Simulation.build(setup)
     _W_PROBES = probes
-    _W_ET_DATA = et_data
-    _W_SEG_ET = seg_et
-    _W_IRRIGATION = irrigation
-    _W_INITIAL_BLOB = initial_blob
     _W_RENDER_STRIDE = render_stride
     _W_PROGRESS_Q = progress_q
     _W_PNG_STORE = png_store
     _W_CANCEL_DICT = cancel_dict
-    _W_ANCHOR_CFG = anchor_cfg
-    _W_ANCHOR_SENSORS = anchor_sensors or []
-    _W_ANCHOR_HISTORY = anchor_history or {}
 
 
 def _worker_ping() -> bool:
     """No-op warm-up task: forces every pool worker to spawn and run _worker_init."""
     return True
+
+
+def _worker_forcing(chunk: ReplayChunk) -> list[Forcing]:
+    """The live chain over one chunk; only the forcing travels back."""
+    forcing, _ = _W_BASE.chain.forcing_series(
+        chunk.weather, chunk.irrigation, frontier=chunk.frontier, first_dt_s=chunk.first_dt_s
+    )
+    return list(forcing)
+
+
+def _load_forcing(path: str) -> list[list[Forcing]]:
+    if path not in _W_FORCING:
+        with open(path, "rb") as fh:
+            _W_FORCING[path] = pickle.load(fh)
+    return _W_FORCING[path]
 
 
 class TuningRunner:
@@ -196,33 +271,23 @@ class TuningRunner:
     def __init__(
         self,
         *,
-        mesh_config,
+        setup: FieldSetup,
         base_pde_config: PDEConfig,
         probes: list,
-        et_data: pd.DataFrame,
-        seg_et: dict[str, pd.DataFrame],
-        irrigation: pd.Series,
-        initial_blob: Optional[bytes],
+        chunks: Sequence[ReplayChunk],
         max_workers: int = 40,
         render_stride: int = 4,
-        anchor_cfg: Optional[AnchorConfig] = None,
-        anchor_sensors: Optional[list] = None,
-        anchor_history: Optional[dict] = None,
     ) -> None:
-        self.mesh_config = mesh_config
+        self.setup = setup
         self.base_pde_config = base_pde_config
         self.probes = probes
-        self.et_data = et_data
-        self.seg_et = seg_et
-        self.irrigation = irrigation
-        self.initial_blob = initial_blob
         self.max_workers = max_workers
         self.render_stride = render_stride
-        self.anchor_cfg = anchor_cfg
-        self.anchor_sensors = anchor_sensors or []
-        self.anchor_history = anchor_history or {}
         self._lock = threading.Lock()
         self._jobs: "OrderedDict[str, TuningJob]" = OrderedDict()
+        self._shutdown = threading.Event()
+        self._consumer: Optional[threading.Thread] = None
+        self._forcing_dir: Optional[str] = None
 
         # Manager proxies are picklable into spawn workers; plain mp.Queue/Event are not.
         self._manager = mp.Manager()
@@ -235,28 +300,34 @@ class TuningRunner:
             mp_context=mp.get_context("spawn"),
             initializer=_worker_init,
             initargs=(
-                mesh_config,
-                base_pde_config,
+                setup,
                 probes,
-                et_data,
-                seg_et,
-                irrigation,
-                initial_blob,
                 render_stride,
                 self._progress_q,
                 self._png_store,
                 self._cancel_dict,
-                self.anchor_cfg,
-                self.anchor_sensors,
-                self.anchor_history,
             ),
         )
 
-        warm_futs = [self._executor.submit(_worker_ping) for _ in range(max_workers)]
-        concurrent.futures.wait(warm_futs)
-        log.info("warm pool ready (%d workers)", max_workers)
+        try:
+            warm_futs = [self._executor.submit(_worker_ping) for _ in range(max_workers)]
+            concurrent.futures.wait(warm_futs)
+            log.info("warm pool ready (%d workers)", max_workers)
 
-        self._shutdown = threading.Event()
+            forcing = list(self._executor.map(_worker_forcing, chunks))
+            rows = [f for part in forcing for f in part]
+            self.n_rows = len(rows)
+            self.window_start = rows[0].at if rows else None
+            self.window_end = rows[-1].at if rows else None
+            self._forcing_dir = tempfile.mkdtemp(prefix="soil_tuning_")
+            self.forcing_path = os.path.join(self._forcing_dir, "forcing.pkl")
+            with open(self.forcing_path, "wb") as fh:
+                pickle.dump(forcing, fh)
+            log.info("forcing computed: %d chunks, %d rows", len(forcing), self.n_rows)
+        except BaseException:
+            self.shutdown()
+            raise
+
         self._consumer = threading.Thread(
             target=self._consume_progress,
             daemon=True,
@@ -275,7 +346,7 @@ class TuningRunner:
             self._jobs[job.job_id] = job
             self._cancel_dict[job.job_id] = False
 
-        future = self._executor.submit(_worker_run_job, job.job_id, job.label, params)
+        future = self._executor.submit(_worker_run_job, job.job_id, job.label, params, self.forcing_path)
         job.future = future
 
         def _on_done(fut: concurrent.futures.Future) -> None:
@@ -335,15 +406,18 @@ class TuningRunner:
             self._executor.shutdown(wait=False, cancel_futures=True)
         except Exception:
             pass
-        try:
-            self._consumer.join(timeout=2)
-        except Exception:
-            pass
+        if self._consumer is not None:
+            try:
+                self._consumer.join(timeout=2)
+            except Exception:
+                pass
         # Tear down the Manager last; proxy objects become invalid afterwards.
         try:
             self._manager.shutdown()
         except Exception:
             pass
+        if self._forcing_dir is not None:
+            shutil.rmtree(self._forcing_dir, ignore_errors=True)
 
     def _evict_if_full_locked(self) -> None:
         active = [j for j in self._jobs.values() if j.status in ("pending", "running")]
@@ -353,7 +427,7 @@ class TuningRunner:
             self._cancel_dict[oldest.job_id] = True
 
     def _auto_label(self, params: dict[str, float]) -> str:
-        base = {k: getattr(self.base_pde_config, k) for k in _PARAMS}
+        base = {k: getattr(self.base_pde_config, k, None) for k in OVERRIDABLE_KEYS}
         changed = [f"{k}={v:g}" for k, v in params.items() if v != base.get(k)]
         return ", ".join(changed) or "baseline"
 
@@ -406,67 +480,17 @@ class TuningRunner:
                 log.warning("[%s] %s", job_id, msg.get("msg"))
 
 
-def _anchor_replay_step(pde: SoilPDECore, t_now: pd.Timestamp, last_anchored: dict) -> None:
-    """Offline anchor backend: nudge the field toward measured tension at ``t_now``.
-
-    Mirrors the live ``SoilSimulation._apply_anchor`` (same shared ``anchor_update``)
-    so what the bench validates is what production runs. The read_tension closure
-    looks up each sensor's latest logged reading at or before ``t_now``; the
-    freshness/staleness gate lives in ``anchor_update``. ``cfg.sensors`` is this
-    run's allowlist -- hold a sensor out of it to score the model at its location.
-    """
-    cfg = _W_ANCHOR_CFG
-    sensors = [s for s in _W_ANCHOR_SENSORS if s.key in cfg.sensors]
-    if not sensors:
-        return
-
-    def read(sensor: AnchorSensor):
-        # Same contemporaneous lookup the live tick uses (shared _anchor helper): the
-        # latest reading at or before t_now, so a held-out sensor scores identically.
-        return latest_reading_at(_W_ANCHOR_HISTORY.get(sensor.key), t_now)
-
-    result = anchor_update(
-        np.asarray(pde.rel_sat.value),
-        np.asarray(pde.mesh.cellCenters),
-        sensors,
-        read,
-        t_now,
-        cfg,
-        pde.soil_model,
-        _W_MESH_CONFIG.width,
-        last_anchored,
-        SE_MIN,
-        SE_MAX,
-    )
-    if result is None:
-        return None
-    pde.set_state(result.se_new, update_old=True)
-    last_anchored.update(result.anchored_at)
-    return result
-
-
-def _worker_run_job(job_id: str, label: str, params: dict[str, float]) -> None:
+def _worker_run_job(job_id: str, label: str, params: dict[str, float], forcing_path: str) -> None:
     """Run one tuning simulation in a pool worker: stream progress rows via the
     Manager queue, write PNG frames directly into the shared png-store."""
     # np.seterr / filterwarnings are per-process; re-apply in the spawned child.
     np.seterr(all="ignore")
     warnings.filterwarnings("ignore", category=RuntimeWarning)
 
-    mesh_config = _W_MESH_CONFIG
-    initial_blob = _W_INITIAL_BLOB
-    probes = _W_PROBES
-    et_data = _W_ET_DATA
-    seg_et = _W_SEG_ET
-    irrigation = _W_IRRIGATION
-    render_stride = _W_RENDER_STRIDE
+    setup = _W_SETUP
     progress_q = _W_PROGRESS_Q
     png_store = _W_PNG_STORE
     cancel_dict = _W_CANCEL_DICT
-
-    ode = copy.deepcopy(_W_BASE_PDE_CONFIG)
-    for k, v in params.items():
-        if hasattr(ode, k):
-            setattr(ode, k, float(v))
 
     def put(payload: dict) -> None:
         payload["job_id"] = job_id
@@ -480,208 +504,64 @@ def _worker_run_job(job_id: str, label: str, params: dict[str, float]) -> None:
     put({"type": "started"})
 
     try:
-        pde = SoilPDECore(mesh_config, ode, rel_sat_name=f"Se_{job_id}")
-        if initial_blob:
-            try:
-                pde.load_state_blob(initial_blob)
-            except Exception as e:  # noqa: BLE001
-                put({"type": "warn", "msg": f"state-blob load failed: {e}"})
-
-        timeline = et_data.index
-        if len(timeline) < 2:
-            put({"type": "failed", "error": "et_data has fewer than 2 timestamps"})
+        try:
+            ode = _apply_overrides(_W_BASE.engine.ode, params)
+        except ValueError as e:
+            put({"type": "failed", "error": str(e)})
             return
 
-        render_every = max(1, render_stride)
+        engine = SoilEngine(setup.soil, ode, SoilPDECore(setup.soil.mesh, ode, rel_sat_name=f"Se_{job_id}"))
+        simulation = Simulation(setup, engine, _W_BASE.chain, Assimilator(None, engine), probes=_W_PROBES)
+        forcing = _load_forcing(forcing_path)
+        total = max(1, sum(len(part) for part in forcing))
+        render_every = max(1, _W_RENDER_STRIDE)
+        done = 0
+        rendered = 0
+        last = None
 
-        row0 = _sample_probe_row(pde, timeline[0], probes)
-        put({"type": "row", "row": row0, "progress": 0.0})
-        _push_render(png_store, job_id, label, pde, timeline[0], width_m=mesh_config.width, height_m=mesh_config.height)
-
-        anchor_on = _W_ANCHOR_CFG is not None and _W_ANCHOR_CFG.enabled and _W_ANCHOR_SENSORS
-        last_anchored: dict = {}
-        anchor_fires = 0
-        if anchor_on:
-            # One-shot setup diagnostic: allowlist vs discovered sensor keys. If
-            # `matched` is empty the config key does not equal the sensor's .key
-            # and the anchor is a silent no-op regardless of the trust knobs.
-            _allow = list(getattr(_W_ANCHOR_CFG, "sensors", {}) or {})
-            _disc = [s.key for s in _W_ANCHOR_SENSORS]
-            put(
-                {
-                    "type": "warn",
-                    "msg": (
-                        f"anchor setup: allow={_allow} discovered={_disc} "
-                        f"matched={[k for k in _disc if k in _allow]} "
-                        f"hist_keys={list(_W_ANCHOR_HISTORY)} "
-                        f"sim_window=[{timeline[0]}..{timeline[-1]}]"
-                    ),
-                }
-            )
-        for i in range(1, len(timeline)):
+        for part in forcing:
             if cancel():
                 put({"type": "cancelled"})
                 return
-
-            t_prev = timeline[i - 1]
-            t_now = timeline[i]
-            elapsed_s = float((t_now - t_prev).total_seconds())
-            if elapsed_s <= 0:
-                continue
-
-            rates = _build_flux_rates(
-                t_now,
-                elapsed_s,
-                et_data,
-                seg_et,
-                irrigation,
-            )
-            ok, reason = _walk_substeps(pde, rates, elapsed_s, cancel)
-            if not ok:
-                if reason == "cancelled":
-                    put({"type": "cancelled"})
-                else:
-                    put({"type": "failed", "error": reason})
+            results = simulation.step(part, cancel)
+            if cancel():
+                put({"type": "cancelled"})
                 return
-
-            if anchor_on:
-                _res = _anchor_replay_step(pde, t_now, last_anchored)
-                if _res is not None:
-                    anchor_fires += 1
-                    if anchor_fires <= 3 or anchor_fires % 100 == 0:
-                        _inv = {k: round(float(v), 4) for k, v in _res.innovations.items()}
+            for result in results:
+                at = pd.Timestamp(result.state.at)
+                for name, what in (("skipped_s", "held the state"), ("unconverged_s", "accepted unconverged steps")):
+                    seconds = float(result.diagnostics.get(name, 0.0))
+                    if seconds > 0:
                         put(
                             {
-                                "type": "warn",
-                                "msg": f"anchor fired #{anchor_fires} @ {t_now}: innov(se_meas-se_model)={_inv}",
+                                "type": "failed",
+                                "error": (
+                                    f"{what} for {seconds:.0f}s at dt_min at {at}; "
+                                    "params unstable for this forcing (likely rain spike saturating top cells)."
+                                ),
                             }
                         )
+                        return
+                done += 1
+                last = (result.state.se, at)
+                put({"type": "row", "row": _probe_row(engine, at, result.probe_tension), "progress": done / total})
+                if done % render_every == 0 or done == total:
+                    _push_render(png_store, job_id, label, engine, result.state.se, at)
+                    rendered = done
 
-            row = _sample_probe_row(pde, t_now, probes)
-            put(
-                {
-                    "type": "row",
-                    "row": row,
-                    "progress": i / max(1, len(timeline) - 1),
-                }
-            )
-
-            if i % render_every == 0 or i == len(timeline) - 1:
-                _push_render(
-                    png_store, job_id, label, pde, t_now, width_m=mesh_config.width, height_m=mesh_config.height
-                )
-
-        if anchor_on and anchor_fires == 0:
-            put(
-                {
-                    "type": "warn",
-                    "msg": (
-                        "anchor ON but fired 0 times -- no reading passed the "
-                        "match/freshness/staleness gate. Check the 'anchor setup' line: "
-                        "empty matched=key mismatch; else the history timestamps do not "
-                        "overlap the sim_window or are older than [anchor] staleness."
-                    ),
-                }
-            )
-        put({"type": "done", "n_rows": len(timeline)})
+        if last is not None and rendered != done:
+            _push_render(png_store, job_id, label, engine, *last)
+        put({"type": "done", "n_rows": done})
     except Exception as e:
         put({"type": "failed", "error": f"{type(e).__name__}: {e}"})
 
 
-def _walk_substeps(
-    pde: SoilPDECore,
-    rates: FluxRates,
-    window_s: float,
-    cancel: Any,
-) -> tuple[bool, Optional[str]]:
-    """Strict adaptive-dt walk via SoilPDECore.walk_window. Returns (ok, reason).
-    Fails hard at dt_min (accept_at_dt_min=False), unlike the live solver, so
-    the sweep surfaces unstable parameter sets instead of accepting them."""
-    walk = pde.walk_window(
-        rates=rates,
-        window_s=window_s,
-        accept_at_dt_min=False,
-        cancel=cancel,
-    )
-    if walk.ok:
-        return True, None
-    if walk.cancelled:
-        return False, "cancelled"
-    return False, (f"{walk.reason}; params unstable for this forcing (likely rain spike saturating top cells).")
-
-
-def _irrigation_series_from_frame(flow_df: pd.DataFrame) -> pd.Series:
-    """Irrigation flow [L/min] from a logger frame, reading NULL flow as 0.
-
-    A NULL/NaN flow row means "not watering". Filling it with 0 (rather than
-    leaving it NaN) is load-bearing: ``_build_flux_rates`` samples the flow with
-    ``Series.asof``, which skips NaN and would otherwise latch the last nonzero
-    burst forward across the gap -- so the model keeps irrigating after watering
-    has physically stopped.
-    """
-    return flow_df.iloc[:, 0].astype(float).sort_index().fillna(0.0)
-
-
-def _build_flux_rates(
-    ts: pd.Timestamp,
-    elapsed_s: float,
-    et_data: pd.DataFrame,
-    seg_et: dict,
-    irrigation: pd.Series,
-) -> FluxRates:
-    seg_evap: dict[str, float] = {}
-    seg_transp: dict[str, float] = {}
-    for name, frame in seg_et.items():
-        if ts not in frame.index:
-            continue
-        evap = max(0.0, float(frame.at[ts, "evap"]))
-        transp = max(0.0, float(frame.at[ts, "transp"]))
-        if evap > 0:
-            seg_evap[name] = evap
-        if transp > 0:
-            seg_transp[name] = transp
-
-    flow_lpm = 0.0
-    if irrigation is not None and not irrigation.empty:
-        try:
-            flow_lpm = float(irrigation.asof(ts))
-            if not np.isfinite(flow_lpm):
-                flow_lpm = 0.0
-        except (KeyError, ValueError):
-            flow_lpm = 0.0
-    flow_m3s = flow_lpm / 60_000.0
-
-    rain_flux = 0.0
-    # et_data columns were renamed to Constant.id strings in the parent so this
-    # lookup survives the spawn-context pickle round-trip.
-    precip_col = Weather.PRECIPITATION.id
-    if precip_col in et_data.columns and elapsed_s > 0:
-        precip = et_data.at[ts, precip_col]
-        if pd.notna(precip) and precip > 0:
-            rain_flux = float(precip) / 3600.0  # mm/h -> kg/(m²·s)
-
-    return FluxRates(
-        seg_evap=seg_evap,
-        seg_transp=seg_transp,
-        flow_m3s=flow_m3s,
-        rain_flux=rain_flux,
-    )
-
-
-def _sample_probe_row(
-    pde: SoilPDECore,
-    ts: pd.Timestamp,
-    probes: list,
-) -> dict[str, Any]:
-    # Convert Se → matric tension ψ via this run's own (possibly overridden)
-    # retention curve, so the run is judged in the probes' quantity.
-    row: dict[str, Any] = {"timestamp": ts}
-    for probe in probes:
-        se = float(pde.sample(probe))
-        # Key by channel_id (stable) rather than the collision-prone probe.name.
-        row[f"{probe.channel_id}__se"] = se
-        # psi_from_se is the signed matric potential (negative, 0 at saturation).
-        row[f"{probe.channel_id}__tension"] = float(pde.soil_model.psi_from_se(se))
+def _probe_row(engine: SoilEngine, at: pd.Timestamp, tension: dict[str, float]) -> dict[str, Any]:
+    """Probe tensions keyed by channel_id, with the saturation this run's own retention curve gives them."""
+    row: dict[str, Any] = {"timestamp": at}
+    for probe_id, value in tension.items():
+        row[f"{probe_id}__tension"] = float(value)
+        row[f"{probe_id}__se"] = float(engine.model.se_from_psi(value))
     return row
 
 
@@ -689,21 +569,19 @@ def _push_render(
     png_store: Any,
     job_id: str,
     label: str,
-    pde: SoilPDECore,
+    engine: SoilEngine,
+    se: np.ndarray,
     sim_t: pd.Timestamp,
-    *,
-    width_m: float,
-    height_m: float,
 ) -> None:
     """Render the current Se field straight into the shared png-store (off the
     row queue, so large PNG blobs don't contend with the progress stream)."""
     try:
         png = plots.render_rel_sat_png(
-            pde.mesh,
-            np.asarray(pde.rel_sat.value),
+            engine.mesh,
+            np.asarray(se),
             sim_t,
-            width_m=width_m,
-            height_m=height_m,
+            width_m=engine.mesh_config.width,
+            height_m=engine.mesh_config.height,
             title=label,
         )
         png_store[job_id] = (png, sim_t)
@@ -751,193 +629,6 @@ def _find_soil_simulation(app) -> tuple[SoilSimulation, FieldSimulation]:
         for c in _walk_components(root):
             log.error("  %-28s  %s", type(c).__name__, getattr(c, "id", "?"))
     raise RuntimeError("no SoilSimulation found in this project")
-
-
-def _log_weather_logger_diagnostics(field_sim: FieldSimulation) -> None:
-    """Dump how each weather channel's logger resolved, to explain an empty read.
-
-    A read comes back empty when the channels the query hits have no enabled
-    logger pointing at the populated table. This prints, per channel, whether it
-    has a logger/connector and the resolved logger config (connector + table), so
-    a config-merge or provider-auto-add mismatch is visible in one run. Best-effort
-    only -- never raises (it runs on an already-failing path)."""
-    try:
-        weather = field_sim.weather
-        log.error("weather read empty; component=%s type=%s", getattr(weather, "id", "?"), type(weather).__name__)
-        for ch in weather.data.values():
-            has_logger = ch.has_logger() if callable(getattr(ch, "has_logger", None)) else "?"
-            has_conn = ch.has_connector() if callable(getattr(ch, "has_connector", None)) else "?"
-            try:
-                logger_cfg = dict(ch.logger.to_configs())
-            except Exception:
-                logger_cfg = str(getattr(ch, "logger", "?"))
-            # weather_id is the surrogate-key attribute the SQL connector filters on
-            # (WHERE id = weather_id). If it is None/missing on the read channels, the
-            # query becomes WHERE id IS NULL and returns nothing on a full table.
-            wid = getattr(ch, "weather_id", "<missing>")
-            log.error(
-                "  channel %-20s has_logger=%s has_connector=%s weather_id=%r logger=%s",
-                ch.id,
-                has_logger,
-                has_conn,
-                wid,
-                logger_cfg,
-            )
-    except Exception:
-        log.exception("weather logger diagnostics failed")
-
-
-def _load_history(
-    soil_sim: SoilSimulation,
-    field_sim: FieldSimulation,
-    start: pd.Timestamp,
-    end: pd.Timestamp,
-) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], pd.Series, Optional[bytes], list[pd.DataFrame]]:
-    """Read everything we need to replay the window, without touching live state."""
-    weather_df = field_sim.weather.data.from_logger(start=start, end=end)
-    if weather_df.empty:
-        # Probe the full logged extent so the operator can pick a valid window.
-        hint = ""
-        try:
-            logged = field_sim.weather.data.from_logger()
-            if not logged.empty:
-                hint = (
-                    f" - weather is logged in [{logged.index.min()} .. {logged.index.max()}]"
-                    f" ({len(logged)} rows); choose --start/--end inside that range"
-                )
-            else:
-                hint = (
-                    " - the weather logger holds no rows for this project; this deployment may"
-                    " source weather live (Brightsky) and never persist it"
-                )
-        except Exception:
-            log.exception("could not probe the logged weather range")
-        _log_weather_logger_diagnostics(field_sim)
-        raise RuntimeError(f"no weather logged in [{start} .. {end}]{hint}")
-
-    # validate_meteo_inputs rejects GHI with any NaN, so hand the chain gap-free
-    # forcing: interpolate continuous fields, zero-fill rain (a gap = no rain, not
-    # an interpolated value), then derive GHI/precip below. No-op on a genuine
-    # gap-free Brightsky feed that already carries them.
-    rain_cols = [c for c in ("precipitation_intensity", "precipitation_type") if c in weather_df.columns]
-    fill_cols = [c for c in weather_df.select_dtypes(include="number").columns if c not in rain_cols]
-    if fill_cols:
-        weather_df[fill_cols] = weather_df[fill_cols].interpolate(limit_direction="both")
-    for c in rain_cols:
-        weather_df[c] = weather_df[c].astype(float).fillna(0.0)
-
-    if "illuminance" in weather_df.columns and (
-        Weather.GHI not in weather_df.columns or weather_df[Weather.GHI].isna().all()
-    ):
-        weather_df[Weather.GHI] = (weather_df["illuminance"].astype(float) * _GHI_PER_KLX).clip(lower=0.0).fillna(0.0)
-        log.info("synthesized %s from illuminance (×%.1f W/m² per klx)", Weather.GHI, _GHI_PER_KLX)
-
-    if "precipitation_intensity" in weather_df.columns and (
-        Weather.PRECIPITATION not in weather_df.columns or weather_df[Weather.PRECIPITATION].isna().all()
-    ):
-        intensity = weather_df["precipitation_intensity"].astype(float)
-        weather_df[Weather.PRECIPITATION] = intensity.clip(lower=0.0).fillna(0.0)
-        log.info("synthesized %s from precipitation_intensity (mm/h)", Weather.PRECIPITATION)
-
-    et_data, seg_et = field_sim.simulation.chain.horizon_inputs(weather_df.copy())
-
-    # Strip Constant column labels to their string ids: Constant.__new__ raises
-    # during the spawn pickle round-trip (fine under fork, fatal under spawn).
-    et_data.columns = [getattr(c, "id", str(c)) for c in et_data.columns]
-
-    irrigation = pd.Series(dtype=float)
-    if field_sim.irrigation is not None:
-        try:
-            flow_df = field_sim.irrigation.data.from_logger(
-                channels=[field_sim.irrigation.data[Irrigation.FLOW]],
-                start=start,
-                end=end,
-            )
-            if not flow_df.empty:
-                irrigation = _irrigation_series_from_frame(flow_df)
-        except Exception:
-            log.exception("irrigation logger read failed; assuming zero flow")
-        if irrigation.empty or not (irrigation != 0.0).any():
-            # No metered rows (unlogged or broken meter): use the live tick's
-            # fallback chain -- ranged connector read of the meter, else the
-            # on/off state x the [drip] design flow, else 0 -- aligned on the
-            # forcing index, so the replay waters when the field did.
-            try:
-                fallback = field_sim._irrigation_flow_lpm(start, end, et_data.index)
-                if (fallback != 0.0).any():
-                    irrigation = fallback
-                    log.info(
-                        "irrigation from the live fallback chain (meter, else state x design flow): %d watering rows",
-                        int((fallback > 0.0).sum()),
-                    )
-            except Exception:
-                log.exception("irrigation fallback read failed; assuming zero flow")
-
-    initial_blob: Optional[bytes] = None
-    try:
-        # Use DataAccess.from_logger (Channel.from_logger takes no args).
-        state_df = soil_sim.data.from_logger(
-            channels=[soil_sim.data[SoilSimulation.SIMULATION_STATE]],
-            start=start - pd.Timedelta("1d"),
-            end=start,
-        )
-        if not state_df.empty:
-            blob = state_df.iloc[-1, 0]
-            if isinstance(blob, (bytes, bytearray)) and len(blob) > 0:
-                initial_blob = bytes(blob)
-    except Exception:
-        log.exception("state-blob lookup failed; using PDEConfig IC")
-
-    measurements: list[pd.DataFrame] = []
-    anchor_sensors: list[AnchorSensor] = []
-    anchor_history: dict[str, pd.Series] = {}
-    field_component = field_sim.context  # AgriculturalField
-    for child in _walk_components(field_component):
-        if not isinstance(child, SoilMoisture):
-            continue
-        try:
-            m = child.data.from_logger(start=start, end=end)
-        except Exception:
-            log.exception("read failed for %s", child.id)
-            continue
-        if m.empty:
-            continue
-        # Dedupe: duplicate timestamps from multi-sensor feeds crash the downstream concat.
-        m = m[~m.index.duplicated(keep="last")]
-        tension = _sensor_tension_series(child, m)
-        if tension is not None and not tension.empty:
-            measurements.append(tension.to_frame())
-            # Keyed history + geometry for the offline anchor backend (mirrors the
-            # live discovery). Sorted so the at-or-before lookup in the replay works.
-            anchor_history[child.key] = tension.sort_index()
-            anchor_sensors.append(AnchorSensor(key=child.key, x_offset_cm=child.x_offset, depth_cm=child.depth))
-
-    return et_data, seg_et, irrigation, initial_blob, measurements, anchor_sensors, anchor_history
-
-
-def _sensor_tension_series(sensor: SoilMoisture, frame: pd.DataFrame) -> Optional[pd.Series]:
-    """Collapse one sensor's logged frame to a single tension series ψ [hPa].
-
-    Returns the directly-measured ``water_tension`` column (normalised to the
-    negative matric-potential convention) when one is present and non-empty.
-    Returns None otherwise; the ``water_content`` fallback has been removed
-    because converting θ via the retention curve injects model error into a
-    quantity that is treated as ground truth."""
-
-    def _first_usable(substr: str) -> Optional[pd.Series]:
-        for col in frame.columns:
-            if substr in str(col).lower():
-                series = frame[col].astype(float)
-                if series.notna().any():
-                    return series
-        return None
-
-    measured = _first_usable("water_tension")
-    if measured is not None:
-        # Normalise to the negative matric-potential convention.
-        return (-measured.abs()).dropna().rename(f"{sensor.key} ψ (measured)")
-
-    return None
 
 
 _PALETTE = [
@@ -1053,8 +744,8 @@ def build_app(
         [
             html.H3("Soil tuning: live parameter sweep", className="my-3"),
             html.Div(
-                f"Window: {runner.et_data.index[0]} .. {runner.et_data.index[-1]} "
-                f"({len(runner.et_data)} rows), {len(runner.probes)} probe(s), "
+                f"Window: {runner.window_start} .. {runner.window_end} "
+                f"({runner.n_rows} rows), {len(runner.probes)} probe(s), "
                 f"{len(measurement_frame.columns)} sensor channel(s)",
                 className="text-muted small mb-2",
             ),
@@ -1384,7 +1075,13 @@ def main() -> int:
     log.info("activating connectors / components")
     app.activate()
 
+    runner = None
     try:
+        for root in app.components.values():
+            for component in _walk_components(root):
+                if isinstance(component, FieldSimulation) and component.ticker is not None:
+                    component.ticker.stop()
+                    log.info("live ticker of %s stopped; the bench writes nothing through it", component.id)
         soil_sim, field_sim = _find_soil_simulation(app)
         if not soil_sim.configs.has_member("testing"):
             log.error(
@@ -1400,6 +1097,9 @@ def main() -> int:
             )
             return 2
 
+        if field_sim.simulation.assimilator.config.enabled:
+            log.info("anchoring is enabled in the config; the bench runs without anchoring")
+
         history = testing_cfg.get("history_window", default="7d")
         max_workers = int(testing_cfg.get("max_workers", default=_default_max_workers()))
         poll_seconds = float(testing_cfg.get("poll_interval", default=2.0))
@@ -1408,6 +1108,7 @@ def main() -> int:
             end = pd.Timestamp(args.end)
             if end.tz is None:
                 end = end.tz_localize("UTC")
+            end = end.tz_convert("UTC")
         else:
             end = pd.Timestamp.now(tz="UTC").floor("min")
 
@@ -1415,6 +1116,7 @@ def main() -> int:
             start = pd.Timestamp(args.start)
             if start.tz is None:
                 start = start.tz_localize("UTC")
+            start = start.tz_convert("UTC")
         else:
             # No explicit start: fall back to the configured window before end.
             start = end - pd.Timedelta(history)
@@ -1424,44 +1126,58 @@ def main() -> int:
             return 2
         log.info("history window %s .. %s", start, end)
 
-        et_data, seg_et, irrigation, initial_blob, measurements, anchor_sensors, anchor_history = _load_history(
-            soil_sim,
-            field_sim,
-            start,
-            end,
+        weather = field_sim.inputs.weather(start, end)
+        if weather.empty:
+            raise RuntimeError(
+                f"no usable weather in [{start} .. {end}]; the live read needs {list(field_sim._required_weather_keys)}"
+            )
+
+        field_setup = field_sim.setup
+        engine = field_sim.simulation.engine
+        chunks = _replay_chunks(
+            weather,
+            field_sim.inputs.irrigation,
+            interval=field_setup.field.interval,
+            offset=field_setup.field.offset,
+            intake_delay=field_setup.field.intake_delay,
+            cold_start_s=engine.cold_start_s,
         )
+        if not chunks:
+            raise RuntimeError(
+                f"the window [{start} .. {end}] yields no replay chunks; it needs at least two weather rows"
+            )
+
+        sensors, sensor_channels, _ = field_sim._discover_sensors()
+        measured_series: dict[str, pd.Series] = {}
+        if sensor_channels:
+            frame = field_sim.data.read(Channels(list(sensor_channels.values())), start=start, end=end, unique=True)
+            for key, channel in sensor_channels.items():
+                if channel.id not in frame.columns:
+                    continue
+                series = (-frame[channel.id].astype(float).abs()).dropna().sort_index()
+                series = series[~series.index.duplicated(keep="last")]
+                if not series.empty:
+                    measured_series[key] = series
+        measurements = [series.rename(f"{key} ψ (measured)").to_frame() for key, series in measured_series.items()]
         log.info(
-            "history loaded: et_rows=%d  irrigation_rows=%d  sensors=%d  initial_blob=%s",
-            len(et_data),
-            len(irrigation),
+            "replay loaded: weather_rows=%d  chunks=%d  irrigation_rows=%d  sensors=%d",
+            len(weather),
+            len(chunks),
+            sum(int((c.irrigation > 0).sum()) for c in chunks),
             len(measurements),
-            "yes" if initial_blob else "no (PDEConfig IC)",
         )
 
-        mesh_config = field_sim.simulation.engine.mesh_config
-        base_pde_config = field_sim.simulation.engine.ode
         probes = list(field_sim.simulation.probes)
-        anchor_cfg = field_sim.simulation.assimilator.config
+        known = {p.channel_id for p in probes}
+        probes += [engine.probe_from_sensor(s) for s in sensors if s.key not in known]
 
         runner = TuningRunner(
-            mesh_config=mesh_config,
-            base_pde_config=base_pde_config,
+            setup=field_setup,
+            base_pde_config=engine.ode,
             probes=probes,
-            et_data=et_data,
-            seg_et=seg_et,
-            irrigation=irrigation,
-            initial_blob=initial_blob,
+            chunks=chunks,
             max_workers=max_workers,
-            anchor_cfg=anchor_cfg,
-            anchor_sensors=anchor_sensors,
-            anchor_history=anchor_history,
         )
-        if anchor_cfg.enabled:
-            log.info(
-                "anchoring ON: %d sensor(s) in allowlist, %d with history",
-                len(anchor_cfg.sensors),
-                sum(1 for s in anchor_sensors if s.key in anchor_cfg.sensors),
-            )
 
         dash_app = build_app(runner, measurements, poll_seconds=poll_seconds)
         try:
@@ -1469,10 +1185,6 @@ def main() -> int:
         except RuntimeError:
             log.warning("job API disabled: no token configured")
         else:
-            # anchor_history is already keyed by sensor.key == probe.channel_id
-            # (the same identity _build_figure/_sample_probe_row use) and
-            # sign-normalized, so it doubles directly as the measured side.
-            measured_series: dict[str, pd.Series] = anchor_history
             if not measured_series:
                 log.info("objective disabled: no measured tension series in history window")
             register_api(
@@ -1486,7 +1198,7 @@ def main() -> int:
                     "started_at": pd.Timestamp.now(tz="UTC").isoformat(),
                 },
                 png_lookup=lambda job_id: (runner._png_store.get(job_id) or (None, None))[0],
-                param_exists=lambda k: hasattr(soil_sim._ode_config, k),
+                param_exists=lambda k: k in OVERRIDABLE_KEYS,
                 objective_fn=(
                     (lambda job: tension_objective(modeled_tension_series(job.rows), measured_series))
                     if measured_series
@@ -1534,6 +1246,11 @@ def main() -> int:
             _cleanup_and_exit()
     finally:
         # Reached only if setup failed before the server loop started.
+        if runner is not None:
+            try:
+                runner.shutdown()
+            except Exception:
+                log.exception("runner shutdown failed")
         try:
             app.deactivate()
         except Exception:

@@ -81,7 +81,7 @@ can escape either service.
 | `config_not_versioned` | 409 | supervisor `/config/<name>` PUT, when the target file is not inside a git work tree |
 | `config_dirty` | 409 | supervisor `/config/<name>` PUT, when the target file already has uncommitted local changes |
 | `validation_failed` | 422 | supervisor `/config/<name>` PUT, when TOML parsing, the dry-run validator, or a git add/commit/timeout fails |
-| `unknown_param` | 400 | bench `/jobs`, `/jobs/batch`, when a `params` key is not a real `PDEConfig` attribute |
+| `unknown_param` | 400 | bench `/jobs`, `/jobs/batch`, when a `params` key is not in `soil_tuning.OVERRIDABLE_KEYS` |
 | `invalid_param_value` | 400 | bench `/jobs`, `/jobs/batch`, when a `params` value is not a finite number |
 | `dt_ceiling_exceeded` | 400 | bench `/jobs`, `/jobs/batch`, when `dt` or `dt_min` exceeds the 10 s ceiling |
 | `job_not_found` | 404 | bench `/jobs/<id>` GET/DELETE, `/jobs/<id>/plot.png`, when `id` is unknown |
@@ -270,16 +270,17 @@ same PNG store `/job-png` reads.
 
 ### Parameter-override contract
 
-`params` in a submit body may set **any** attribute that exists on the
-running project's `PDEConfig` instance (checked with `hasattr`, not
-limited to the UI's fixed `theta_r`/`theta_s`/`alpha`/`n`/`k_s`/`dt`/
-`dt_min` tuple). Validation, in order, for every key in `params`:
+`params` in a submit body may set the keys in `soil_tuning.OVERRIDABLE_KEYS`:
+the UI's `theta_r`/`theta_s`/`alpha`/`n`/`k_s`/`dt`/`dt_min` plus
+`ic_water_table_depth` (only when the base config sets one, since the
+cold start follows it), `bpar`, `rain_shadow_width`,
+`rain_shadow_passthrough` and `rain_runoff_fraction`. Validation, in order,
+for every key in `params`:
 
 1. `params` itself must be a JSON object → else 400 `invalid_request`.
 2. Each value must be a finite number (`bool` is rejected even though
    `bool` is an `int` subclass) → else 400 `invalid_param_value`.
-3. Each key must be a real `PDEConfig` attribute → else 400
-   `unknown_param`.
+3. Each key must be in `OVERRIDABLE_KEYS` → else 400 `unknown_param`.
 4. If the key is `dt` or `dt_min`, its value must not exceed the dt
    ceiling (10 s, `dt_ceiling_s` in `register_api`, wired from
    `soil_tuning.py`) → else 400 `dt_ceiling_exceeded`.
@@ -387,7 +388,7 @@ throughout, never rescaled):
   instead of excluding them).
 - `objective` on a job is computed only when the job is `done` and only
   if an `objective_fn` was wired at startup, which requires a non-empty
-  measured tension series in the replay window (`anchor_history`); if
+  measured tension series in the replay window (`measured_series`); if
   there is none, `soil_tuning.py` logs `"objective disabled: no measured
   tension series in history window"` and the bench runs with
   `objective_fn=None`, so every job's `objective` stays `null`.
