@@ -46,10 +46,13 @@ except ImportError as e:  # pragma: no cover - friendly bail-out
         sys.exit(1)
     raise
 
+import soil_tuning_auth
 import sparcs
 from lories.application.settings import Settings
 from lories.components.weather import Weather
 from lories.core.configs.directories import Directories, Directory
+from soil_tuning_api import register_api
+from soil_tuning_objective import modeled_tension_series, tension_objective
 from sparcs.components.agriculture import Irrigation, SoilMoisture
 from sparcs.components.agriculture.simulation.components import FieldSimulation, SoilSimulation
 from sparcs.components.agriculture.simulation.core import plots
@@ -121,6 +124,7 @@ class TuningJob:
     progress: float = 0.0
     future: Any = None
     submitted_at: pd.Timestamp = field(default_factory=lambda: pd.Timestamp.now(tz="UTC"))
+    objective: Optional[dict] = None
 
 
 # Per-worker globals, populated once by _worker_init.
@@ -853,6 +857,21 @@ def _load_history(
                 irrigation = _irrigation_series_from_frame(flow_df)
         except Exception:
             log.exception("irrigation logger read failed; assuming zero flow")
+        if irrigation.empty or not (irrigation != 0.0).any():
+            # No metered rows (unlogged or broken meter): use the live tick's
+            # fallback chain -- ranged connector read of the meter, else the
+            # on/off state x the [drip] design flow, else 0 -- aligned on the
+            # forcing index, so the replay waters when the field did.
+            try:
+                fallback = field_sim._irrigation_flow_lpm(start, end, et_data.index)
+                if (fallback != 0.0).any():
+                    irrigation = fallback
+                    log.info(
+                        "irrigation from the live fallback chain (meter, else state x design flow): %d watering rows",
+                        int((fallback > 0.0).sum()),
+                    )
+            except Exception:
+                log.exception("irrigation fallback read failed; assuming zero flow")
 
     initial_blob: Optional[bytes] = None
     try:
@@ -1445,6 +1464,36 @@ def main() -> int:
             )
 
         dash_app = build_app(runner, measurements, poll_seconds=poll_seconds)
+        try:
+            api_token = soil_tuning_auth.load_token()
+        except RuntimeError:
+            log.warning("job API disabled: no token configured")
+        else:
+            # anchor_history is already keyed by sensor.key == probe.channel_id
+            # (the same identity _build_figure/_sample_probe_row use) and
+            # sign-normalized, so it doubles directly as the measured side.
+            measured_series: dict[str, pd.Series] = anchor_history
+            if not measured_series:
+                log.info("objective disabled: no measured tension series in history window")
+            register_api(
+                dash_app.server,
+                runner,
+                token=api_token,
+                boot_info={
+                    "project": args.project,
+                    "replay_window": {"start": start.isoformat(), "end": end.isoformat()},
+                    "max_workers": max_workers,
+                    "started_at": pd.Timestamp.now(tz="UTC").isoformat(),
+                },
+                png_lookup=lambda job_id: (runner._png_store.get(job_id) or (None, None))[0],
+                param_exists=lambda k: hasattr(soil_sim._ode_config, k),
+                objective_fn=(
+                    (lambda job: tension_objective(modeled_tension_series(job.rows), measured_series))
+                    if measured_series
+                    else None
+                ),
+                dt_ceiling_s=10.0,
+            )
         log.info(
             "Dash app starting at http://%s:%d  (poll=%.1fs, workers=%d)",
             args.host,
