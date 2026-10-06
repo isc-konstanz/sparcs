@@ -163,6 +163,18 @@ class Simulation:
         self._last_chain = chain
         if tension_history and self.assimilator.enabled:
             self.assimilator.ingest(tension_history)
+        return self.step(forcing, cancel, extra_diagnostics=extra_diagnostics), chain
+
+    def step(
+        self,
+        forcing: Sequence[Forcing],
+        cancel: Cancel = None,
+        *,
+        extra_diagnostics: Optional[Mapping[str, float]] = None,
+    ) -> Sequence[StepResult]:
+        """Advance, assimilate and sample probes per forcing row; ``extra_diagnostics`` merges into each row.
+        Stops early on cancel, keeping committed rows; without a state yet the first row is the cold start.
+        """
         extra = dict(extra_diagnostics or {})
         results: list[StepResult] = []
 
@@ -174,7 +186,7 @@ class Simulation:
                 result = self._advance(initial, cold, extra, cancel)
                 if result is None:
                     logger.info("cold start cancelled at %s", cold.at)
-                    return results, chain
+                    return results
                 results.append(result)
             else:
                 self.state = initial
@@ -189,7 +201,7 @@ class Simulation:
             results.append(result)
         if results:
             self._last_step = results[-1]
-        return results, chain
+        return results
 
     def _advance(
         self, state: SoilState, step: Forcing, extra: Mapping[str, float], cancel: Cancel
