@@ -89,7 +89,7 @@ class RolloutEngine:
                 continue
 
             seg_evap, seg_transp = _segment_flux_dicts(seg_et, ts_next)
-            rain_flux = _rain_flux(et_data, ts_next, elapsed_s)
+            rain_flux = _rain_flux(et_data, ts_next)
             if interval_begin is not None:
                 interval_begin(ts_prev, ts_next, elapsed_s)
             sub_segments = split_interval(on_intervals, ts_prev, ts_next, self.flow_m3s)

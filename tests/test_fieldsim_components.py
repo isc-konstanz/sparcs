@@ -189,7 +189,7 @@ def test_channel_inputs_weather_trims_and_validates():
     start = field.data.weather_frame.index[0]
     end = field.data.weather_frame.index[1]
     got = inputs.weather(start.to_pydatetime(), end.to_pydatetime())
-    assert list(got.index) == [end]  # (start, end]
+    assert list(got.index) == list(pd.date_range(start + pd.Timedelta(minutes=1), end, freq="1min"))  # (start, end]
 
     field.data.weather_frame = field.data.weather_frame.drop(columns=[Weather.GHI])
     got_invalid = inputs.weather(start.to_pydatetime(), end.to_pydatetime())

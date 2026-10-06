@@ -35,6 +35,7 @@ from .core.config import (
     SoilConfig,
 )
 from .core.evapotranspiration import ETModel
+from .core.minute_grid import MAX_PERIOD, to_minute_grid
 from .core.shading import MODE_FREE_FIELD, ShadingConfig
 from .core.simulation import Simulation
 from .core.state import ChainResult, Plan, Snapshot, SoilState, StepResult
@@ -332,16 +333,14 @@ class ChannelInputs:
 
     def weather(self, start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
         field = self.field
-        frame = field.data.read(field._weather_channels, start=start, end=end)
-        frame = self._trim_span(frame, start, end)
+        start = pd.Timestamp(start)
+        end = pd.Timestamp(end)
+        frame = field.data.read(field._weather_channels, start=start - MAX_PERIOD, end=end.ceil(MAX_PERIOD))
+        cover = [k for k in field._required_weather_keys if k not in _OPTIONAL_WEATHER_KEYS]
+        frame = to_minute_grid(frame, start, end, cover)
         if not self._weather_frame_valid(frame):
             return frame.iloc[0:0]
         return frame
-
-    def _trim_span(self, frame: pd.DataFrame, start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
-        if frame.empty:
-            return frame
-        return frame.loc[(frame.index > start) & (frame.index <= end)]
 
     def _weather_frame_valid(self, frame: pd.DataFrame) -> bool:
         if frame.empty:
@@ -687,6 +686,8 @@ class FieldSimulation(Component):
 
         self._weather_channels = Channels(list(self.weather.data.values()))
         self._required_weather_keys = ETModel.REQUIRED_WEATHER_COLUMNS
+        if any(c.key == Weather.PRECIPITATION and c.has_connector() for c in self._weather_channels):
+            self._required_weather_keys += (Weather.PRECIPITATION,)
         self._warn_unwired_weather_channels()
 
         anchor_enabled = self.simulation.assimilator.config.enabled

@@ -48,27 +48,19 @@ def _inputs(data, *, required=()) -> components.ChannelInputs:
 
 def test_weather_span_reads_the_connector_not_a_logger():
     """Weather already lives in its source (kob_tracker station / Brightsky), so
-    the tick reads the span from the connector; it must not go through a logger."""
+    the tick reads the span from the connector; it must not go through a logger.
+    The read reaches an hour back and on to the next full hour, so the hourly
+    records around the span are there to fill its minutes."""
     data = _RecordingData()
     inputs = _inputs(data)
 
     start = dt.datetime(2026, 7, 12, 10, tzinfo=dt.timezone.utc)
-    end = dt.datetime(2026, 7, 12, 11, tzinfo=dt.timezone.utc)
+    end = dt.datetime(2026, 7, 12, 11, 20, tzinfo=dt.timezone.utc)
     inputs.weather(start, end)
 
-    assert data.calls == [("read", start, end, False)]
-
-
-def test_trim_span_keeps_the_half_open_interval():
-    index = pd.date_range("2026-07-12 10:00", periods=5, freq="15min", tz="UTC")
-    frame = pd.DataFrame({"ghi": [1.0, 2.0, 3.0, 4.0, 5.0]}, index=index)
-    inputs = _inputs(_RecordingData())
-
-    trimmed = inputs._trim_span(frame, index[0], pd.Timestamp("2026-07-12 10:45", tz="UTC"))
-
-    assert list(trimmed.columns) == ["ghi"]
-    assert trimmed.index[0] == pd.Timestamp("2026-07-12 10:15", tz="UTC")  # start row excluded
-    assert trimmed.index[-1] == pd.Timestamp("2026-07-12 10:45", tz="UTC")  # end row kept
+    assert data.calls == [
+        ("read", pd.Timestamp("2026-07-12 09:00Z"), pd.Timestamp("2026-07-12 12:00Z"), False),
+    ]
 
 
 def test_weather_frame_valid_flags_a_missing_required_column():
@@ -96,3 +88,18 @@ def test_invalid_chunk_names_the_missing_column_at_warning_once(caplog):
     warnings = [r for r in caplog.records if "temp_air" in r.getMessage()]
     assert len(warnings) == 1
     assert inputs._last_invalid_weather_columns == ["temp_air"]
+
+
+def test_hourly_rain_over_station_minutes_lands_on_whole_minutes_up_to_the_last_rain_hour():
+    station = pd.date_range("2026-07-12 08:00:30", "2026-07-12 09:20:30", freq="1min", tz="UTC")
+    rain = pd.Series({pd.Timestamp("2026-07-12 08:00Z"): 0.0, pd.Timestamp("2026-07-12 09:00Z"): 1.2})
+    frame = pd.DataFrame({"ghi": 300.0, "temp_air": 20.0}, index=station).join(
+        rain.rename("precipitation"), how="outer"
+    )
+    inputs = _inputs(_RecordingData(frame), required=("ghi", "temp_air", "precipitation"))
+
+    weather = inputs.weather(pd.Timestamp("2026-07-12 08:00Z"), pd.Timestamp("2026-07-12 09:20Z"))
+
+    assert weather.index.equals(pd.date_range("2026-07-12 08:01", "2026-07-12 09:00", freq="1min", tz="UTC"))
+    assert not weather[["ghi", "temp_air"]].isna().any().any()
+    assert weather["precipitation"].tolist() == [1.2] * 60

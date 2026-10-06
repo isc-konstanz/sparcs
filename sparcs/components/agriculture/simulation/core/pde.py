@@ -155,16 +155,16 @@ def segment_flux_dicts(
     return seg_evap, seg_transp
 
 
-def rain_flux(et_data: pd.DataFrame, ts: pd.Timestamp, elapsed_s: float) -> float:
-    """Rain flux density [kg/(m²·s)] for the interval ending at ``ts``, spread evenly over ``elapsed_s``.
+def rain_flux(et_data: pd.DataFrame, ts: pd.Timestamp) -> float:
+    """Rain flux density [kg/(m²·s)] from the precipitation rate [mm/h] of the interval ending at ``ts``.
     A missing column or row, NaN or non-positive precipitation means no rain."""
     col = Weather.PRECIPITATION
-    if elapsed_s <= 0 or col not in et_data.columns or ts not in et_data.index:
+    if col not in et_data.columns or ts not in et_data.index:
         return 0.0
     precip = et_data.loc[ts, col]
     if pd.isna(precip) or precip <= 0:
         return 0.0
-    return float(precip) / elapsed_s  # mm/s == kg/(m²·s)
+    return float(precip) / 3600.0  # mm/s == kg/(m²·s)
 
 
 # Real rig bay width [m]; matches the ``bay_width`` parameter default.

@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 import sparcs
 from lories.application.settings import Settings
+from lories.components.weather import Weather
 from lories.core import ConfigurationError, ConfigurationUnavailableError
 from lories.data import Channels
 from sparcs.components.agriculture.simulation.components import ChannelOutputs, FieldSimulation
@@ -290,6 +291,18 @@ def test_duplicate_probe_soil_id_is_refused_without_a_predictor(tmp_path, load):
 
     with pytest.raises(ConfigurationError, match="duplicate soil_id"):
         load()
+
+
+def test_a_wired_precipitation_channel_is_a_required_weather_column(load):
+    """Rain is waited for like the station columns, so an outage of its source holds the tick instead of
+    running the soil without rain."""
+    simulation = load().components.get_first(FieldSimulation)
+
+    simulation.activate()
+    try:
+        assert Weather.PRECIPITATION in simulation._required_weather_keys
+    finally:
+        simulation.deactivate()
 
 
 def test_activation_without_weather_is_refused(tmp_path, load):

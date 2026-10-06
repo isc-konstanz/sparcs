@@ -226,7 +226,7 @@ class WeatherChain:
                 Forcing(
                     at=ts.to_pydatetime(),
                     dt_s=dt_s,
-                    rain_flux=rain_flux(weather, ts, dt_s),
+                    rain_flux=rain_flux(weather, ts),
                     flow_m3s=flow_m3s,
                     seg_evap=seg_evap,
                     seg_transp=seg_transp,

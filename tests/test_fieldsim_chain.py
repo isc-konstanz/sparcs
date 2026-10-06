@@ -17,7 +17,7 @@ from lories.core.configs.configurations import Configurations
 from sparcs.components.agriculture.simulation.core.chain import WeatherChain
 from sparcs.components.agriculture.simulation.core.config import FieldConfig, FieldSetup, SoilConfig
 from sparcs.components.agriculture.simulation.core.evapotranspiration import ETModel, SegmentProperties
-from sparcs.components.agriculture.simulation.core.pde import flow_m3s_per_m, rain_flux, segment_flux_dicts
+from sparcs.components.agriculture.simulation.core.pde import flow_m3s_per_m, segment_flux_dicts
 from sparcs.components.agriculture.simulation.core.shading import ShadingConfig, ShadingModel
 
 _GROUND_SHADING_CONF = Path(
@@ -153,7 +153,7 @@ def test_forcing_series_dt_flow_rain_and_segment_fluxes():
     et = chain.et
 
     weather = _weather_frame()
-    weather.iloc[5, weather.columns.get_loc(Weather.PRECIPITATION)] = 2.0  # mm at hour 5
+    weather.iloc[5, weather.columns.get_loc(Weather.PRECIPITATION)] = 2.0  # mm/h at hour 5
     irrigation_lpm = pd.Series(0.53, index=weather.index)
 
     forcings, chain_result = chain.forcing_series(weather, irrigation_lpm)
@@ -167,9 +167,7 @@ def test_forcing_series_dt_flow_rain_and_segment_fluxes():
     expected_flow = flow_m3s_per_m(0.53, setup.soil.total_drip_line_length_m)
     assert forcings[0].flow_m3s == pytest.approx(expected_flow)
 
-    rain_ts = weather.index[5]
-    assert forcings[5].rain_flux == pytest.approx(rain_flux(weather, rain_ts, forcings[5].dt_s))
-    assert forcings[5].rain_flux > 0.0
+    assert forcings[5].rain_flux == pytest.approx(2.0 / 3600.0)
     assert forcings[0].rain_flux == 0.0
 
     df = chain._prepare_weather(weather)
@@ -187,6 +185,17 @@ def test_forcing_series_dt_flow_rain_and_segment_fluxes():
     assert (list(chain_result.ground), list(chain_result.pv_rows)) == ([], [])
     assert chain_result.sun_state == (90.0, 0.0, None)
     assert chain_result.envelope.y_min == -setup.soil.mesh.height - 0.5
+
+
+def test_rain_is_an_hourly_rate_whatever_the_row_spacing():
+    """Precipitation is in mm/h, so a minute row carries the same flux as an hourly row."""
+    chain = _chain(_setup())
+    weather = _weather_frame(hours=2).resample("1min").ffill()
+    weather[Weather.PRECIPITATION] = 6.0
+
+    forcings, _ = chain.forcing_series(weather, pd.Series(0.0, index=weather.index))
+
+    assert [f.rain_flux for f in forcings[1:]] == pytest.approx([6.0 / 3600.0] * (len(forcings) - 1))
 
 
 def test_forcing_windows_reach_backwards_from_their_row():
