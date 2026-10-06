@@ -87,13 +87,15 @@ class SolveResult:
 @dataclass
 class WalkResult:
     """Outcome of one :meth:`SoilPDECore.walk_window` call; ``ok`` is False in strict mode on a failure at ``dt_min``
-    or a ``cancel()``. In accept mode non-finite substeps are skipped and their seconds add up in ``skipped_s``."""
+    or a ``cancel()``. In accept mode non-finite substeps are skipped and their seconds add up in ``skipped_s``;
+    finite non-convergent ones are kept and add up in ``unconverged_s``."""
 
     ok: bool = True
     reason: Optional[str] = None
     clip: "ClipDiagnostics" = field(default_factory=lambda: ClipDiagnostics())
     retries: int = 0
     skipped_s: float = 0.0
+    unconverged_s: float = 0.0
     cancelled: bool = False
 
 
@@ -1100,6 +1102,7 @@ class SoilPDECore:
                     if on_step is not None:
                         on_step(t_offset)
                     continue
+                out.unconverged_s += attempted
             t_offset += attempted
             clip.ponding_overflow += self.commit_ponding(plan)
             out.clip.add(clip)

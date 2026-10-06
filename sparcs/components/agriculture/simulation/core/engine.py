@@ -132,6 +132,7 @@ class SoilEngine:
             surface_water=self.pde.surface_water(),
             delta_storage=delta_storage,
             skipped_s=walk.skipped_s,
+            unconverged_s=walk.unconverged_s,
             retries=float(walk.retries),
             walk_ok=1.0 if walk.ok else 0.0,
         )

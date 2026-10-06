@@ -140,6 +140,25 @@ def test_walk_accept_skips_poisoned_substeps(pde, monkeypatch):
     assert np.allclose(np.asarray(pde.rel_sat.value), before)
 
 
+def test_walk_accept_commits_finite_unconverged_substeps_and_reports_them(pde, monkeypatch):
+    before = pde.snapshot()
+
+    def solve(dt, **kw):
+        pde.rel_sat.setValue(np.asarray(pde.rel_sat.value) + 0.001)
+        return SolveResult(residual=1.0, converged=False, sweeps=25, finite=True)
+
+    monkeypatch.setattr(pde, "solve", solve)
+    result = pde.walk_window(
+        rates=_extreme_rain(),
+        window_s=120.0,
+        accept_at_dt_min=True,
+    )
+    assert result.ok
+    assert result.skipped_s == 0.0
+    assert result.unconverged_s == pytest.approx(120.0)
+    assert not np.allclose(np.asarray(pde.rel_sat.value), before)
+
+
 def test_solve_uses_gmres_not_lu(pde):
     from fipy.solvers import LinearGMRESSolver
 
