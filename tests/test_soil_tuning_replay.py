@@ -292,3 +292,34 @@ def test_stopping_the_pool_terminates_a_busy_worker():
     soil_tuning._stop_pool(executor)
 
     assert not any(w.is_alive() for w in workers)
+
+
+def _job_rows(start: str, minutes: int) -> list[dict]:
+    index = pd.date_range(start, periods=minutes, freq="1min", tz="UTC")
+    return [{"timestamp": ts, "soil_30cm__tension": -100.0 - i, "soil_30cm__se": 0.5} for i, ts in enumerate(index)]
+
+
+def test_hourly_graph_cache_converts_only_new_rows_and_matches_a_full_resample(monkeypatch):
+    rows = _job_rows("2026-07-13 00:01", 200)
+    job = soil_tuning.TuningJob(job_id="j1", params={}, label="j1", rows=rows[:90])
+    cache = soil_tuning._HourlyTension()
+    cache.frame(job)
+
+    converted = []
+    real_frame = pd.DataFrame
+
+    def counting_frame(data=None, *args, **kwargs):
+        if isinstance(data, list):
+            converted.append(len(data))
+        return real_frame(data, *args, **kwargs)
+
+    monkeypatch.setattr(soil_tuning.pd, "DataFrame", counting_frame)
+    job.rows = rows
+    incremental = cache.frame(job)
+    monkeypatch.undo()
+
+    full = pd.DataFrame(rows).assign(timestamp=lambda f: pd.to_datetime(f["timestamp"], utc=True))
+    full = full.set_index("timestamp").resample("1h").mean(numeric_only=True)
+    pd.testing.assert_frame_equal(incremental, full, check_freq=False)
+    assert converted == [len(rows) - 59]
+    pd.testing.assert_frame_equal(cache.frame(job), full, check_freq=False)

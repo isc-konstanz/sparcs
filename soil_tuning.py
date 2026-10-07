@@ -698,6 +698,33 @@ def _param_input(name: str, default: float):
     )
 
 
+class _HourlyTension:
+    """Hourly means of each job's rows for the graph. Finished hours are converted once; a poll only
+    converts the rows of the newest hour, so the figure stays cheap with many long jobs."""
+
+    def __init__(self) -> None:
+        self._cache: dict[str, tuple[int, pd.DataFrame]] = {}
+
+    def frame(self, job: TuningJob) -> pd.DataFrame:
+        rows = job.rows
+        n = len(rows)
+        start, done = self._cache.get(job.job_id, (0, None))
+        if n <= start:
+            return done if done is not None else pd.DataFrame()
+        tail = pd.DataFrame(rows[start:n])
+        tail["timestamp"] = pd.to_datetime(tail["timestamp"], utc=True)
+        tail = tail.set_index("timestamp").sort_index()
+        hourly = tail.resample("1h").mean(numeric_only=True)
+        frame = hourly if done is None else pd.concat([done, hourly])
+        last_hour = tail.index[-1].floor("1h")
+        self._cache[job.job_id] = (start + int((tail.index < last_hour).sum()), frame[frame.index < last_hour])
+        return frame
+
+    def prune(self, job_ids: Sequence[str]) -> None:
+        for job_id in set(self._cache) - set(job_ids):
+            del self._cache[job_id]
+
+
 def build_app(
     runner: TuningRunner,
     measurements: list[pd.DataFrame],
@@ -828,6 +855,8 @@ def build_app(
                 return f"Cancelled {trig['job']}."
         return no_update
 
+    hourly_tension = _HourlyTension()
+
     def _build_figure(jobs: list) -> go.Figure:
         fig = go.Figure()
 
@@ -853,13 +882,7 @@ def build_app(
         for idx, job in enumerate(jobs):
             try:
                 color = _PALETTE[idx % len(_PALETTE)]
-                if not job.rows:
-                    continue
-                # Build the DataFrame on demand, then downsample to hourly mean.
-                df = pd.DataFrame(job.rows)
-                df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-                df = df.set_index("timestamp").sort_index()
-                df = df.resample("1h").mean(numeric_only=True)
+                df = hourly_tension.frame(job)
                 if df.empty:
                     continue
                 tension_cols = [c for c in df.columns if c.endswith("__tension")]
@@ -972,6 +995,7 @@ def build_app(
         except Exception:
             log.exception("refresh: snapshotting jobs failed")
             jobs = []
+        hourly_tension.prune([job.job_id for job in jobs])
         try:
             fig = _build_figure(jobs)
         except Exception:
