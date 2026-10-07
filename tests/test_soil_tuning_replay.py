@@ -8,8 +8,11 @@ The soil-tuning bench replays a window through the live chain and the live ``Soi
 environments that lack it.
 """
 
+import concurrent.futures
+import multiprocessing as mp
 import pickle
 import queue
+import time
 import types
 
 import pytest
@@ -275,3 +278,17 @@ def _drain(q: "queue.Queue") -> list:
     while not q.empty():
         out.append(q.get_nowait())
     return out
+
+
+def test_stopping_the_pool_terminates_a_busy_worker():
+    executor = concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=mp.get_context("spawn"))
+    executor.submit(time.sleep, 60)
+    deadline = time.time() + 60
+    while not executor._processes and time.time() < deadline:
+        time.sleep(0.1)
+    workers = list(executor._processes.values())
+    assert workers and all(w.is_alive() for w in workers)
+
+    soil_tuning._stop_pool(executor)
+
+    assert not any(w.is_alive() for w in workers)

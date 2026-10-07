@@ -26,6 +26,10 @@ from typing import Any, Callable, Optional, Sequence
 # spawn is the only safe start method: fork deadlocks the threaded parent (Flask
 # + Dash + consumer thread all hold locks that are never released in the child).
 os.environ.setdefault("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES")
+# The pool runs about one worker per core; threaded BLAS in each of them (pvfactors' dense
+# algebra) oversubscribes the machine until nothing progresses. Set before numpy is imported.
+for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_var, "1")
 try:
     mp.set_start_method("spawn", force=True)
 except (RuntimeError, ValueError):
@@ -258,6 +262,17 @@ def _worker_forcing(chunk: ReplayChunk) -> list[Forcing]:
     return list(forcing)
 
 
+def _stop_pool(executor: concurrent.futures.ProcessPoolExecutor) -> None:
+    """Shut the pool down and terminate the workers still busy, so none outlives the bench."""
+    processes = list((getattr(executor, "_processes", None) or {}).values())
+    executor.shutdown(wait=False, cancel_futures=True)
+    for process in processes:
+        if process.is_alive():
+            process.terminate()
+    for process in processes:
+        process.join(timeout=5)
+
+
 def _load_forcing(path: str) -> list[list[Forcing]]:
     if path not in _W_FORCING:
         with open(path, "rb") as fh:
@@ -274,7 +289,6 @@ class TuningRunner:
         setup: FieldSetup,
         base_pde_config: PDEConfig,
         probes: list,
-        chunks: Sequence[ReplayChunk],
         max_workers: int = 40,
         render_stride: int = 4,
     ) -> None:
@@ -288,6 +302,10 @@ class TuningRunner:
         self._shutdown = threading.Event()
         self._consumer: Optional[threading.Thread] = None
         self._forcing_dir: Optional[str] = None
+        self.forcing_path: Optional[str] = None
+        self.n_rows = 0
+        self.window_start = None
+        self.window_end = None
 
         # Manager proxies are picklable into spawn workers; plain mp.Queue/Event are not.
         self._manager = mp.Manager()
@@ -313,17 +331,6 @@ class TuningRunner:
             warm_futs = [self._executor.submit(_worker_ping) for _ in range(max_workers)]
             concurrent.futures.wait(warm_futs)
             log.info("warm pool ready (%d workers)", max_workers)
-
-            forcing = list(self._executor.map(_worker_forcing, chunks))
-            rows = [f for part in forcing for f in part]
-            self.n_rows = len(rows)
-            self.window_start = rows[0].at if rows else None
-            self.window_end = rows[-1].at if rows else None
-            self._forcing_dir = tempfile.mkdtemp(prefix="soil_tuning_")
-            self.forcing_path = os.path.join(self._forcing_dir, "forcing.pkl")
-            with open(self.forcing_path, "wb") as fh:
-                pickle.dump(forcing, fh)
-            log.info("forcing computed: %d chunks, %d rows", len(forcing), self.n_rows)
         except BaseException:
             self.shutdown()
             raise
@@ -335,7 +342,23 @@ class TuningRunner:
         )
         self._consumer.start()
 
+    def compute_forcing(self, chunks: Sequence[ReplayChunk]) -> None:
+        """The live chain over every chunk in the pool, written once for all jobs to read."""
+        forcing = list(self._executor.map(_worker_forcing, chunks))
+        rows = [f for part in forcing for f in part]
+        self._forcing_dir = tempfile.mkdtemp(prefix="soil_tuning_")
+        path = os.path.join(self._forcing_dir, "forcing.pkl")
+        with open(path, "wb") as fh:
+            pickle.dump(forcing, fh)
+        self.n_rows = len(rows)
+        self.window_start = rows[0].at if rows else None
+        self.window_end = rows[-1].at if rows else None
+        self.forcing_path = path
+        log.info("forcing computed: %d chunks, %d rows", len(forcing), self.n_rows)
+
     def submit(self, params: dict[str, float], label: str = "") -> TuningJob:
+        if self.forcing_path is None:
+            raise RuntimeError("the forcing is not computed yet")
         with self._lock:
             self._evict_if_full_locked()
             job = TuningJob(
@@ -403,7 +426,7 @@ class TuningRunner:
             pass
         self._shutdown.set()
         try:
-            self._executor.shutdown(wait=False, cancel_futures=True)
+            _stop_pool(self._executor)
         except Exception:
             pass
         if self._consumer is not None:
@@ -1076,11 +1099,44 @@ def main() -> int:
     app.activate()
 
     runner = None
+    cleaned = threading.Event()
+
+    def _cleanup_and_exit(*_args) -> None:
+        # Idempotent: bound to SIGINT/SIGTERM and the server finally; both can fire.
+        if not cleaned.is_set():
+            cleaned.set()
+            log.info("shutting down sims and sparcs")
+            if runner is not None:
+                try:
+                    runner.shutdown()  # kills worker sim processes
+                except Exception:
+                    log.exception("runner shutdown failed")
+            try:
+                app.deactivate()  # disconnects sparcs connectors
+            except Exception:
+                log.exception("deactivate failed")
+        # Hard-exit: sparcs' connector threads aren't all daemons and would
+        # otherwise keep the interpreter alive. Everything is torn down already.
+        os._exit(0)
+
+    # Bound before the slow startup so a stop during it tears the pool down too.
+    for _sig in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        _signum = getattr(signal, _sig, None)
+        if _signum is not None:
+            try:
+                signal.signal(_signum, _cleanup_and_exit)
+            except (ValueError, OSError):
+                pass
+
     try:
+        stopped: set[str] = set()
         for root in app.components.values():
             for component in _walk_components(root):
-                if isinstance(component, FieldSimulation) and component.ticker is not None:
+                if not isinstance(component, FieldSimulation) or component.ticker is None:
+                    continue
+                if component.id not in stopped:
                     component.ticker.stop()
+                    stopped.add(component.id)
                     log.info("live ticker of %s stopped; the bench writes nothing through it", component.id)
         soil_sim, field_sim = _find_soil_simulation(app)
         if not soil_sim.configs.has_member("testing"):
@@ -1175,9 +1231,9 @@ def main() -> int:
             setup=field_setup,
             base_pde_config=engine.ode,
             probes=probes,
-            chunks=chunks,
             max_workers=max_workers,
         )
+        runner.compute_forcing(chunks)
 
         dash_app = build_app(runner, measurements, poll_seconds=poll_seconds)
         try:
@@ -1213,33 +1269,6 @@ def main() -> int:
             poll_seconds,
             max_workers,
         )
-        cleaned = threading.Event()
-
-        def _cleanup_and_exit(*_args) -> None:
-            # Idempotent: bound to SIGINT/SIGTERM and the server finally; both can fire.
-            if not cleaned.is_set():
-                cleaned.set()
-                log.info("shutting down sims and sparcs")
-                try:
-                    runner.shutdown()  # kills worker sim processes
-                except Exception:
-                    log.exception("runner shutdown failed")
-                try:
-                    app.deactivate()  # disconnects sparcs connectors
-                except Exception:
-                    log.exception("deactivate failed")
-            # Hard-exit: sparcs' connector threads aren't all daemons and would
-            # otherwise keep the interpreter alive. Everything is torn down already.
-            os._exit(0)
-
-        for _sig in ("SIGINT", "SIGTERM", "SIGBREAK"):
-            _signum = getattr(signal, _sig, None)
-            if _signum is not None:
-                try:
-                    signal.signal(_signum, _cleanup_and_exit)
-                except (ValueError, OSError):
-                    pass
-
         try:
             dash_app.run(host=args.host, port=args.port, debug=False)
         finally:
