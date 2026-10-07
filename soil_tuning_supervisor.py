@@ -156,8 +156,19 @@ class SubprocessController(ProcessController):
             self._popen.terminate()
 
     def kill(self) -> None:
-        if self._popen is not None and self.is_running():
-            self._popen.kill()
+        """Kill the bench and every process it started; its pool workers would outlive it otherwise."""
+        if self._popen is None or not self.is_running():
+            return
+        try:
+            children = psutil.Process(self._popen.pid).children(recursive=True)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            children = []
+        self._popen.kill()
+        for child in children:
+            try:
+                child.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
 
     def wait(self, timeout: float) -> Optional[int]:
         if self._popen is None:

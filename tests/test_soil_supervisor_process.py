@@ -73,3 +73,22 @@ def _is_alive(pid: int) -> bool:
         return proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE
     except psutil.NoSuchProcess:
         return False
+
+
+def test_kill_takes_the_bench_children_with_it():
+    controller = SubprocessController()
+    code = (
+        "import subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        "time.sleep(60)\n"
+    )
+    pid = controller.spawn([sys.executable, "-c", code])
+    parent = psutil.Process(pid)
+    assert _wait_until(lambda: len(parent.children(recursive=True)) >= 1, WAIT_S)
+    children = parent.children(recursive=True)
+
+    controller.kill()
+    controller.wait(WAIT_S)
+
+    assert controller.is_running() is False
+    assert _wait_until(lambda: not any(_is_alive(c.pid) for c in children), WAIT_S)
