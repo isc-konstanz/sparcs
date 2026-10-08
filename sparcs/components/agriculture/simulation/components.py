@@ -367,12 +367,15 @@ class ChannelInputs:
     def irrigation(self, start: dt.datetime, end: dt.datetime) -> pd.Series:
         field = self.field
         measured = self._read_measured_flow(start, end)
-        if measured is not None:
-            return measured
+        design = None
         if field._irrigation_state_channel is not None and field.setup.soil.drip.explicit:
-            return self._read_state_span(start, end) * field.setup.soil.drip.design_flow_lpm
-        # Unwired: not watering, never a fabricated forcing.
-        return pd.Series(dtype=float)
+            design = self._read_state_span(start, end) * field.setup.soil.drip.design_flow_lpm
+        if measured is None:
+            # Unwired: not watering, never a fabricated forcing.
+            return design if design is not None else pd.Series(dtype=float)
+        if design is None or design.empty:
+            return measured
+        return _fill_silent_meter(measured, design)
 
     def _read_measured_flow(self, start: dt.datetime, end: dt.datetime) -> Optional[pd.Series]:
         channel = self.field._irrigation_flow_channel
@@ -429,6 +432,19 @@ class ChannelInputs:
         if frame.empty:
             return frame
         return frame.loc[(frame.index >= start) & (frame.index <= end)]
+
+
+def _fill_silent_meter(measured: pd.Series, design: pd.Series) -> pd.Series:
+    """The metered flow, and the state's design flow wherever the meter reports nothing or zero.
+    Each sample holds until the next, so both series are carried onto the union of their timestamps."""
+    measured = measured.sort_index()
+    measured = measured[~measured.index.duplicated(keep="last")].astype(float)
+    design = design.sort_index()
+    design = design[~design.index.duplicated(keep="last")].astype(float)
+    index = measured.index.union(design.index)
+    metered = measured.reindex(index, method="ffill")
+    stated = design.reindex(index, method="ffill").fillna(0.0)
+    return metered.where(metered > 0.0, stated)
 
 
 def _set_series(channel: Any, series: pd.Series) -> None:

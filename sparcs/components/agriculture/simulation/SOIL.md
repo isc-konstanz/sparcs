@@ -665,12 +665,13 @@ only as far as the recorded data reaches; outages and gaps self-heal on later
 ticks. If a run overruns its slot, the next slot is skipped, never queued.
 
 **Irrigation input (flow, with a state fallback).** The per-timestep l/min the
-PDE forces with comes from a fallback chain (`_irrigation_flow_lpm`): the metered
-flow whenever the meter reports rows over the span (a meter reporting 0 counts as
-"alive, not watering" and wins); else — when the physical meter is broken/silent —
-the on/off irrigation **state** (`Irrigation.STATE`) times a drip-derived design
-flow `design_flow_lpm = nozzle_count * nozzle_flow_lph / 60` from an explicit
-`[soil_simulation.drip]` block; else `0` for a genuinely rain-fed field. A field
+PDE forces with comes from `ChannelInputs.irrigation`: the metered flow wherever
+the meter reports a positive value; elsewhere — where the meter reports nothing or
+zero, as a broken meter that keeps writing 0 does — the on/off irrigation **state**
+(`Irrigation.STATE`) times a drip-derived design flow
+`design_flow_lpm = nozzle_count * nozzle_flow_lph / 60` from an explicit
+`[soil_simulation.drip]` block; else `0` for a genuinely rain-fed field. A metered
+flow while the state is off (a manual valve) still counts. A field
 whose `[irrigation]` component is configured but wires **neither** a connected
 flow channel **nor** a connected state channel plus an explicit
 `[soil_simulation.drip]` block is a masked misconfiguration: `activate()` raises

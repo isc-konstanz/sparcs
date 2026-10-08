@@ -3,7 +3,8 @@
 tests.test_fieldsim_inputs_irrigation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``ChannelInputs`` reads metered flow, falling back to on/off state times the drip design flow, and never fabricates one.
+``ChannelInputs`` reads metered flow and uses on/off state times the drip design flow wherever the meter reports nothing
+or zero; it never fabricates a flow without a state.
 ``FieldRunner`` aligns the samples onto the weather timesteps (backward fill, NULL = not watering).
 """
 
@@ -222,7 +223,7 @@ def _read_irrigation(inputs, index) -> pd.Series:
 
 
 def test_flow_lpm_prefers_measured_over_state():
-    """Meter reporting -> its value is used and the state channel is never read."""
+    """Meter reporting positive flow -> its value is used, not the design flow."""
     index = _index()
     inputs = _inputs(
         drip={"nozzle_count": 30, "nozzle_flow_lph": 1.0},
@@ -231,7 +232,43 @@ def test_flow_lpm_prefers_measured_over_state():
     )
 
     assert list(_read_irrigation(inputs, index)) == [50.0, 50.0, 50.0, 50.0]
-    assert _read_names(inputs) == ["irrigation_flow"]  # state never consulted
+    assert _read_names(inputs) == ["irrigation_flow", "irrigation_state"]
+
+
+def test_flow_lpm_uses_state_where_meter_reports_zero_while_watering():
+    """A broken meter writing 0 while the valve is open (copperhead): state x design flow while on, 0 after."""
+    index = _index()
+    inputs = _inputs(
+        drip={"nozzle_count": 30, "nozzle_flow_lph": 1.0},  # 0.5 l/min
+        flow=_frame({"2026-05-01 10:00": 0.0, "2026-05-01 10:15": 0.0, "2026-05-01 10:30": 0.0}),
+        state=_frame({"2026-05-01 10:00": True, "2026-05-01 10:20": False}),
+    )
+
+    assert list(_read_irrigation(inputs, index)) == [0.5, 0.5, 0.0, 0.0]
+
+
+def test_flow_lpm_mixes_a_meter_that_reports_only_part_of_a_watering():
+    """Positive meter rows win; zero rows inside the same watering take the design flow."""
+    index = _index()
+    inputs = _inputs(
+        drip={"nozzle_count": 30, "nozzle_flow_lph": 1.0},
+        flow=_frame({"2026-05-01 10:00": 0.6, "2026-05-01 10:15": 0.0}),
+        state=_frame({"2026-05-01 10:00": True, "2026-05-01 10:40": False}),
+    )
+
+    assert list(_read_irrigation(inputs, index)) == [0.6, 0.5, 0.5, 0.0]
+
+
+def test_flow_lpm_keeps_metered_flow_while_state_is_off():
+    """Watering the state did not record (manual valve) still counts when the meter sees it."""
+    index = _index()
+    inputs = _inputs(
+        drip={"nozzle_count": 30, "nozzle_flow_lph": 1.0},
+        flow=_frame({"2026-05-01 10:00": 0.0, "2026-05-01 10:15": 0.7, "2026-05-01 10:30": 0.0}),
+        state=_frame({"2026-05-01 10:00": False}),
+    )
+
+    assert list(_read_irrigation(inputs, index)) == [0.0, 0.7, 0.0, 0.0]
 
 
 def test_flow_lpm_falls_back_to_state_when_meter_dead():
