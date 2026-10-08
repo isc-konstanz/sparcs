@@ -151,10 +151,11 @@ def test_prepare_weather_uses_the_apple_apv_lai_profile():
     soil = SoilConfig.from_dict({"mesh": {}, "total_drip_line_length_m": 12.6})
     chain = _chain(FieldSetup(field=field, soil=soil, shading=None, planner=None, location=None))
     june = _weather_frame()
-    september = june.set_axis(june.index + pd.DateOffset(months=3))
+    july = june.set_axis(june.index + pd.DateOffset(months=1))
+    october = june.set_axis(june.index + pd.DateOffset(months=4))
 
-    assert set(chain._prepare_weather(june)["lai"]) == {4.2}
-    assert set(chain._prepare_weather(september)["lai"]) == {3.5}
+    assert set(chain._prepare_weather(july)["lai"]) == {4.2}
+    assert set(chain._prepare_weather(october)["lai"]) == {3.4}
 
 
 def test_forcing_series_dt_flow_rain_and_segment_fluxes():
