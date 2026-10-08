@@ -146,6 +146,17 @@ def _chain(setup) -> WeatherChain:
     return WeatherChain(setup, ShadingModel(shading_config), ETModel(), top_segment_names=(), segment_face_length={})
 
 
+def test_prepare_weather_uses_the_apple_apv_lai_profile():
+    field = FieldConfig.from_dict({"lai_type": "apple_apv", "bay_width": 3.5})
+    soil = SoilConfig.from_dict({"mesh": {}, "total_drip_line_length_m": 12.6})
+    chain = _chain(FieldSetup(field=field, soil=soil, shading=None, planner=None, location=None))
+    june = _weather_frame()
+    september = june.set_axis(june.index + pd.DateOffset(months=3))
+
+    assert set(chain._prepare_weather(june)["lai"]) == {4.2}
+    assert set(chain._prepare_weather(september)["lai"]) == {3.5}
+
+
 def test_forcing_series_dt_flow_rain_and_segment_fluxes():
     setup = _setup(total_drip_line_length_m=12.6)
     chain = _chain(setup)

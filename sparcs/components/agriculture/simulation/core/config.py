@@ -29,7 +29,7 @@ from lories.core.configs.parameters import (
     _TypedParameter,
 )
 
-LAI_TYPES = ("fao", "grass", "apple")
+LAI_TYPES = ("fao", "grass", "apple", "apple_apv")
 GRID_MODES = ("fill_order", "full")
 
 # Never created, so ``from_dict`` cannot pick up a "<name>.d/<key>.conf" from disk.

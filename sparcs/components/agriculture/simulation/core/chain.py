@@ -30,6 +30,7 @@ _LAI_BY_TYPE: dict[str, list[float]] = {
     "fao": [3.0] * 12,
     "grass": [0.2, 0.2, 0.2, 0.3, 0.6, 0.8, 0.9, 1.2, 1.4, 1.2, 0.8, 0.6],
     "apple": [0.2, 0.4, 1.2, 2.5, 3.0, 3.2, 3.0, 2.8, 2.0, 1.0, 0.5, 0.2],
+    "apple_apv": [0.0, 0.1, 1.0, 2.0, 4.0, 4.2, 4.2, 4.0, 3.5, 2.2, 0.9, 0.1],
 }
 
 # Filled with a default when the weather feed does not supply them.

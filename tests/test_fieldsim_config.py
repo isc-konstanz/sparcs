@@ -257,7 +257,7 @@ def test_schema_marks_passthrough_groups_and_carries_bounds():
     assert sch["mesh"]["children"] == MeshConfig.schema()
     assert "d_x" in sch["mesh"]["children"]
     assert sch["total_drip_line_length_m"]["type"] == "float"
-    assert FieldConfig.schema()["lai_type"]["choices"] == ["fao", "grass", "apple"]
+    assert FieldConfig.schema()["lai_type"]["choices"] == ["fao", "grass", "apple", "apple_apv"]
 
 
 def test_section_group_declares_no_children_of_its_own():
