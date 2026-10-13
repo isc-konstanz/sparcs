@@ -5,4 +5,4 @@ sparcs.components.camera
 
 """
 
-from .inference import CameraWithInference  # noqa: F401
+from .inference import OrchardCamera, OrchardInference  # noqa: F401

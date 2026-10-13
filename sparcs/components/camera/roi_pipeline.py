@@ -7,14 +7,13 @@ sparcs.components.camera.roi_pipeline
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import Counter
 from typing import Any, List, Optional, Tuple
 
 import cv2
 import numpy as np
 import torch
 from lories.connectors.models import Model
-from lories.core import ResourceError
 
 # Perspective warp quads for each of the 8 plant ROIs (source pixel coordinates).
 WARP_QUADS: List[List[Tuple[int, int]]] = [
@@ -30,11 +29,18 @@ WARP_QUADS: List[List[Tuple[int, int]]] = [
 
 ROI_COLUMNS: List[str] = [f"plant_roi_{i + 1}" for i in range(len(WARP_QUADS))]
 
+CROP_SIZE: Tuple[int, int] = (600, 1800)
 SHORT_SIDE_TARGET: int = 256
 ALIGN_TO: int = 32
 
 DISPLAY_SCALE: float = 0.35
 BOX_COLOR_BGR: Tuple[int, int, int] = (40, 40, 210)
+# Smallest/largest annotated box (w, h) per class in CROP_SIZE pixels, from fruits_detection_kob/data/*/annotations.
+# Predictions outside this range are dropped as false detections.
+MIN_BOX_WH = {"apples": (20.5, 31.0), "flowers": (29.6, 30.9)}
+MAX_BOX_WH = {"apples": (96.3, 113.0), "flowers": (398.2, 376.3)}
+CLASS_NAMES: List[str] = ["__background__", "apples", "flowers"]
+CLASS_COLORS_BGR = {"apples": (40, 40, 210), "flowers": (230, 120, 240)}
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 
@@ -57,45 +63,31 @@ def compute_target_size(
     return new_w, new_h
 
 
-def enhance_image(bgr: np.ndarray) -> np.ndarray:
-    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    lab[:, :, 0] = clahe.apply(lab[:, :, 0])
-    bgr = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-    blur = cv2.GaussianBlur(bgr, (0, 0), sigmaX=3)
-    bgr = cv2.addWeighted(bgr, 1.5, blur, -0.5, 0)
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
-    hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 1.25, 0, 255)
-    return cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
-
-
-@dataclass(frozen=True)
-class _RoiGeometry:
-    dst_w: int
-    dst_h: int
-    content_w: int
-    content_h: int
-    M: np.ndarray
-    M_inv: np.ndarray
-
-
-def _build_roi_geometry() -> List[_RoiGeometry]:
-    geometry = []
+def _roi_warps() -> List[Tuple[np.ndarray, np.ndarray]]:
+    w, h = CROP_SIZE
+    dst = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], dtype=np.float32)
+    warps = []
     for quad in WARP_QUADS:
-        dst_w, dst_h = quad_target_size(quad)
-        content_w, content_h = compute_target_size(dst_w, dst_h)
         src = np.array(quad, dtype=np.float32)
-        dst = np.array([[0, 0], [dst_w - 1, 0], [dst_w - 1, dst_h - 1], [0, dst_h - 1]], dtype=np.float32)
-        M = cv2.getPerspectiveTransform(src, dst)
-        M_inv = cv2.getPerspectiveTransform(dst, src)
-        geometry.append(_RoiGeometry(dst_w, dst_h, content_w, content_h, M, M_inv))
-    return geometry
+        warps.append((cv2.getPerspectiveTransform(src, dst), cv2.getPerspectiveTransform(dst, src)))
+    return warps
 
 
-ROI_GEOMETRY: List[_RoiGeometry] = _build_roi_geometry()
+ROI_WARPS: List[Tuple[np.ndarray, np.ndarray]] = _roi_warps()
+CONTENT_SIZE: Tuple[int, int] = compute_target_size(*CROP_SIZE)
 
-TRANSFORM_MIN_SIZE: int = min(g.content_w for g in ROI_GEOMETRY)
-TRANSFORM_MAX_SIZE: int = max(g.content_h for g in ROI_GEOMETRY)
+_NATURAL_SIZES = [compute_target_size(*quad_target_size(quad)) for quad in WARP_QUADS]
+TRANSFORM_MIN_SIZE: int = min(w for w, _ in _NATURAL_SIZES)
+TRANSFORM_MAX_SIZE: int = max(h for _, h in _NATURAL_SIZES)
+
+
+def content_size(pad_hw: Optional[Tuple[int, int]] = None) -> Tuple[int, int]:
+    content_w, content_h = CONTENT_SIZE
+    if pad_hw is None:
+        return content_w, content_h
+    pad_h, pad_w = pad_hw
+    scale = min(1.0, pad_w / content_w, pad_h / content_h)
+    return max(1, int(content_w * scale)), max(1, int(content_h * scale))
 
 
 def preprocess_frame(
@@ -103,23 +95,16 @@ def preprocess_frame(
     roi_index: int,
     pad_hw: Optional[Tuple[int, int]] = None,
 ) -> torch.Tensor:
-    geom = ROI_GEOMETRY[roi_index]
-    warped = cv2.warpPerspective(frame, geom.M, (geom.dst_w, geom.dst_h), flags=cv2.INTER_LINEAR)
-    enhanced = enhance_image(warped)
-    rgb = cv2.cvtColor(enhanced, cv2.COLOR_BGR2RGB)
-    rgb = cv2.resize(rgb, (geom.content_w, geom.content_h), interpolation=cv2.INTER_LINEAR)
+    warped = cv2.warpPerspective(frame, ROI_WARPS[roi_index][0], CROP_SIZE, flags=cv2.INTER_LINEAR)
+    rgb = cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)
+    content_w, content_h = content_size(pad_hw)
+    rgb = cv2.resize(rgb, (content_w, content_h), interpolation=cv2.INTER_LINEAR)
     img_f = rgb.astype(np.float32) / 255.0
 
     if pad_hw is not None:
         pad_h, pad_w = pad_hw
-        if geom.content_h > pad_h or geom.content_w > pad_w:
-            raise ResourceError(
-                f"ROI content {geom.content_w}x{geom.content_h} exceeds the standardized canvas "
-                f"{pad_w}x{pad_h} this model was exported for. Re-export after changing "
-                f"WARP_QUADS/ROI geometry."
-            )
         canvas = np.zeros((pad_h, pad_w, 3), dtype=np.float32)
-        canvas[: geom.content_h, : geom.content_w] = img_f
+        canvas[:content_h, :content_w] = img_f
         img_f = canvas
 
     return torch.from_numpy(img_f.transpose(2, 0, 1))
@@ -136,52 +121,60 @@ def _unpack_detections(raw: Any) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
 def postprocess_detections(
     raw: Any,
     roi_index: int,
-    padded: bool,
+    pad_hw: Optional[Tuple[int, int]],
     score_threshold: float,
-) -> List[List[float]]:
-    geom = ROI_GEOMETRY[roi_index]
-    boxes, scores, _labels = _unpack_detections(raw)
+    class_names: Optional[List[str]] = None,
+) -> List[List[Any]]:
+    content_w, content_h = content_size(pad_hw)
+    boxes, scores, labels = _unpack_detections(raw)
     if len(boxes) == 0:
         return []
     boxes = np.asarray(boxes, dtype=np.float32)
     scores = np.asarray(scores, dtype=np.float32)
+    labels = np.asarray(labels, dtype=np.int64)
 
-    if padded:
-        keep_content = (boxes[:, 0] < geom.content_w) & (boxes[:, 1] < geom.content_h)
-        boxes, scores = boxes[keep_content], scores[keep_content]
+    if pad_hw is not None:
+        keep_content = (boxes[:, 0] < content_w) & (boxes[:, 1] < content_h)
+        boxes, scores, labels = boxes[keep_content], scores[keep_content], labels[keep_content]
         if len(boxes) == 0:
             return []
-        boxes[:, 2] = np.minimum(boxes[:, 2], geom.content_w)
-        boxes[:, 3] = np.minimum(boxes[:, 3], geom.content_h)
+        boxes[:, 2] = np.minimum(boxes[:, 2], content_w)
+        boxes[:, 3] = np.minimum(boxes[:, 3], content_h)
 
     keep = scores >= score_threshold
-    boxes = boxes[keep]
+    boxes, labels = boxes[keep], labels[keep]
     if len(boxes) == 0:
         return []
 
-    sx = geom.dst_w / geom.content_w
-    sy = geom.dst_h / geom.content_h
+    sx = CROP_SIZE[0] / content_w
+    sy = CROP_SIZE[1] / content_h
     boxes = boxes.copy()
     boxes[:, [0, 2]] *= sx
     boxes[:, [1, 3]] *= sy
 
-    result: List[List[float]] = []
-    for x1, y1, x2, y2 in boxes:
+    result: List[List[Any]] = []
+    for (x1, y1, x2, y2), label in zip(boxes, labels):
+        name = class_names[label] if class_names and label < len(class_names) else int(label)
+        min_w, min_h = MIN_BOX_WH.get(str(name).lower(), (0, 0))
+        max_w, max_h = MAX_BOX_WH.get(str(name).lower(), (np.inf, np.inf))
+        if not (min_w <= x2 - x1 <= max_w and min_h <= y2 - y1 <= max_h):
+            continue
         corners = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32).reshape(1, -1, 2)
-        corners_orig = cv2.perspectiveTransform(corners, geom.M_inv).reshape(-1, 2)
+        corners_orig = cv2.perspectiveTransform(corners, ROI_WARPS[roi_index][1]).reshape(-1, 2)
         xo, yo = corners_orig[:, 0], corners_orig[:, 1]
         result.append([
             round(float(xo.min()), 2),
             round(float(yo.min()), 2),
             round(float(xo.max()), 2),
             round(float(yo.max()), 2),
+            name,
         ])
     return result
 
 
 def draw_on_frame(
     frame: np.ndarray,
-    roi_boxes: List[List[List[float]]],
+    roi_boxes: List[List[List[Any]]],
     total: int,
     target_size: Optional[Tuple[int, int]] = None,
 ) -> np.ndarray:
@@ -200,13 +193,26 @@ def draw_on_frame(
             y2 = int(min(out_h - 1, round(box[3] * sy)))
             if x2 <= x1 or y2 <= y1:
                 continue
-            cv2.rectangle(canvas, (x1, y1), (x2, y2), BOX_COLOR_BGR, 2)
+            color = CLASS_COLORS_BGR.get(str(box[4]).lower(), BOX_COLOR_BGR)
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
 
-    banner = f"Total Fruits: {total}"
+    counts = Counter(box[4] for boxes in roi_boxes for box in boxes)
+    banner = "  ".join(f"{name}: {n}" for name, n in sorted(counts.items())) or f"Total: {total}"
     (bw, bh), bbl = cv2.getTextSize(banner, FONT, 1.0, 2)
     cv2.rectangle(canvas, (0, 0), (bw + 20, bh + bbl + 20), (20, 20, 20), cv2.FILLED)
     cv2.putText(canvas, banner, (10, bh + 10), FONT, 1.0, (0, 220, 255), 2, cv2.LINE_AA)
     return canvas
+
+
+def filter_season(roi_boxes: List[List[List[Any]]], min_count: int = 2) -> List[List[List[Any]]]:
+    counts = Counter(box[4] for boxes in roi_boxes for box in boxes)
+    ranked = counts.most_common(2)
+    if not ranked or ranked[0][1] < min_count or (len(ranked) > 1 and ranked[0][1] == ranked[1][1]):
+        return [[] for _ in roi_boxes]
+    season = ranked[0][0]
+    kept = [[box for box in boxes if box[4] == season] for boxes in roi_boxes]
+    # A single apple/flower on a plant is treated as a false detection
+    return [boxes if len(boxes) >= min_count else [] for boxes in kept]
 
 
 def run_roi(
@@ -215,8 +221,25 @@ def run_roi(
     model: Model,
     pad_hw: Optional[Tuple[int, int]],
     score_threshold: float,
-) -> Tuple[int, List[List[float]]]:
+) -> Tuple[int, List[List[Any]]]:
     tensor = preprocess_frame(frame, roi_index, pad_hw)
     raw = model.predict(tensor)
-    boxes = postprocess_detections(raw, roi_index, pad_hw is not None, score_threshold)
+    boxes = postprocess_detections(raw, roi_index, pad_hw, score_threshold, model.meta.get("class_names", CLASS_NAMES))
     return roi_index, boxes
+
+
+if __name__ == "__main__":
+    a, f = [0, 0, 1, 1, "apples"], [0, 0, 1, 1, "flowers"]
+    assert filter_season([[a, a, f], [a]]) == [[a, a], []]  # single apple on plant 2 dropped
+    assert filter_season([[f, f], [a]]) == [[f, f], []]
+    assert filter_season([[a, a], [a, a, a]]) == [[a, a], [a, a, a]]
+    assert filter_season([[a], [f]]) == [[], []]  # tie: ambiguous
+    assert filter_season([[a], []]) == [[], []]  # single instance
+    assert filter_season([[], []]) == [[], []]
+    sx, sy = CONTENT_SIZE[0] / CROP_SIZE[0], CONTENT_SIZE[1] / CROP_SIZE[1]  # crop px -> model px
+    sized = postprocess_detections(
+        ([[0, 0, 500 * sx, 500 * sy], [0, 0, 50 * sx, 50 * sy], [0, 0, 50 * sx, 50 * sy],
+          [0, 0, 10 * sx, 10 * sy], [0, 0, 10 * sx, 10 * sy]], [1] * 5, [1, 0, 1, 0, 1]),
+        0, None, 0.5, ["apples", "flowers"])
+    assert [b[4] for b in sized] == ["apples", "flowers"]  # oversized flower + tiny apple/flower dropped
+    print("ok")

@@ -8,12 +8,10 @@ sparcs.components.camera.inference
 from __future__ import annotations
 
 import json
-import logging
 import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from time import sleep
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -25,27 +23,26 @@ from lories.connectors.models import Model
 from lories.core import Configurations, Constant, ResourceError
 
 from sparcs.components.camera.roi_pipeline import (
+    CLASS_NAMES,
     ROI_COLUMNS,
     TRANSFORM_MAX_SIZE,
     TRANSFORM_MIN_SIZE,
     WARP_QUADS,
     draw_on_frame,
+    filter_season,
     run_roi,
 )
 
-_logger = logging.getLogger(__name__)
-
-_TABLE_NAME = "apples_predictions"
+_TABLE_NAME = "predictions"
 
 
-class AppleInference(Component):
+class OrchardInference(Component):
     TYPE: str = "inference"
 
     ROI_COUNT: int = len(WARP_QUADS)
     ROIS = tuple(Constant(str, f"roi_{i + 1}", f"Plant ROI {i + 1} detections") for i in range(ROI_COUNT))
-    TOTAL = Constant(int, "total_count", "Total apple detections")
+    TOTAL = Constant(int, "total_count", "Total detections")
     PREVIEW = Constant(bytes, "preview", "Live annotated preview frame")
-    SYNC_TRIGGER = Constant(bool, "sync_trigger", "Scheduled prediction backfill trigger")
 
     _model: Optional[Model] = None
     _pad_hw: Optional[Tuple[int, int]] = None
@@ -55,9 +52,12 @@ class AppleInference(Component):
     _frame_queue: Optional[queue.Queue] = None
     _stop_event: Optional[threading.Event] = None
     _worker: Optional[threading.Thread] = None
+    _sync_total: Optional[int] = None
+    _sync_done: int = 0
 
     workers: int = 8
     score_threshold: float = 0.35
+    min_count: int = 2
 
     sync_predictions: bool = False
     sync_schedule: str = "1D"
@@ -79,15 +79,17 @@ class AppleInference(Component):
             self._logger.warning("inference.weights not set in camera.conf; inference disabled")
             return
 
-        self.workers = configs.get_int("workers", default=AppleInference.workers)
-        self.score_threshold = configs.get_float("score_threshold", default=AppleInference.score_threshold)
-        self.sync_predictions = configs.get_bool("sync_predictions", default=AppleInference.sync_predictions)
-        self.sync_schedule = configs.get("sync_schedule", default=AppleInference.sync_schedule)
-        self.sync_at = configs.get("sync_at", default=AppleInference.sync_at)
-        self.log_live_predictions = configs.get_bool("log_live_predictions",
-                                                     default=AppleInference.log_live_predictions)
+        self.workers = configs.get_int("workers", default=OrchardInference.workers)
+        self.score_threshold = configs.get_float("score_threshold", default=OrchardInference.score_threshold)
+        self.min_count = configs.get_int("min_count", default=OrchardInference.min_count)
+        self.sync_predictions = configs.get_bool("sync_predictions", default=OrchardInference.sync_predictions)
+        self.sync_schedule = configs.get("sync_schedule", default=OrchardInference.sync_schedule)
+        self.sync_at = configs.get("sync_at", default=OrchardInference.sync_at)
+        self.log_live_predictions = configs.get_bool(
+            "log_live_predictions", default=OrchardInference.log_live_predictions
+        )
         device = configs.get("device", default="auto")
-        num_classes = configs.get_int("num_classes", default=2)
+        num_classes = configs.get_int("num_classes", default=len(CLASS_NAMES))
         nms_iou_threshold = configs.get_float("nms_iou_threshold", default=0.5)
         model_builder = configs.get("model_builder", default="sparcs.components.camera.model_builder.build_fasterrcnn")
 
@@ -104,10 +106,10 @@ class AppleInference(Component):
                 },
             )
         except FileNotFoundError:
-            self._logger.warning("Fruit detection weights not found: %s; inference disabled", weights)
+            self._logger.warning("Apple/flower detection weights not found: %s; inference disabled", weights)
             return
         except Exception as exc:
-            self._logger.error("Failed to load fruit detection model: %s", exc, exc_info=True)
+            self._logger.error("Failed to load apple/flower detection model: %s", exc, exc_info=True)
             return
 
         self._pad_hw = tuple(self._model.meta["input_hw"]) if self._model.meta.get("input_hw") else None
@@ -116,31 +118,22 @@ class AppleInference(Component):
         logger_connector = logger_configs.get("connector", default="mariadb")
         logger_table = logger_configs.get("table", default=_TABLE_NAME)
 
-        for roi, column in zip(AppleInference.ROIS, ROI_COLUMNS):
+        for roi, column in zip(OrchardInference.ROIS, ROI_COLUMNS):
             self.data.add(
                 roi,
                 aggregate="last",
                 freq=None,
-                length=1024,
+                length=65535,
                 logger={"connector": logger_connector, "table": logger_table, "column": column},
             )
         self.data.add(
-            AppleInference.TOTAL,
+            OrchardInference.TOTAL,
             aggregate="last",
             freq=None,
             logger={"connector": logger_connector, "table": logger_table, "column": "total_count"},
         )
 
-        self.data.add(AppleInference.PREVIEW, aggregate="last", freq=None, stream=True)
-
-        if self.sync_predictions:
-            self.data.add(
-                AppleInference.SYNC_TRIGGER,
-                aggregate="last",
-                freq="1min" if self.sync_at else self.sync_schedule,
-                connector="dummy",
-                default=False,
-            )
+        self.data.add(OrchardInference.PREVIEW, aggregate="last", freq=None, stream=True)
 
     def activate(self) -> None:
         super().activate()
@@ -148,9 +141,9 @@ class AppleInference(Component):
         if self._model is None:
             return
 
-        self._db = self.data.get(AppleInference.TOTAL).logger._connector
+        self._db = self.data.get(OrchardInference.TOTAL).logger._connector
         if self._db is None:
-            self._logger.warning("No 'mariadb' connector available; fruit predictions will not be persisted")
+            self._logger.warning("No 'mariadb' connector available; apple/flower predictions will not be persisted")
 
         self._pool = ThreadPoolExecutor(max_workers=self.workers, thread_name_prefix=f"{self.id}-roi")
         self._frame_queue = queue.Queue()
@@ -161,13 +154,13 @@ class AppleInference(Component):
         camera = self.context
         if _Camera.FRAME not in camera.data:
             raise ResourceError(
-                f"AppleInference '{self.id}' requires camera-level 'frame = true' "
+                f"OrchardInference '{self.id}' requires camera-level 'frame = true' "
                 f"to enable the {_Camera.FRAME!s} channel"
             )
         camera.data.register(self._on_frame, _Camera.FRAME, how="any", unique=False)
 
-        if self.sync_predictions:
-            self.data.register(self._on_sync_trigger, AppleInference.SYNC_TRIGGER, how="any", unique=False)
+        if self.sync_predictions and self._db is not None:
+            threading.Thread(target=self._sync_loop, name=f"{self.id}-sync", daemon=True).start()
 
     def deactivate(self) -> None:
         if self._stop_event is not None:
@@ -186,6 +179,11 @@ class AppleInference(Component):
                 self._run_inference(timestamp, jpeg_bytes, publish_preview, persist)
             except Exception as exc:
                 self._logger.error("Inference pipeline error at %s: %s", timestamp, exc, exc_info=True)
+            finally:
+                self._frame_queue.task_done()
+            if not publish_preview:
+                self._sync_done += 1
+                self._logger.info(self._sync_progress())
 
     def _on_frame(self, data: pd.DataFrame) -> None:
         camera = self.context
@@ -198,75 +196,76 @@ class AppleInference(Component):
         timestamp = data.index[-1]
         self._frame_queue.put_nowait((timestamp, jpeg_bytes, True, self.log_live_predictions))
 
-    def _on_sync_trigger(self, data: pd.DataFrame) -> None:
-        if self.sync_at and pd.Timestamp.now(tz="UTC").strftime("%H:%M") != self.sync_at:
-            return
-        threading.Thread(target=self._run_sync_predictions, name=f"{self.id}-sync", daemon=True).start()
+    def _sync_loop(self) -> None:
+        # Own timer instead of a connector-read channel, so a failing read elsewhere cannot stall the sync
+        interval = 30 if self.sync_at else pd.Timedelta(self.sync_schedule).total_seconds()
+        while not self._stop_event.is_set():
+            if not self.sync_at or pd.Timestamp.now(tz="UTC").strftime("%H:%M") == self.sync_at:
+                try:
+                    self._sync_predictions()
+                except Exception as exc:
+                    self._logger.error("Scheduled prediction backfill error: %s", exc, exc_info=True)
+            self._stop_event.wait(interval)
 
-    def _run_sync_predictions(self) -> None:
-        try:
-            self._sync_predictions()
-        except Exception as exc:
-            self._logger.error("Scheduled prediction backfill error: %s", exc, exc_info=True)
+    def _sync_progress(self, width: int = 30) -> str:
+        done = self._sync_done
+        total = max(self._sync_total, done)
+        filled = width * done // total if total else width
+        return (
+            f"Syncing predictions [{'#' * filled}{'-' * (width - filled)}] "
+            f"{done}/{total} frames, {total - done} left"
+        )
 
     _BACKLOG_WINDOW: pd.Timedelta = pd.Timedelta(minutes=30)
     _BACKLOG_EPOCH: pd.Timestamp = pd.Timestamp("2020-01-01", tz="UTC")
 
+    def _count(self, channel, start: pd.Timestamp, end: pd.Timestamp) -> int:
+        return channel.logger._connector.count(channel.from_logger().to_list(), start=start, end=end)
+
+    def _unsynced_windows(self, lo: pd.Timestamp, hi: pd.Timestamp) -> Iterator[Tuple[pd.Timestamp, pd.Timestamp]]:
+        frame = self.context.data.frame
+        total = self.data.get(OrchardInference.TOTAL)
+        ranges = [(lo, hi)]
+        while ranges and not self._stop_event.is_set():
+            lo, hi = ranges.pop()
+            if self._count(frame, lo, hi) <= self._count(total, lo, hi):
+                continue
+            if hi - lo <= OrchardInference._BACKLOG_WINDOW:
+                yield lo, hi
+                continue
+            mid = (lo + (hi - lo) / 2).floor("s")
+            ranges.append((mid, hi))
+            ranges.append((lo, mid - pd.Timedelta(microseconds=1)))
+
     def _sync_predictions(self) -> None:
+        if not self._frame_queue.empty():
+            self._logger.debug("Previous prediction batch still processing; deferring sync pass")
+            return
+
         camera = self.context
         frame_channels = camera.data.frame.to_list()
+        lo = OrchardInference._BACKLOG_EPOCH
         now = pd.Timestamp.now(tz="UTC")
 
-        while True:
-            if not self._frame_queue.empty():
-                self._logger.debug("Previous prediction batch still processing; deferring sync pass")
-                return
+        self._sync_done = 0
+        self._sync_total = max(
+            0, self._count(camera.data.frame, lo, now) - self._count(self.data.get(OrchardInference.TOTAL), lo, now)
+        )
+        if self._sync_total == 0:
+            return
+        self._logger.info("Prediction sync started: ~%d frames without predictions", self._sync_total)
 
-            start = self._latest_timestamp(self.data.read_logged(channels=[AppleInference.TOTAL]))
-            lo = start + pd.Timedelta(milliseconds=1) if start is not None else AppleInference._BACKLOG_EPOCH
-            window_start = self._find_earliest_frame(camera, frame_channels, lo, now)
-            if window_start is None:
-                return
-
-            frames = camera.data.read_logged(
-                channels=frame_channels,
-                start=window_start,
-                end=window_start + AppleInference._BACKLOG_WINDOW,
-            )
-            if start is not None:
-                frames = frames[frames.index > start]
-            if frames.empty:
-                return
-
+        for start, end in self._unsynced_windows(lo, now):
+            frames = camera.data.read_logged(channels=frame_channels, start=start, end=end)
+            predicted = self.data.read_logged(channels=[OrchardInference.TOTAL], start=start, end=end).index
+            frames = frames[~frames.index.isin(predicted)]
             for timestamp, jpeg_bytes in frames.iloc[:, 0].items():
                 if jpeg_bytes is not None:
                     self._frame_queue.put_nowait((timestamp, jpeg_bytes, False, True))
+            self._frame_queue.join()
 
-            while not self._frame_queue.empty():
-                sleep(1)
-
-    @staticmethod
-    def _find_earliest_frame(
-            camera: _Camera,
-            channels: List[str],
-            lo: pd.Timestamp,
-            hi: pd.Timestamp,
-    ) -> Optional[pd.Timestamp]:
-        if lo >= hi or not camera.data.has_logged(channels=channels, start=lo, end=hi):
-            return None
-        while hi - lo > AppleInference._BACKLOG_WINDOW:
-            mid = lo + (hi - lo) / 2
-            if camera.data.has_logged(channels=channels, start=lo, end=mid):
-                hi = mid
-            else:
-                lo = mid
-        return lo
-
-    @staticmethod
-    def _latest_timestamp(data: pd.DataFrame) -> Optional[pd.Timestamp]:
-        if data.empty:
-            return None
-        return data.index.max()
+        if self._sync_done > 0:
+            self._logger.info("Prediction sync complete: %d frames", self._sync_done)
 
     def _run_inference(
             self,
@@ -281,10 +280,10 @@ class AppleInference(Component):
             self._logger.warning("Could not decode frame at %s", timestamp)
             return
 
-        roi_boxes: List[List[List[float]]] = [[] for _ in range(AppleInference.ROI_COUNT)]
+        roi_boxes: List[List[List[float]]] = [[] for _ in range(OrchardInference.ROI_COUNT)]
         futures = {
             self._pool.submit(run_roi, i, frame, self._model, self._pad_hw, self.score_threshold): i
-            for i in range(AppleInference.ROI_COUNT)
+            for i in range(OrchardInference.ROI_COUNT)
         }
         for future in as_completed(futures):
             roi_idx = futures[future]
@@ -294,12 +293,16 @@ class AppleInference(Component):
             except Exception as exc:
                 self._logger.error("ROI %d inference error: %s", roi_idx, exc, exc_info=True)
 
+        roi_boxes = filter_season(roi_boxes, self.min_count)
         total = sum(len(b) for b in roi_boxes)
-        self._logger.info(
-            "fruit inference ts=%s detections_per_roi=%s total=%d",
+        season = next((b[0][4] for b in roi_boxes if b), "none")
+        self._logger.debug(
+            "Orchard inference ts=%s class=%s apples=%d flowers=%d per_roi=%s",
             timestamp,
+            season,
+            total if season == "apples" else 0,
+            total if season == "flowers" else 0,
             [len(b) for b in roi_boxes],
-            total,
         )
 
         if publish_preview:
@@ -317,7 +320,7 @@ class AppleInference(Component):
         annotated = draw_on_frame(frame, roi_boxes, total, target_size=self._stream_target_size())
         ok, buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
         if ok:
-            self.data.get(AppleInference.PREVIEW).set(timestamp, buf.tobytes())
+            self.data.get(OrchardInference.PREVIEW).set(timestamp, buf.tobytes())
 
     def _stream_target_size(self) -> Optional[Tuple[int, int]]:
         camera = self.context
@@ -342,27 +345,27 @@ class AppleInference(Component):
         if self._db is None:
             return
         row: Dict[str, Any] = {
-            self.data.get(roi).id: json.dumps(boxes) for roi, boxes in zip(AppleInference.ROIS, roi_boxes)
+            self.data.get(roi).id: json.dumps(boxes) for roi, boxes in zip(OrchardInference.ROIS, roi_boxes)
         }
-        row[self.data.get(AppleInference.TOTAL).id] = total
+        row[self.data.get(OrchardInference.TOTAL).id] = total
         data = pd.DataFrame([row], index=[timestamp])
         self._db.write(data)
 
 
 # noinspection SpellCheckingInspection
 @register_component_type("camera", replace=True)
-class CameraWithInference(Camera):
-    inference: Optional[AppleInference] = None
+class OrchardCamera(Camera):
+    inference: Optional[OrchardInference] = None
 
     def configure(self, configs: Configurations) -> None:
         frame_configs = configs.get_member("data").get_member("channels").get_member(_Camera.FRAME, ensure_exists=True)
-        inference_enabled = frame_configs.has_member(AppleInference.TYPE, includes=True)
-        inference_configs = frame_configs.get_member(AppleInference.TYPE) if inference_enabled else None
+        inference_enabled = frame_configs.has_member(OrchardInference.TYPE, includes=True)
+        inference_configs = frame_configs.get_member(OrchardInference.TYPE) if inference_enabled else None
 
         super().configure(configs)
 
         if inference_enabled:
-            self.inference = AppleInference(
+            self.inference = OrchardInference(
                 self,
                 name=f"{self.name} Inference",
                 configs=inference_configs,

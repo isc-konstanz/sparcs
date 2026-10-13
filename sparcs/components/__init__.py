@@ -28,4 +28,4 @@ from .agriculture import (  # noqa: F401
     Irrigation,
 )
 
-from .camera import CameraWithInference  # noqa: F401
+from .camera import OrchardCamera, OrchardInference  # noqa: F401
