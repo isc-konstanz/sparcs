@@ -313,6 +313,7 @@ class ChannelInputs:
     def __init__(self, field: "FieldSimulation") -> None:
         self.field = field
         self._last_invalid_weather_columns: list[str] = []
+        self._last_no_minutes_reason: Optional[str] = None
 
     def load_state(self) -> Optional[SoilState]:
         soil = self.field.soil_simulation
@@ -335,12 +336,36 @@ class ChannelInputs:
         field = self.field
         start = pd.Timestamp(start)
         end = pd.Timestamp(end)
-        frame = field.data.read(field._weather_channels, start=start - MAX_PERIOD, end=end.ceil(MAX_PERIOD))
+        raw = field.data.read(field._weather_channels, start=start - MAX_PERIOD, end=end.ceil(MAX_PERIOD))
         cover = [k for k in field._required_weather_keys if k not in _OPTIONAL_WEATHER_KEYS]
-        frame = to_minute_grid(frame, start, end, cover)
+        frame = to_minute_grid(raw, start, end, cover)
+        if frame.empty:
+            self._warn_no_minutes(raw, start, cover)
+        else:
+            self._last_no_minutes_reason = None
         if not self._weather_frame_valid(frame):
             return frame.iloc[0:0]
         return frame
+
+    def _warn_no_minutes(self, raw: pd.DataFrame, start: pd.Timestamp, cover: Sequence[str]) -> None:
+        """Name the required column whose last record ends the span before its first minute."""
+        ends = {k: raw[k].last_valid_index() for k in cover if k in raw.columns and raw[k].notna().any()}
+        if ends:
+            key = min(ends, key=ends.get)
+            reason = f"'{key}' ends at {ends[key]}"
+        else:
+            reason = "the read returned no data"
+        if reason != self._last_no_minutes_reason:
+            span = f"{raw.index.min()}..{raw.index.max()}" if len(raw) else "-"
+            logger.warning(
+                "%s: no weather minutes after %s, %s (read %d rows, %s)",
+                self.field.name,
+                start,
+                reason,
+                len(raw),
+                span,
+            )
+        self._last_no_minutes_reason = reason
 
     def _weather_frame_valid(self, frame: pd.DataFrame) -> bool:
         if frame.empty:

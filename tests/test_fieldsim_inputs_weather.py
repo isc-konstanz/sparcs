@@ -90,6 +90,37 @@ def test_invalid_chunk_names_the_missing_column_at_warning_once(caplog):
     assert inputs._last_invalid_weather_columns == ["temp_air"]
 
 
+def test_a_span_without_minutes_names_the_column_that_ends_first_at_warning_once(caplog):
+    index = pd.date_range("2026-10-15 21:00", "2026-10-15 23:00", freq="1min", tz="UTC")
+    frame = pd.DataFrame({"temp_air": 10.0, "ghi": 0.0}, index=index)
+    frame.loc[frame.index > pd.Timestamp("2026-10-15 22:00Z"), "ghi"] = float("nan")
+    inputs = _inputs(_RecordingData(frame), required=("temp_air", "ghi"))
+    start = dt.datetime(2026, 10, 15, 22, tzinfo=dt.timezone.utc)
+    end = dt.datetime(2026, 10, 15, 23, tzinfo=dt.timezone.utc)
+
+    with caplog.at_level(logging.WARNING, logger=COMPONENTS_LOGGER):
+        assert inputs.weather(start, end).empty
+        assert inputs.weather(start, end).empty
+
+    warnings = [r.getMessage() for r in caplog.records if r.name == COMPONENTS_LOGGER]
+    assert len(warnings) == 1
+    assert "'ghi' ends at 2026-10-15 22:00:00+00:00" in warnings[0]
+    assert "read 121 rows, 2026-10-15 21:00:00+00:00..2026-10-15 23:00:00+00:00" in warnings[0]
+
+
+def test_a_span_with_an_empty_read_says_the_read_returned_no_data(caplog):
+    inputs = _inputs(_RecordingData(), required=("temp_air", "ghi"))
+    start = dt.datetime(2026, 10, 15, 22, tzinfo=dt.timezone.utc)
+    end = dt.datetime(2026, 10, 15, 23, tzinfo=dt.timezone.utc)
+
+    with caplog.at_level(logging.WARNING, logger=COMPONENTS_LOGGER):
+        assert inputs.weather(start, end).empty
+
+    warnings = [r.getMessage() for r in caplog.records if r.name == COMPONENTS_LOGGER]
+    assert len(warnings) == 1
+    assert "the read returned no data (read 0 rows, -)" in warnings[0]
+
+
 def test_hourly_rain_over_station_minutes_lands_on_whole_minutes_up_to_the_last_rain_hour():
     station = pd.date_range("2026-07-12 08:00:30", "2026-07-12 09:20:30", freq="1min", tz="UTC")
     rain = pd.Series({pd.Timestamp("2026-07-12 08:00Z"): 0.0, pd.Timestamp("2026-07-12 09:00Z"): 1.2})
