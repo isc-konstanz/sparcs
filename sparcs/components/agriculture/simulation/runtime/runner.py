@@ -59,9 +59,7 @@ class FieldRunner:
             self._resume_persisted()
         self._apply_pending()
 
-        frontier = self.simulation.state.at if self.simulation.state is not None else None
-        if frontier is not None and frontier.tzinfo is not None:
-            frontier = pd.Timestamp(frontier).tz_convert(cutoff.tzinfo)
+        frontier = self._frontier(cutoff)
         start = frontier if frontier is not None else cutoff - self.setup.field.interval_td
         if start >= cutoff:
             return False
@@ -69,6 +67,9 @@ class FieldRunner:
         extra = {"weather_stall": float(self.weather_stall_ticks), "tick_failures": float(self.tick_failures)}
         processed = False
         for chunk_start, chunk_end in self._day_chunks(start, cutoff):
+            frontier = self._frontier(cutoff)
+            if frontier is not None:
+                chunk_start = frontier
             weather = self.inputs.weather(chunk_start, chunk_end)
             if not weather.empty:
                 irrigation = self._align_flow(self.inputs.irrigation(chunk_start, chunk_end), weather.index)
@@ -97,6 +98,15 @@ class FieldRunner:
         if self.setup.planner is not None:
             self._plan(now)
         return processed
+
+    def _frontier(self, cutoff: dt.datetime) -> Optional[pd.Timestamp]:
+        """The instant the simulation has advanced to, in the cutoff's zone; None before the cold start."""
+        if self.simulation.state is None:
+            return None
+        frontier = pd.Timestamp(self.simulation.state.at)
+        if frontier.tzinfo is not None:
+            frontier = frontier.tz_convert(cutoff.tzinfo)
+        return frontier
 
     def _resume_persisted(self) -> None:
         try:

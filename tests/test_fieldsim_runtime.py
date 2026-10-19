@@ -18,9 +18,11 @@ import pytest
 import numpy as np
 import pandas as pd
 import pytz
+from lories.components.weather import Weather
+from sparcs.components.agriculture.simulation.components import ChannelInputs
 from sparcs.components.agriculture.simulation.core.chain import WeatherChain
 from sparcs.components.agriculture.simulation.core.config import FieldConfig, FieldSetup, PlannerConfig, SoilConfig
-from sparcs.components.agriculture.simulation.core.evapotranspiration import SegmentProperties
+from sparcs.components.agriculture.simulation.core.evapotranspiration import ETModel, SegmentProperties
 from sparcs.components.agriculture.simulation.core.simulation import Simulation
 from sparcs.components.agriculture.simulation.core.state import (
     Forcing,
@@ -632,3 +634,84 @@ def test_an_empty_chunk_inside_the_span_does_not_stop_the_tick():
     assert not any(
         dt.datetime(2026, 9, 19, 0, tzinfo=UTC) < s.state.at < dt.datetime(2026, 9, 20, 6, tzinfo=UTC) for s in rec.rows
     )
+
+
+# --------------------------------------------------------------------------- station gaps through the real inputs
+
+
+class _RangedData:
+    """``Component.data`` stand-in whose ``read`` honours the requested range, like the connector."""
+
+    def __init__(self, frame: pd.DataFrame) -> None:
+        self.frame = frame
+
+    def read(self, channels, start=None, end=None, unique=False):
+        return self.frame.loc[(self.frame.index >= start) & (self.frame.index <= end)].copy()
+
+
+def _station(start: dt.datetime, end: dt.datetime, gap: tuple[dt.datetime, dt.datetime]) -> pd.DataFrame:
+    index = pd.date_range(start, end, freq="1min")
+    index = index[(index <= gap[0]) | (index >= gap[1])]
+    return pd.DataFrame(
+        {
+            Weather.TEMP_AIR: 8.0 + 0.001 * np.arange(len(index)),
+            Weather.HUMIDITY_REL: 85.0,
+            Weather.GHI: 0.0,
+            Weather.WIND_SPEED: 1.5,
+            Weather.CLEAR_SKY_INDEX: 0.5,
+        },
+        index=index,
+    )
+
+
+def _gap_runner(station: pd.DataFrame, frontier: dt.datetime) -> tuple[FieldRunner, Recorder]:
+    setup = _setup(planner=False, intake_delay="30min")
+    field = SimpleNamespace(
+        name="fieldsim_test",
+        data=_RangedData(station),
+        setup=SimpleNamespace(soil=SoilConfig.from_dict({"mesh": {}})),
+        _weather_channels=object(),
+        _required_weather_keys=ETModel.REQUIRED_WEATHER_COLUMNS,
+        _irrigation_flow_channel=None,
+        _irrigation_state_channel=None,
+        soil_simulation=None,
+    )
+    sim = Simulation(
+        setup,
+        _Engine(),
+        _Chain(setup, _Shading(), ETModel()),
+        _NoAssimilation(),
+        _Planner(),
+        probes=[_Probe("soil_30cm")],
+    )
+    sim.resume(_state_at(frontier))
+    rec = Recorder()
+    return FieldRunner(setup, sim, ChannelInputs(field), rec), rec
+
+
+def test_a_tick_after_a_station_gap_longer_than_an_hour_resumes_inside_the_gap():
+    frontier = dt.datetime(2026, 10, 19, 20, tzinfo=UTC)
+    gap = (frontier, dt.datetime(2026, 10, 19, 22, 30, tzinfo=UTC))
+    station = _station(dt.datetime(2026, 10, 19, 18, tzinfo=UTC), dt.datetime(2026, 10, 19, 23, 50, tzinfo=UTC), gap)
+    runner, _ = _gap_runner(station, frontier)
+
+    assert runner.run_tick(dt.datetime(2026, 10, 19, 22, 50, tzinfo=UTC)) is True
+    assert runner.simulation.state.at == dt.datetime(2026, 10, 19, 22, 20, tzinfo=UTC)
+
+    assert runner.run_tick(dt.datetime(2026, 10, 19, 23, 50, tzinfo=UTC)) is True
+    assert runner.simulation.state.at == dt.datetime(2026, 10, 19, 23, 20, tzinfo=UTC)
+
+
+def test_a_chunk_after_midnight_continues_from_the_frontier_when_a_gap_stopped_the_evening_chunk():
+    frontier = dt.datetime(2026, 10, 18, 22, tzinfo=UTC)
+    gap = (dt.datetime(2026, 10, 18, 22, 30, tzinfo=UTC), dt.datetime(2026, 10, 19, 0, 30, tzinfo=UTC))
+    station = _station(dt.datetime(2026, 10, 18, 20, tzinfo=UTC), dt.datetime(2026, 10, 19, 5, tzinfo=UTC), gap)
+    runner, rec = _gap_runner(station, frontier)
+
+    assert runner.run_tick(dt.datetime(2026, 10, 19, 4, 50, tzinfo=UTC)) is True
+
+    assert runner.simulation.state.at == dt.datetime(2026, 10, 19, 4, 20, tzinfo=UTC)
+    times = [s.state.at for s in rec.rows]
+    assert len(times) == 380
+    assert times[0] == dt.datetime(2026, 10, 18, 22, 1, tzinfo=UTC)
+    assert all(b - a == dt.timedelta(minutes=1) for a, b in zip(times, times[1:]))

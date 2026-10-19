@@ -4,7 +4,8 @@ tests.test_fieldsim_minute_grid
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The live tick's weather on whole minutes: values for the period before their timestamp held over it (hourly
-rates for at most that hour), point values interpolated, and nothing past the last record of a covering column.
+rates for at most that hour), point values interpolated and held at their first record over the minutes before it,
+and nothing past the last record of a covering column.
 """
 
 import pytest
@@ -37,6 +38,17 @@ def test_period_values_are_held_over_the_hour_and_point_values_interpolated():
 
     assert grid["ghi"].tolist() == [400.0] * 60
     assert grid["temp_air"].tolist() == pytest.approx([10.0 + 0.1 * minute for minute in range(1, 61)])
+
+
+def test_point_values_hold_their_first_record_over_the_minutes_before_it():
+    frame = _frame(temp_air={"08:30": 12.0, "09:00": 15.0})
+
+    grid = to_minute_grid(frame, _t("08:00"), _t("09:00"), cover=("temp_air",))
+
+    assert len(grid) == 60
+    assert not grid["temp_air"].isna().any()
+    assert grid["temp_air"][: _t("08:30")].tolist() == [12.0] * 30
+    assert grid["temp_air"].iloc[-1] == 15.0
 
 
 def test_grid_ends_at_the_last_record_of_a_covering_column():

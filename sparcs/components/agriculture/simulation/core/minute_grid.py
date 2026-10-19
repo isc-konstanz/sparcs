@@ -33,7 +33,8 @@ def to_minute_grid(
     cover: Collection[str],
 ) -> pd.DataFrame:
     """The weather in ``frame`` on the whole minutes in ``(start, end]``, ending earlier at the last record of any
-    ``cover`` column that has data, so no minute is left that a later record still has to fill."""
+    ``cover`` column that has data, so no minute is left that a later record still has to fill. Point values hold
+    their first record over the minutes before it."""
     frame = frame.sort_index()
     start = pd.Timestamp(start)
     end = pd.Timestamp(end)
@@ -51,7 +52,7 @@ def _to_grid(key: str, values: pd.Series, grid: pd.DatetimeIndex) -> pd.Series:
     joined = values.reindex(values.index.union(grid))
     if key in PERIOD_VALUES or not pd.api.types.is_numeric_dtype(values):
         return joined.bfill().reindex(grid)
-    return joined.interpolate(method="time").reindex(grid)
+    return joined.interpolate(method="time", limit_direction="both").reindex(grid)
 
 
 def _hold_within(values: pd.Series, grid: pd.DatetimeIndex, period: pd.Timedelta) -> pd.Series:
